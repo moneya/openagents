@@ -1,0 +1,79 @@
+# OpenAgents Invariants
+
+This is the root invariant ledger for the rebuilt `openagents` Bun workspace.
+More specific invariant ledgers apply inside imported apps and packages.
+
+## Preserved Transcript Archive
+
+- `docs/transcripts/` is retained historical material and must not be deleted,
+  renamed, rewritten, or used as runtime private data.
+- New refactor docs belong in `docs/refactor/`; do not mix migration planning
+  into the transcript archive.
+
+## Effect Workspace Boundary
+
+- New production TypeScript code in this repo must use Bun and Effect.
+- External boundaries must be modeled with typed data structures or Effect
+  Schema. Do not add ad hoc keyword routing for user intent, CRM/database
+  query routing, retrieval routing, or tool selection.
+- Shared runtime contracts belong in `packages/*`. App-specific UI, Worker,
+  CLI, or deployment composition belongs in `apps/*`.
+- The `openagents.com` deploy topology guard must keep the main product,
+  Worker, shared packages, and Foldkit runtime on the tracked Effect v4 line.
+  A separate isolated app may carry an older third-party Effect dependency only
+  when the guard names that exact package chain, documents the exception, and
+  prevents it from becoming OpenAgents.com runtime, settlement, payout, Forum,
+  Pylon assignment, or product-promise authority. The current isolated
+  exception is `apps/nostr-relay` through `nostr-effect@0.0.12` only.
+
+## Product Surface Ownership
+
+- `apps/openagents.com/` owns the `openagents.com` product surface and retains
+  its local invariant ledger.
+- `apps/forum/` owns forum-specific code and must mount under `/forum` when it
+  is served by `openagents.com`.
+- `apps/pylon/` owns contributor-node UX, CLI, local runtime orchestration, and
+  contributor-facing payment evidence.
+- `packages/probe/` owns Probe runtime code and evidence submission helpers.
+
+## Authority Boundaries
+
+- Public UI does not own settlement, payout, runtime promotion, or accepted
+  outcome authority.
+- Probe evidence does not authorize deployment, spend, provider mutation, or
+  public claim promotion without a separate approved authority path.
+- Pylon payment, assignment, and earning claims must remain receipt-backed and
+  explicit about unsettled, rejected, unpaid, credited, and settled states.
+- Secrets, wallet material, raw prompts, private repo content, provider
+  payloads, and private customer data must not be committed or written into
+  docs, tests, fixtures, logs, or public projections.
+
+## Product Promise Claims
+
+- User-facing and agent-facing product claims belong in the product-promises
+  system under `docs/promises/` before copy broadens beyond implementation
+  notes.
+- A product promise is green only when its evidence refs, authority boundary,
+  projection safety, freshness, and copy gate are all satisfied for the exact
+  claim being made.
+- Planned, partial, stale, blocked, manually gated, or canary-only behavior
+  must stay red, yellow, degraded, or explicitly scoped in public and
+  agent-readable copy.
+- Product promise mismatch reports from users and agents are Forum-first. The
+  default public intake is the Product Promises Forum at
+  `https://openagents.com/forum/f/product-promises`.
+- GitHub issues may be opened only for concrete, reproducible bugs that
+  satisfy the strict bug report template. Blank issues are disabled, and
+  malformed, broad, or loose reports should be rejected by the issue form or
+  moved back to the Forum rather than becoming normal product-promise intake.
+- This initial promise system is documentation-backed. Runtime enforcement must
+  be added before treating the registry as an automated product gate; until
+  then, `docs/promises/checks-and-gates.md` is the model-boundary record.
+
+## Commit Metadata Privacy
+
+- Commit messages, commit trailers, and other committed metadata must not
+  include individual people’s names unless the user explicitly requests a
+  legally or historically required attribution.
+- Prefer neutral product, team, source, operator, reporter, maintainer, or role
+  wording in commits and committed process records.
