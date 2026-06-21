@@ -1,6 +1,10 @@
 import { Effect } from 'effect'
 import { describe, expect, test } from 'vitest'
 
+import {
+  artanisAdminCloseoutReceiptRef,
+  type ArtanisAdminCloseoutReceiptRecord,
+} from './artanis-admin-closeout-receipts'
 import { exampleNexusPylonVisibilityFixture } from './nexus-pylon-visibility'
 import { makeNexusPylonVisibilityRoutes } from './nexus-pylon-visibility-routes'
 import type {
@@ -27,6 +31,9 @@ const bridgeAssignmentRef = 'assignment.public.artanis_pylon_launch_20260607'
 const acceptedAssignmentRef =
   'assignment.public.artanis_pylon_accepted_work_20260607'
 const acceptedPylonRef = 'pylon.public.artanis_accepted_work'
+const artanisAdminAssignmentRef = 'assignment.artanis_admin.20260611011429'
+const artanisAdminTraceDigest =
+  'f2995c4e3c959b42bb1e4afbefffbcf7ba6104099621ccc0ac912862dc932a5b'
 
 const executionContext = {
   passThroughOnException: () => undefined,
@@ -237,6 +244,10 @@ const acceptedRegistration: PylonApiRegistrationRecord = {
   ownerAgentCredentialId: 'credential_agent_accepted_work',
   ownerAgentTokenPrefix: 'oa_agent_test',
   ownerAgentUserId: 'user_agent_accepted_work_test',
+  providerMarketRelayRefs: [],
+  providerNip90LaneRefs: [],
+  providerNostrNpub: null,
+  providerNostrPubkey: null,
   publicProjectionJson: '{}',
   pylonRef: acceptedPylonRef,
   resourceMode: 'overnight_full',
@@ -299,6 +310,34 @@ const acceptedEvents: ReadonlyArray<PylonApiEventRecord> = [
     status: 'ready',
   }),
 ]
+
+const artanisAdminCloseoutReceipt: ArtanisAdminCloseoutReceiptRecord = {
+  acceptedWorkRefs: [
+    'accepted_work.tassadar_poc.trace_digest.f2995c4e3c959b42',
+  ],
+  artifactRefs: [
+    `artifact.tassadar_poc.trace_digest.${artanisAdminTraceDigest}`,
+  ],
+  assignmentCreatedAt: '2026-06-11T01:14:29.000Z',
+  assignmentRef: artanisAdminAssignmentRef,
+  assignmentState: 'accepted_work',
+  assignmentUpdatedAt: '2026-06-11T01:22:12.000Z',
+  claimedTraceDigest: artanisAdminTraceDigest,
+  claimedTraceDigestPrefix: artanisAdminTraceDigest.slice(0, 16),
+  closeoutRefs: [
+    'closeout.tassadar_poc.trace_digest.f2995c4e3c959b42',
+  ],
+  decisionCreatedAt: '2026-06-11T01:14:29.000Z',
+  decisionId: 'artanis_admin_tick_decision_test',
+  decisionState: 'dispatched',
+  jobKind: 'tassadar_poc_trace',
+  proofRefs: ['proof.tassadar_poc.trace_digest.f2995c4e3c959b42'],
+  pylonRef: 'pylon.public.tassadar_executor',
+  verdictAcceptState: 'accepted',
+  verdictCreatedAt: '2026-06-11T01:26:12.000Z',
+  verdictOutcome: 'verified',
+  verdictRef: 'verdict.artanis_closeout.verified',
+}
 
 const makeMemoryLedgerStore = () => {
   const attempts = new Map<string, NexusTreasuryPayoutAttemptRecord>([
@@ -466,11 +505,14 @@ const route = (
     acceptedEvents?: ReadonlyArray<PylonApiEventRecord> | undefined
     acceptedRegistration?: PylonApiRegistrationRecord | undefined
     adminToken?: boolean
+    artanisCloseoutReceipt?: ArtanisAdminCloseoutReceiptRecord | undefined
     browserEmail?: string | undefined
     bridgeEvents?: ReadonlyArray<PylonApiEventRecord>
     dispatchCalls?: { count: number } | undefined
     persisted?: boolean
     paymentMode?: AcceptedPayoutMode | undefined
+    resolvedPrivateDestination?: { value?: string | undefined } | undefined
+    tipRecipientLightningAddress?: string | undefined
   }> = {},
 ) => {
   const ledgerStore =
@@ -484,6 +526,23 @@ const route = (
     appendRefreshedSessionCookies: response => response,
     currentIsoTimestamp: () => nowIso,
     isOpenAgentsAdminEmail: email => email === 'chris@openagents.com',
+    ...(options.artanisCloseoutReceipt === undefined
+      ? {}
+      : {
+          makeArtanisAdminCloseoutReceiptStore: () => ({
+            readCloseoutReceiptByRef: async receiptRef => {
+              const canonicalReceiptRef = artanisAdminCloseoutReceiptRef(
+                options.artanisCloseoutReceipt!.assignmentRef,
+              )
+
+              return receiptRef ===
+                options.artanisCloseoutReceipt!.assignmentRef ||
+                receiptRef === canonicalReceiptRef
+                ? options.artanisCloseoutReceipt
+                : undefined
+            },
+          }),
+        }),
     ...(ledgerStore !== undefined
       ? {
           makeLedgerStore: () => ledgerStore,
@@ -492,8 +551,13 @@ const route = (
     ...(options.acceptedAssignment === undefined
       ? {}
       : {
-          makePaymentAuthority: (_env, context) =>
-            makeTreasuryPaymentAuthority({
+          makePaymentAuthority: (_env, context) => {
+            if (options.resolvedPrivateDestination !== undefined) {
+              options.resolvedPrivateDestination.value =
+                context.privatePayoutDestination
+            }
+
+            return makeTreasuryPaymentAuthority({
               adapters: [
                 makeTestHostedMdkAdapter(
                   options.paymentMode ?? 'success',
@@ -505,7 +569,8 @@ const route = (
                 authorityPaused: options.paymentMode === 'paused',
                 pausedAdapters: [],
               },
-            }),
+            })
+          },
         }),
     ...(options.bridgeEvents === undefined &&
     options.acceptedEvents === undefined
@@ -536,6 +601,23 @@ const route = (
                 : undefined,
           }),
         }),
+    ...(options.tipRecipientLightningAddress === undefined
+      ? {}
+      : {
+          makeTipRecipientReadinessReader: () => ({
+            readForActor: actorRef =>
+              Effect.succeed({
+                actorRef,
+                directPayment: {
+                  bolt12Offer: 'lno1public_test_offer',
+                  kind: 'bolt12_offer',
+                  lightningAddress: options.tipRecipientLightningAddress,
+                  settlementAuthority: 'recipient_wallet_direct',
+                },
+                state: 'ready',
+              }),
+          }),
+        }),
     requireAdminApiToken: request =>
       Promise.resolve(
         options.adminToken === true &&
@@ -562,11 +644,14 @@ const runRoute = async (
     acceptedEvents?: ReadonlyArray<PylonApiEventRecord> | undefined
     acceptedRegistration?: PylonApiRegistrationRecord | undefined
     adminToken?: boolean
+    artanisCloseoutReceipt?: ArtanisAdminCloseoutReceiptRecord | undefined
     browserEmail?: string | undefined
     bridgeEvents?: ReadonlyArray<PylonApiEventRecord>
     dispatchCalls?: { count: number } | undefined
     persisted?: boolean
     paymentMode?: AcceptedPayoutMode | undefined
+    resolvedPrivateDestination?: { value?: string | undefined } | undefined
+    tipRecipientLightningAddress?: string | undefined
   }> = {},
 ): Promise<Response> => {
   const matched = route(options)(request, {}, executionContext)
@@ -677,6 +762,86 @@ describe('Nexus/Pylon visibility routes', () => {
     expect(serialized).not.toMatch(
       /operatorRefs|redactedDestinationRef|redactedPaymentRef/,
     )
+    expect(serialized).not.toMatch(
+      /lnbc|lntb|mnemonic|preimage|secret|wallet_(config|key|material|mnemonic|secret|seed|state)/i,
+    )
+    expect(serialized).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
+  })
+
+  test('serves Artanis admin closeout receipts by assignment ref', async () => {
+    const canonicalReceiptRef = artanisAdminCloseoutReceiptRef(
+      artanisAdminAssignmentRef,
+    )
+    const response = await runRoute(
+      new Request(
+        `https://openagents.com/api/public/nexus-pylon/receipts/${encodeURIComponent(
+          artanisAdminAssignmentRef,
+        )}`,
+      ),
+      { artanisCloseoutReceipt: artanisAdminCloseoutReceipt },
+    )
+    const canonicalResponse = await runRoute(
+      new Request(
+        `https://openagents.com/api/public/nexus-pylon/receipts/${encodeURIComponent(
+          canonicalReceiptRef,
+        )}`,
+      ),
+      { artanisCloseoutReceipt: artanisAdminCloseoutReceipt },
+    )
+    const body = (await response.json()) as Record<string, any>
+    const canonicalBody = (await canonicalResponse.json()) as Record<
+      string,
+      any
+    >
+    const serialized = JSON.stringify(body)
+
+    expect(response.status).toBe(200)
+    expect(canonicalResponse.status).toBe(200)
+    expect(body).toMatchObject({
+      assignmentRef: artanisAdminAssignmentRef,
+      audience: 'public',
+      movementMode: 'simulation',
+      payoutAttemptRef: null,
+      payoutIntentRef: null,
+      realBitcoinMoved: false,
+      receiptKind: 'artanis_admin_assignment_closeout',
+      receiptRef: canonicalReceiptRef,
+      schemaVersion: 'openagents.nexus_pylon.public_receipt.v1',
+      settlement: {
+        state: 'accepted_work_verified',
+        stateLabel: 'Accepted work verified',
+      },
+      status: 'accepted_work_verified',
+    })
+    expect(canonicalBody.receiptRef).toBe(canonicalReceiptRef)
+    expect(body.payoutMovement).toMatchObject({
+      dispatchAccepted: true,
+      terminalResultObserved: true,
+      terminalSettlementClaimAllowed: false,
+    })
+    expect(body.publicProjection).toMatchObject({
+      acceptedWorkObserved: true,
+      assignmentRef: artanisAdminAssignmentRef,
+      assignmentState: 'accepted_work',
+      claimedTraceDigest: artanisAdminTraceDigest,
+      claimedTraceDigestPrefix: artanisAdminTraceDigest.slice(0, 16),
+      closeoutSubmittedObserved: true,
+      expectationRef: `expectation.tassadar_poc.trace_digest.${artanisAdminTraceDigest.slice(
+        0,
+        16,
+      )}`,
+      verdictAcceptState: 'accepted',
+      verdictOutcome: 'verified',
+      verdictRef: 'verdict.artanis_closeout.verified',
+    })
+    expect(body.publicProjection.evidenceRefs).toEqual(
+      expect.arrayContaining([
+        artanisAdminAssignmentRef,
+        `route:/api/public/nexus-pylon/receipts/${artanisAdminAssignmentRef}`,
+        'verdict.artanis_closeout.verified',
+      ]),
+    )
+    expect(body.apiUrl).toContain(encodeURIComponent(canonicalReceiptRef))
     expect(serialized).not.toMatch(
       /lnbc|lntb|mnemonic|preimage|secret|wallet_(config|key|material|mnemonic|secret|seed|state)/i,
     )
@@ -856,6 +1021,61 @@ describe('Nexus/Pylon visibility routes', () => {
       /lnbc|lntb|mnemonic|preimage|secret|wallet_(config|key|material|mnemonic|secret|seed|state)/i,
     )
     expect(serialized).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
+  })
+
+  test('resolves accepted-work payout destination from the agent Spark Lightning Address', async () => {
+    const sparkLightningAddress =
+      'oab38ad12345abcd9_that_must_not_echo@spark.money'
+    const resolvedPrivateDestination: { value?: string | undefined } = {}
+    const response = await runRoute(
+      new Request(
+        `https://openagents.com/api/operator/nexus-pylon/assignments/${encodeURIComponent(
+          acceptedAssignmentRef,
+        )}/accepted-work-payouts`,
+        {
+          body: JSON.stringify({
+            amountSats: 100,
+            payoutTargetApprovalRef:
+              'approval.public.accepted_work_spark_address_payout',
+            payoutTargetRef:
+              'payout_target.public.accepted_work_spark_address_payout',
+            policySnapshotRef:
+              'policy_snapshot.public.accepted_work_spark_address_payout',
+            providerRef: 'provider.public.hosted_mdk',
+            redactedDestinationRef:
+              'destination.redacted.accepted_work_spark_address_payout',
+            spendCapSats: 100,
+          }),
+          headers: {
+            authorization: 'Bearer admin',
+            'idempotency-key': 'accepted-work-spark-address-payout',
+          },
+          method: 'POST',
+        },
+      ),
+      {
+        acceptedAssignment,
+        acceptedEvents,
+        acceptedRegistration,
+        adminToken: true,
+        resolvedPrivateDestination,
+        tipRecipientLightningAddress: sparkLightningAddress,
+      },
+    )
+    const body = (await response.json()) as Record<string, any>
+    const serialized = JSON.stringify(body)
+
+    expect(response.status).toBe(201)
+    expect(resolvedPrivateDestination.value).toBe(sparkLightningAddress)
+    expect(body.payout.receipt).toMatchObject({
+      movementMode: 'real_bitcoin',
+      realBitcoinMoved: true,
+      receiptKind: 'settlement_recorded',
+    })
+    expect(serialized).not.toContain(sparkLightningAddress)
+    expect(serialized).not.toMatch(
+      /lnbc|lntb|mnemonic|preimage|secret|wallet_(config|key|material|mnemonic|secret|seed|state)/i,
+    )
   })
 
   test('deduplicates accepted-work payouts for the same assignment', async () => {

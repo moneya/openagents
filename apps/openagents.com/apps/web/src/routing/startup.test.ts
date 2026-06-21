@@ -7,7 +7,14 @@ import {
   incompleteOnboardingStatus,
 } from '../domain/session'
 import {
+  AutopilotWorkRoute,
   ChatRoute,
+  Demo2OrderRoute,
+  Demo2Route,
+  Demo2TeamFileRoute,
+  Demo2TeamFilesRoute,
+  Demo2TeamProjectChatRoute,
+  Demo2ThreadRoute,
   DemoOrderRoute,
   DemoRoute,
   DemoTeamFileRoute,
@@ -18,14 +25,21 @@ import {
   ForumReceiptRoute,
   HomeRoute,
   InviteRoute,
+  Moksha2Route,
+  MokshaRoute,
   MulletRoute,
   NotFoundRoute,
   OnboardingRoute,
   OrderRoute,
   PublicAgentRoute,
+  PublicStatsArchiveRoute,
+  PylonRoute,
   ShareRoute,
   SiteCheckoutDemoReturnRoute,
   SiteCheckoutDemoRoute,
+  StatsRoute,
+  TassadarRoute,
+  TassadarReplayRoute,
   TeamChatRoute,
   TeamProjectChatRoute,
 } from '../route'
@@ -81,11 +95,24 @@ const incompleteAuth = {
 }
 
 describe('startup route policy', () => {
-  test('keeps logged-out root visitors on the public homepage', () => {
-    expect(startupRouteForLoggedOut(HomeRoute())).toEqual({
+  test('keeps logged-out root visitors on the public Pylon scene', () => {
+    expect(startupRouteForLoggedOut(PylonRoute())).toEqual({
       _tag: 'LoggedOutStartupRoute',
       redirect: Option.none(),
-      route: { _tag: 'Home' },
+      route: { _tag: 'Pylon' },
+    })
+  })
+
+  test('keeps moved public stats routes available while logged out', () => {
+    expect(startupRouteForLoggedOut(StatsRoute())).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: { _tag: 'Stats' },
+    })
+    expect(startupRouteForLoggedOut(PublicStatsArchiveRoute())).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: { _tag: 'PublicStatsArchive' },
     })
   })
 
@@ -128,6 +155,119 @@ describe('startup route policy', () => {
       _tag: 'LoggedOutStartupRoute',
       redirect: Option.none(),
       route: shareRoute,
+    })
+  })
+
+  test('keeps Moksha public for every auth state', () => {
+    const mokshaRoute = MokshaRoute()
+
+    expect(startupRouteForLoggedOut(mokshaRoute)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: mokshaRoute,
+    })
+    expect(startupRouteForLoggedIn(mokshaRoute, completeAuth)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: mokshaRoute,
+    })
+    expect(startupRouteForLoggedIn(mokshaRoute, incompleteAuth)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: mokshaRoute,
+    })
+  })
+
+  test('keeps OpenAgents Moksha public for every auth state', () => {
+    const mokshaRoute = Moksha2Route()
+
+    expect(startupRouteForLoggedOut(mokshaRoute)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: mokshaRoute,
+    })
+    expect(startupRouteForLoggedIn(mokshaRoute, completeAuth)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: mokshaRoute,
+    })
+    expect(startupRouteForLoggedIn(mokshaRoute, incompleteAuth)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: mokshaRoute,
+    })
+  })
+
+  test('keeps Pylon public for every auth state', () => {
+    const pylonRoute = PylonRoute()
+
+    expect(startupRouteForLoggedOut(pylonRoute)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: pylonRoute,
+    })
+    expect(startupRouteForLoggedIn(pylonRoute, completeAuth)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: pylonRoute,
+    })
+    expect(startupRouteForLoggedIn(pylonRoute, incompleteAuth)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: pylonRoute,
+    })
+  })
+
+  test('keeps the live Tassadar run route available for every auth state', () => {
+    const tassadarRoute = TassadarRoute()
+    const tassadarReplayRoute = TassadarReplayRoute({
+      replaySlug: 'first-real-settlement',
+    })
+
+    expect(startupRouteForLoggedOut(tassadarRoute)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: tassadarRoute,
+    })
+    expect(startupRouteForLoggedIn(tassadarRoute, completeAuth)).toEqual({
+      _tag: 'LoggedInStartupRoute',
+      redirect: Option.none(),
+      route: tassadarRoute,
+    })
+    expect(startupRouteForLoggedIn(tassadarRoute, incompleteAuth)).toEqual({
+      _tag: 'LoggedInStartupRoute',
+      redirect: Option.none(),
+      route: tassadarRoute,
+    })
+    expect(startupRouteForLoggedOut(tassadarReplayRoute)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: tassadarReplayRoute,
+    })
+    expect(startupRouteForLoggedIn(tassadarReplayRoute, completeAuth)).toEqual({
+      _tag: 'LoggedInStartupRoute',
+      redirect: Option.none(),
+      route: tassadarReplayRoute,
+    })
+  })
+
+  test('keeps the stats archive public for every auth state', () => {
+    const archiveRoute = PublicStatsArchiveRoute()
+
+    expect(startupRouteForLoggedOut(archiveRoute)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: archiveRoute,
+    })
+    expect(startupRouteForLoggedIn(archiveRoute, completeAuth)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: archiveRoute,
+    })
+    expect(startupRouteForLoggedIn(archiveRoute, incompleteAuth)).toEqual({
+      _tag: 'LoggedOutStartupRoute',
+      redirect: Option.none(),
+      route: archiveRoute,
     })
   })
 
@@ -270,7 +410,7 @@ describe('startup route policy', () => {
         _tag: 'Some',
         value: { _tag: 'StartupRedirectToHome', href: '/' },
       },
-      route: { _tag: 'Home' },
+      route: { _tag: 'Pylon' },
     })
   })
 
@@ -345,7 +485,7 @@ describe('startup route policy', () => {
         _tag: 'Some',
         value: { _tag: 'StartupRedirectToHome', href: '/' },
       },
-      route: { _tag: 'Home' },
+      route: { _tag: 'Pylon' },
     })
   })
 
@@ -358,7 +498,7 @@ describe('startup route policy', () => {
         _tag: 'Some',
         value: { _tag: 'StartupRedirectToHome', href: '/' },
       },
-      route: { _tag: 'Home' },
+      route: { _tag: 'Pylon' },
     })
   })
 
@@ -371,7 +511,7 @@ describe('startup route policy', () => {
         _tag: 'Some',
         value: { _tag: 'StartupRedirectToHome', href: '/' },
       },
-      route: { _tag: 'Home' },
+      route: { _tag: 'Pylon' },
     })
   })
 
@@ -388,6 +528,16 @@ describe('startup route policy', () => {
       ),
     ).toBe(false)
     expect(routeRequiresAuthBootstrap(SiteCheckoutDemoRoute())).toBe(false)
+    expect(routeRequiresAuthBootstrap(MokshaRoute())).toBe(false)
+    expect(routeRequiresAuthBootstrap(Moksha2Route())).toBe(false)
+    expect(routeRequiresAuthBootstrap(PylonRoute())).toBe(false)
+    expect(routeRequiresAuthBootstrap(TassadarRoute())).toBe(false)
+    expect(
+      routeRequiresAuthBootstrap(
+        TassadarReplayRoute({ replaySlug: 'first-real-settlement' }),
+      ),
+    ).toBe(false)
+    expect(routeRequiresAuthBootstrap(PublicStatsArchiveRoute())).toBe(false)
     expect(
       routeRequiresAuthBootstrap(
         SiteCheckoutDemoReturnRoute({ returnAction: 'status' }),
@@ -401,6 +551,7 @@ describe('startup route policy', () => {
     expect(routeRequiresAuthBootstrap(InviteRoute())).toBe(true)
     expect(routeRequiresAuthBootstrap(OnboardingRoute())).toBe(true)
     expect(routeRequiresAuthBootstrap(OrderRoute())).toBe(true)
+    expect(routeRequiresAuthBootstrap(AutopilotWorkRoute())).toBe(true)
     expect(routeRequiresAuthBootstrap(MulletRoute())).toBe(true)
     expect(
       routeRequiresAuthBootstrap(TeamChatRoute({ teamRef: 'openagents' })),
@@ -439,6 +590,34 @@ describe('startup route policy', () => {
     expect(
       routeRequiresAuthBootstrap(
         DemoTeamFileRoute({
+          teamRef: 'openagents-core-team',
+          fileId: 'file_pylon_release_plan',
+        }),
+      ),
+    ).toBe(false)
+    expect(routeRequiresAuthBootstrap(Demo2Route())).toBe(false)
+    expect(routeRequiresAuthBootstrap(Demo2OrderRoute())).toBe(false)
+    expect(
+      routeRequiresAuthBootstrap(
+        Demo2ThreadRoute({ threadId: 'pylon-release-demo' }),
+      ),
+    ).toBe(false)
+    expect(
+      routeRequiresAuthBootstrap(
+        Demo2TeamProjectChatRoute({
+          teamRef: 'openagents-core-team',
+          projectRef: 'artanis',
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      routeRequiresAuthBootstrap(
+        Demo2TeamFilesRoute({ teamRef: 'openagents-core-team' }),
+      ),
+    ).toBe(false)
+    expect(
+      routeRequiresAuthBootstrap(
+        Demo2TeamFileRoute({
           teamRef: 'openagents-core-team',
           fileId: 'file_pylon_release_plan',
         }),

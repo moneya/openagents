@@ -1,8 +1,10 @@
 import { Effect, Match as M, Schema as S } from 'effect'
 
 import { sha256Hex } from './agent-registration'
-import { methodNotAllowed, noStoreJsonResponse } from './http/responses'
-import { decodeUnknownWithSchema, readJsonObject } from './json-boundary'
+import {
+  type ArtanisAdminCloseoutReceiptStore,
+  artanisAdminCloseoutReceiptDetail,
+} from './artanis-admin-closeout-receipts'
 import {
   ArtanisPylonProofTraceDispatchEvidence,
   ArtanisPylonProofTracePylonEvent,
@@ -11,26 +13,28 @@ import {
   ArtanisPylonProofTraceRecord,
   projectArtanisPylonProofTrace,
 } from './artanis-pylon-proof-trace'
+import { methodNotAllowed, noStoreJsonResponse } from './http/responses'
+import { decodeUnknownWithSchema, readJsonObject } from './json-boundary'
 import {
-  type NexusPaymentAuthorityReceiptRecord,
-  type NexusPayoutTargetApprovalRecord,
-  type NexusTreasuryPayoutAmount,
-  type NexusTreasuryPayoutAttemptRecord,
-  type NexusTreasuryPayoutIntentRecord,
-  type NexusTreasuryPayoutLedgerStore,
-  type NexusTreasuryPayoutLedgerStorageError,
-  type NexusTreasuryPayoutReconciliationEventRecord,
-  projectNexusTreasuryPayoutLedgerRecord,
-} from './nexus-treasury-payout-ledger'
-import {
-  NexusPylonVisibilityNotFound,
   type NexusPylonPublicReceiptDetail,
+  NexusPylonVisibilityNotFound,
   NexusPylonVisibilityUnsafe,
   exampleNexusPylonVisibilityFixture,
   nexusPylonOperatorDashboard,
   nexusPylonPublicReceiptDetail,
   nexusPylonPublicReceiptDetailFromLedger,
 } from './nexus-pylon-visibility'
+import {
+  type NexusPaymentAuthorityReceiptRecord,
+  type NexusPayoutTargetApprovalRecord,
+  type NexusTreasuryPayoutAmount,
+  type NexusTreasuryPayoutAttemptRecord,
+  type NexusTreasuryPayoutIntentRecord,
+  type NexusTreasuryPayoutLedgerStorageError,
+  type NexusTreasuryPayoutLedgerStore,
+  type NexusTreasuryPayoutReconciliationEventRecord,
+  projectNexusTreasuryPayoutLedgerRecord,
+} from './nexus-treasury-payout-ledger'
 import type {
   PylonApiEventRecord,
   PylonApiRegistrationRecord,
@@ -70,8 +74,46 @@ type NexusPylonVisibilityLedgerStore = Pick<
 
 type NexusPylonVisibilityPylonStore = Pick<
   PylonApiStore,
-  'listEventsForAssignment' | 'listEventsForPylon' | 'readAssignment' | 'readRegistration'
+  | 'listEventsForAssignment'
+  | 'listEventsForPylon'
+  | 'readAssignment'
+  | 'readRegistration'
 >
+
+// This deprecated Nexus visibility route only needs to read a Lightning
+// Address from the recipient readiness, but the canonical readiness now carries
+// a discriminated direct-payment union (spark_address | bolt12_offer |
+// lightning_address, #5345). Mirror that union structurally so the full
+// readiness reader stays assignable; only the lightning_address variant
+// exposes a Lightning Address.
+type NexusPylonVisibilityDirectPayment =
+  | Readonly<{
+      sparkAddress: string
+      kind: 'spark_address'
+      settlementAuthority: 'recipient_wallet_direct'
+    }>
+  | Readonly<{
+      bolt12Offer: string
+      lightningAddress?: string | undefined
+      kind: 'bolt12_offer'
+      settlementAuthority: 'recipient_wallet_direct'
+    }>
+  | Readonly<{
+      lightningAddress: string
+      kind: 'lightning_address'
+      settlementAuthority: 'recipient_wallet_direct'
+    }>
+
+type NexusPylonVisibilityTipRecipientReadiness = Readonly<{
+  directPayment: null | NexusPylonVisibilityDirectPayment
+  state: string
+}>
+
+type NexusPylonVisibilityTipRecipientReadinessReader = Readonly<{
+  readForActor: (
+    actorRef: string,
+  ) => Effect.Effect<NexusPylonVisibilityTipRecipientReadiness, unknown>
+}>
 
 type NexusPylonVisibilityDependencies<
   Session extends NexusPylonVisibilitySession,
@@ -83,19 +125,23 @@ type NexusPylonVisibilityDependencies<
   ) => HttpResponse
   currentIsoTimestamp?: () => string
   isOpenAgentsAdminEmail: (email: string) => boolean
-  makeLedgerStore?: (
+  makeArtanisAdminCloseoutReceiptStore?: (
     env: Bindings,
-  ) => NexusPylonVisibilityLedgerStore
+  ) => ArtanisAdminCloseoutReceiptStore
+  makeLedgerStore?: (env: Bindings) => NexusPylonVisibilityLedgerStore
   makePaymentAuthority?: (
     env: Bindings,
     context: Readonly<{
-      adapterKind: 'hosted_mdk' | 'mdk_agent_wallet'
+      adapterKind: 'hosted_mdk' | 'mdk_agent_wallet' | 'spark_treasury'
       ledgerStore: NexusPylonVisibilityLedgerStore
       privatePayoutDestination?: string | undefined
       providerRef: string
     }>,
   ) => TreasuryPaymentAuthorityShape
   makePylonApiStore?: (env: Bindings) => NexusPylonVisibilityPylonStore
+  makeTipRecipientReadinessReader?: (
+    env: Bindings,
+  ) => NexusPylonVisibilityTipRecipientReadinessReader
   requireAdminApiToken?: (request: Request, env: Bindings) => Promise<boolean>
   requireBrowserSession: (
     request: Request,
@@ -140,7 +186,9 @@ const decodedReceiptRef = (receiptRef: string): string =>
   decodeURIComponent(receiptRef).trim()
 
 const BridgeRequest = S.Struct({
-  adapterKind: S.optionalKey(S.Literals(['hosted_mdk', 'mdk_agent_wallet'])),
+  adapterKind: S.optionalKey(
+    S.Literals(['hosted_mdk', 'mdk_agent_wallet', 'spark_treasury']),
+  ),
   amountSats: S.Number,
   artanisDispatchRef: S.optionalKey(S.String),
   buyerPaymentRef: S.optionalKey(S.String),
@@ -156,7 +204,9 @@ const BridgeRequest = S.Struct({
 type BridgeRequest = typeof BridgeRequest.Type
 
 const AcceptedWorkPayoutRequest = S.Struct({
-  adapterKind: S.optionalKey(S.Literals(['hosted_mdk', 'mdk_agent_wallet'])),
+  adapterKind: S.optionalKey(
+    S.Literals(['hosted_mdk', 'mdk_agent_wallet', 'spark_treasury']),
+  ),
   amountSats: S.Number,
   artanisDispatchRef: S.optionalKey(S.String),
   buyerPaymentRef: S.optionalKey(S.String),
@@ -173,7 +223,9 @@ const AcceptedWorkPayoutRequest = S.Struct({
 type AcceptedWorkPayoutRequest = typeof AcceptedWorkPayoutRequest.Type
 
 const ProofRunRequest = S.Struct({
-  adapterKind: S.optionalKey(S.Literals(['hosted_mdk', 'mdk_agent_wallet'])),
+  adapterKind: S.optionalKey(
+    S.Literals(['hosted_mdk', 'mdk_agent_wallet', 'spark_treasury']),
+  ),
   amountSats: S.Number,
   artanisRunRef: S.String,
   assignmentRef: S.String,
@@ -225,17 +277,19 @@ const bodyStringRefs = (
   body: Record<string, unknown>,
   keys: ReadonlyArray<string>,
 ): ReadonlyArray<string> =>
-  uniqueRefs(keys.flatMap(key => {
-    const value = body[key]
+  uniqueRefs(
+    keys.flatMap(key => {
+      const value = body[key]
 
-    if (typeof value === 'string') {
-      return [value]
-    }
+      if (typeof value === 'string') {
+        return [value]
+      }
 
-    return Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === 'string')
-      : []
-  }))
+      return Array.isArray(value)
+        ? value.filter((item): item is string => typeof item === 'string')
+        : []
+    }),
+  )
 
 const refsFromEvents = (
   events: ReadonlyArray<PylonApiEventRecord>,
@@ -251,10 +305,11 @@ const refsFromEvents = (
 const acceptedEvents = (
   events: ReadonlyArray<PylonApiEventRecord>,
 ): ReadonlyArray<PylonApiEventRecord> =>
-  events.filter(event =>
-    event.eventKind === 'assignment_acceptance' &&
-    event.status !== 'rejected' &&
-    event.eventBody.accepted === true
+  events.filter(
+    event =>
+      event.eventKind === 'assignment_acceptance' &&
+      event.status !== 'rejected' &&
+      event.eventBody.accepted === true,
   )
 
 const firstRef = (refs: ReadonlyArray<string>, fallback: string): string =>
@@ -272,9 +327,7 @@ const bridgeAmount = (sats: number): NexusTreasuryPayoutAmount => {
   }
 }
 
-const decodeBridgeRequest = async (
-  request: Request,
-): Promise<BridgeRequest> =>
+const decodeBridgeRequest = async (request: Request): Promise<BridgeRequest> =>
   decodeUnknownWithSchema(BridgeRequest, await readJsonObject(request))
 
 const decodeAcceptedWorkPayoutRequest = async (
@@ -294,27 +347,28 @@ const validateBridgeRefs = (
     }
   })
 
-const evidenceKeysForTraceEvent:
-  Readonly<Record<PylonApiEventRecord['eventKind'], ReadonlyArray<string>>> = {
-    artifact_proof_metadata: ['artifactRefs', 'proofRefs', 'storageRefs'],
-    assignment_acceptance: ['acceptanceRefs'],
-    assignment_progress: ['artifactRefs', 'blockerRefs', 'progressRefs'],
-    heartbeat: ['capacityRefs', 'healthRefs', 'loadRefs'],
-    payment_receipt: ['paymentProofRefs', 'receiptRefs', 'settlementRefs'],
-    payout_target_admission: ['admissionRefs', 'policyRefs'],
-    registration: ['capabilityRefs', 'statusRefs'],
-    settlement_status: ['settlementRefs', 'treasuryReceiptRefs'],
-    wallet_readiness: ['balanceRefs', 'liquidityRefs', 'readinessRefs'],
-    worker_closeout: [
-      'artifactRefs',
-      'blockerRefs',
-      'buildRefs',
-      'closeoutRefs',
-      'proofRefs',
-      'resultRefs',
-      'testRefs',
-    ],
-  }
+const evidenceKeysForTraceEvent: Readonly<
+  Record<PylonApiEventRecord['eventKind'], ReadonlyArray<string>>
+> = {
+  artifact_proof_metadata: ['artifactRefs', 'proofRefs', 'storageRefs'],
+  assignment_acceptance: ['acceptanceRefs'],
+  assignment_progress: ['artifactRefs', 'blockerRefs', 'progressRefs'],
+  heartbeat: ['capacityRefs', 'healthRefs', 'loadRefs'],
+  payment_receipt: ['paymentProofRefs', 'receiptRefs', 'settlementRefs'],
+  payout_target_admission: ['admissionRefs', 'policyRefs'],
+  registration: ['capabilityRefs', 'statusRefs'],
+  settlement_status: ['settlementRefs', 'treasuryReceiptRefs'],
+  wallet_readiness: ['balanceRefs', 'liquidityRefs', 'readinessRefs'],
+  worker_closeout: [
+    'artifactRefs',
+    'blockerRefs',
+    'buildRefs',
+    'closeoutRefs',
+    'proofRefs',
+    'resultRefs',
+    'testRefs',
+  ],
+}
 
 const traceEventKinds: ReadonlyArray<PylonApiEventRecord['eventKind']> = [
   'artifact_proof_metadata',
@@ -454,6 +508,78 @@ const assertPrivatePayoutDestination = (
   return trimmed
 }
 
+const agentActorRefForUserId = (userId: string): string => `agent:${userId}`
+
+const lightningAddressFromTipRecipientReadiness = (
+  readiness: NexusPylonVisibilityTipRecipientReadiness,
+): string | undefined => {
+  if (readiness.state !== 'ready') {
+    return undefined
+  }
+
+  const directPayment = readiness.directPayment
+  const lightningAddress =
+    directPayment !== null && directPayment.kind !== 'spark_address'
+      ? directPayment.lightningAddress?.trim()
+      : undefined
+
+  return lightningAddress === '' ? undefined : lightningAddress
+}
+
+const resolveAcceptedWorkPayoutDestination = <
+  Session extends NexusPylonVisibilitySession,
+  Bindings,
+>(
+  dependencies: NexusPylonVisibilityDependencies<Session, Bindings>,
+  env: Bindings,
+  adapterKind: 'hosted_mdk' | 'mdk_agent_wallet' | 'spark_treasury',
+  requestDestination: string | undefined,
+  registration: PylonApiRegistrationRecord | undefined,
+): Effect.Effect<string | undefined, NexusPylonVisibilityBridgeBlocked> =>
+  Effect.gen(function* () {
+    const explicitDestination = yield* Effect.try({
+      catch: error =>
+        error instanceof NexusPylonVisibilityBridgeBlocked
+          ? error
+          : bridgeBlocked('privatePayoutDestination is invalid.'),
+      try: () => assertPrivatePayoutDestination(requestDestination),
+    })
+
+    if (
+      explicitDestination !== undefined ||
+      (adapterKind !== 'hosted_mdk' && adapterKind !== 'spark_treasury')
+    ) {
+      return explicitDestination
+    }
+
+    const makeReader = dependencies.makeTipRecipientReadinessReader
+
+    if (makeReader === undefined || registration === undefined) {
+      return undefined
+    }
+
+    const actorRef = agentActorRefForUserId(registration.ownerAgentUserId)
+    const readiness = yield* makeReader(env)
+      .readForActor(actorRef)
+      .pipe(
+        Effect.mapError(() =>
+          bridgeBlocked(
+            'Treasury payouts could not read the agent on-file Spark Lightning Address.',
+          ),
+        ),
+      )
+    const lightningAddress =
+      lightningAddressFromTipRecipientReadiness(readiness)
+
+    return yield* Effect.try({
+      catch: error =>
+        error instanceof NexusPylonVisibilityBridgeBlocked
+          ? error
+          : bridgeBlocked('on-file Spark Lightning Address is invalid.'),
+      try: () => assertPrivatePayoutDestination(lightningAddress),
+    })
+  })
+
 const receiptKindForReconciliation = (
   status: NexusTreasuryPayoutReconciliationEventRecord['status'],
 ): NexusPaymentAuthorityReceiptRecord['receiptKind'] =>
@@ -479,9 +605,7 @@ const authorityErrorToBridgeBlocked = (
 ): NexusPylonVisibilityBridgeBlocked =>
   bridgeBlocked(`${error.reason}: ${error.message}`)
 
-const ledgerReadError = (
-  error: unknown,
-): NexusPylonVisibilityUnsafe =>
+const ledgerReadError = (error: unknown): NexusPylonVisibilityUnsafe =>
   new NexusPylonVisibilityUnsafe({
     reason:
       error !== null &&
@@ -715,6 +839,9 @@ const publicReceiptDetail = <
 ) =>
   Effect.gen(function* () {
     const makeLedgerStore = dependencies.makeLedgerStore
+    const makeArtanisAdminCloseoutReceiptStore =
+      dependencies.makeArtanisAdminCloseoutReceiptStore
+    const normalizedReceiptRef = decodedReceiptRef(receiptRef)
     const fallback = () =>
       Effect.try({
         catch: error =>
@@ -732,12 +859,41 @@ const publicReceiptDetail = <
           }),
       })
 
+    if (makeArtanisAdminCloseoutReceiptStore !== undefined) {
+      const store = makeArtanisAdminCloseoutReceiptStore(env)
+      const artanisRecord = yield* Effect.tryPromise({
+        catch: error =>
+          error instanceof NexusPylonVisibilityUnsafe
+            ? error
+            : new NexusPylonVisibilityUnsafe({
+                reason: 'Artanis admin closeout receipt projection failed.',
+              }),
+        try: () => store.readCloseoutReceiptByRef(normalizedReceiptRef),
+      })
+
+      if (artanisRecord !== undefined) {
+        return yield* Effect.try({
+          catch: error =>
+            error instanceof NexusPylonVisibilityUnsafe
+              ? error
+              : new NexusPylonVisibilityUnsafe({
+                  reason: 'Artanis admin closeout receipt projection failed.',
+                }),
+          try: () =>
+            artanisAdminCloseoutReceiptDetail({
+              appUrl: appUrlFromRequest(request),
+              nowIso,
+              record: artanisRecord,
+            }),
+        })
+      }
+    }
+
     if (makeLedgerStore === undefined) {
       return yield* fallback()
     }
 
     const store = makeLedgerStore(env)
-    const normalizedReceiptRef = decodedReceiptRef(receiptRef)
     const receipt = yield* Effect.tryPromise({
       catch: ledgerReadError,
       try: () => store.readPaymentAuthorityReceiptByRef(normalizedReceiptRef),
@@ -751,18 +907,20 @@ const publicReceiptDetail = <
       catch: ledgerReadError,
       try: () => store.readPayoutIntentByRef(receipt.payoutIntentRef),
     })
-    const attempt = receipt.payoutAttemptRef === null
-      ? undefined
-      : yield* Effect.tryPromise({
-          catch: ledgerReadError,
-          try: () => store.readPayoutAttemptByRef(receipt.payoutAttemptRef!),
-        })
-    const event = receipt.eventRef === null
-      ? undefined
-      : yield* Effect.tryPromise({
-          catch: ledgerReadError,
-          try: () => store.readReconciliationEventByRef(receipt.eventRef!),
-        })
+    const attempt =
+      receipt.payoutAttemptRef === null
+        ? undefined
+        : yield* Effect.tryPromise({
+            catch: ledgerReadError,
+            try: () => store.readPayoutAttemptByRef(receipt.payoutAttemptRef!),
+          })
+    const event =
+      receipt.eventRef === null
+        ? undefined
+        : yield* Effect.tryPromise({
+            catch: ledgerReadError,
+            try: () => store.readReconciliationEventByRef(receipt.eventRef!),
+          })
 
     return nexusPylonPublicReceiptDetailFromLedger({
       appUrl: appUrlFromRequest(request),
@@ -806,42 +964,45 @@ const operatorReceiptJson = <
   Effect.gen(function* () {
     const session = yield* requireAdminSession(dependencies, request, env, ctx)
     const makeLedgerStore = dependencies.makeLedgerStore
-    const store = makeLedgerStore === undefined
-      ? undefined
-      : makeLedgerStore(env)
+    const store =
+      makeLedgerStore === undefined ? undefined : makeLedgerStore(env)
     const normalizedReceiptRef = decodedReceiptRef(receiptRef)
-    const persistedReceipt = store === undefined
-      ? undefined
-      : yield* Effect.tryPromise({
-          catch: ledgerReadError,
-          try: () =>
-            store.readPaymentAuthorityReceiptByRef(normalizedReceiptRef),
-        })
+    const persistedReceipt =
+      store === undefined
+        ? undefined
+        : yield* Effect.tryPromise({
+            catch: ledgerReadError,
+            try: () =>
+              store.readPaymentAuthorityReceiptByRef(normalizedReceiptRef),
+          })
 
     if (persistedReceipt !== undefined && store !== undefined) {
       const persistedProjection = nexusPylonPublicReceiptDetailFromLedger({
         appUrl: appUrlFromRequest(request),
-        attempt: persistedReceipt.payoutAttemptRef === null
-          ? undefined
-          : yield* Effect.tryPromise({
-              catch: ledgerReadError,
-              try: () =>
-                store.readPayoutAttemptByRef(
-                  persistedReceipt.payoutAttemptRef!,
-                ),
-            }),
-        event: persistedReceipt.eventRef === null
-          ? undefined
-          : yield* Effect.tryPromise({
-              catch: ledgerReadError,
-              try: () =>
-                store.readReconciliationEventByRef(persistedReceipt.eventRef!),
-            }),
+        attempt:
+          persistedReceipt.payoutAttemptRef === null
+            ? undefined
+            : yield* Effect.tryPromise({
+                catch: ledgerReadError,
+                try: () =>
+                  store.readPayoutAttemptByRef(
+                    persistedReceipt.payoutAttemptRef!,
+                  ),
+              }),
+        event:
+          persistedReceipt.eventRef === null
+            ? undefined
+            : yield* Effect.tryPromise({
+                catch: ledgerReadError,
+                try: () =>
+                  store.readReconciliationEventByRef(
+                    persistedReceipt.eventRef!,
+                  ),
+              }),
         intent: yield* Effect.tryPromise({
           catch: ledgerReadError,
-          try: () => store.readPayoutIntentByRef(
-            persistedReceipt.payoutIntentRef,
-          ),
+          try: () =>
+            store.readPayoutIntentByRef(persistedReceipt.payoutIntentRef),
         }),
         nowIso: nowIsoFor(dependencies),
         receipt: persistedReceipt,
@@ -862,8 +1023,7 @@ const operatorReceiptJson = <
 
     const fixture = exampleNexusPylonVisibilityFixture(nowIsoFor(dependencies))
     const receipt = fixture.receipts.find(
-      candidate =>
-        candidate.receiptRef === normalizedReceiptRef,
+      candidate => candidate.receiptRef === normalizedReceiptRef,
     )
 
     if (receipt === undefined) {
@@ -922,23 +1082,11 @@ const operatorAssignmentAcceptedWorkPayout = <
 
     const assignmentRef = decodedReceiptRef(encodedAssignmentRef)
     const body = yield* Effect.tryPromise({
-      catch: () => bridgeBlocked('Accepted-work payout request body is invalid.'),
+      catch: () =>
+        bridgeBlocked('Accepted-work payout request body is invalid.'),
       try: () => decodeAcceptedWorkPayoutRequest(request),
     })
     const adapterKind = body.adapterKind ?? 'hosted_mdk'
-    const privatePayoutDestination = yield* Effect.try({
-      catch: error =>
-        error instanceof NexusPylonVisibilityBridgeBlocked
-          ? error
-          : bridgeBlocked('privatePayoutDestination is invalid.'),
-      try: () => assertPrivatePayoutDestination(body.privatePayoutDestination),
-    })
-
-    if (adapterKind === 'hosted_mdk' && privatePayoutDestination === undefined) {
-      return yield* bridgeBlocked(
-        'Hosted MDK payouts require privatePayoutDestination.',
-      )
-    }
 
     const pylonStore = makePylonApiStore(env)
     const ledgerStore = makeLedgerStore(env)
@@ -975,7 +1123,8 @@ const operatorAssignmentAcceptedWorkPayout = <
         error instanceof NexusPylonVisibilityBridgeBlocked
           ? error
           : new NexusPylonVisibilityUnsafe({
-              reason: 'Nexus/Pylon accepted-work payout amount validation failed.',
+              reason:
+                'Nexus/Pylon accepted-work payout amount validation failed.',
             }),
       try: () => ({
         amount: bridgeAmount(body.amountSats),
@@ -1002,40 +1151,44 @@ const operatorAssignmentAcceptedWorkPayout = <
       body.providerRef ?? `provider.public.nexus_pylon.${adapterKind}`
     const payoutKeyHash = yield* Effect.tryPromise({
       catch: ledgerReadError,
-      try: () => sha256Hex(
-        `nexus-pylon-accepted-work-payout:${assignmentRef}:${body.payoutTargetRef}:${body.amountSats}`,
-      ),
+      try: () =>
+        sha256Hex(
+          `nexus-pylon-accepted-work-payout:${assignmentRef}:${body.payoutTargetRef}:${body.amountSats}`,
+        ),
     })
     const hashRef = `hash.${payoutKeyHash.slice(0, 64)}`
-    const payoutIntentRef =
-      `payout_intent.nexus_pylon.accepted_work.${suffix}`
-    const payoutAttemptRef =
-      `payout_attempt.nexus_pylon.accepted_work.${suffix}`
-    const reconciliationEventRef =
-      `reconciliation.nexus_pylon.accepted_work.${suffix}`
-    const receiptRef =
-      `receipt.nexus_pylon.accepted_work_settlement.${suffix}`
+    const payoutIntentRef = `payout_intent.nexus_pylon.accepted_work.${suffix}`
+    const payoutAttemptRef = `payout_attempt.nexus_pylon.accepted_work.${suffix}`
+    const reconciliationEventRef = `reconciliation.nexus_pylon.accepted_work.${suffix}`
+    const receiptRef = `receipt.nexus_pylon.accepted_work_settlement.${suffix}`
 
     yield* Effect.try({
       catch: error =>
         error instanceof NexusPylonVisibilityBridgeBlocked
           ? error
           : new NexusPylonVisibilityUnsafe({
-              reason: 'Nexus/Pylon accepted-work payout public-safe validation failed.',
+              reason:
+                'Nexus/Pylon accepted-work payout public-safe validation failed.',
             }),
       try: () => {
         validateBridgeRefs([
           { label: 'assignmentRef', value: assignmentRef },
           { label: 'artanisDispatchRef', value: body.artanisDispatchRef },
           { label: 'buyerPaymentRef', value: body.buyerPaymentRef },
-          { label: 'payoutTargetApprovalRef', value: body.payoutTargetApprovalRef },
+          {
+            label: 'payoutTargetApprovalRef',
+            value: body.payoutTargetApprovalRef,
+          },
           { label: 'payoutTargetRef', value: body.payoutTargetRef },
           { label: 'policySnapshotRef', value: body.policySnapshotRef },
           { label: 'providerRef', value: providerRef },
           { label: 'pylonJobRef', value: body.pylonJobRef },
           { label: 'pylonRef', value: assignment.pylonRef },
           { label: 'receiptRef', value: receiptRef },
-          { label: 'redactedDestinationRef', value: body.redactedDestinationRef },
+          {
+            label: 'redactedDestinationRef',
+            value: body.redactedDestinationRef,
+          },
         ])
         uniqueRefs([
           ...acceptedWorkRefs,
@@ -1075,6 +1228,24 @@ const operatorAssignmentAcceptedWorkPayout = <
       )
     }
 
+    const privatePayoutDestination =
+      yield* resolveAcceptedWorkPayoutDestination(
+        dependencies,
+        env,
+        adapterKind,
+        body.privatePayoutDestination,
+        registration,
+      )
+
+    if (
+      (adapterKind === 'hosted_mdk' || adapterKind === 'spark_treasury') &&
+      privatePayoutDestination === undefined
+    ) {
+      return yield* bridgeBlocked(
+        'Treasury payouts require privatePayoutDestination or an agent on-file Spark Lightning Address.',
+      )
+    }
+
     const existingReceipt = yield* Effect.tryPromise({
       catch: ledgerReadError,
       try: () => ledgerStore.readPaymentAuthorityReceiptByRef(receiptRef),
@@ -1083,24 +1254,29 @@ const operatorAssignmentAcceptedWorkPayout = <
     if (existingReceipt !== undefined) {
       const existingIntent = yield* Effect.tryPromise({
         catch: ledgerReadError,
-        try: () => ledgerStore.readPayoutIntentByRef(existingReceipt.payoutIntentRef),
+        try: () =>
+          ledgerStore.readPayoutIntentByRef(existingReceipt.payoutIntentRef),
       })
-      const existingAttempt = existingReceipt.payoutAttemptRef === null
-        ? undefined
-        : yield* Effect.tryPromise({
-            catch: ledgerReadError,
-            try: () =>
-              ledgerStore.readPayoutAttemptByRef(
-                existingReceipt.payoutAttemptRef!,
-              ),
-          })
-      const existingEvent = existingReceipt.eventRef === null
-        ? undefined
-        : yield* Effect.tryPromise({
-            catch: ledgerReadError,
-            try: () =>
-              ledgerStore.readReconciliationEventByRef(existingReceipt.eventRef!),
-          })
+      const existingAttempt =
+        existingReceipt.payoutAttemptRef === null
+          ? undefined
+          : yield* Effect.tryPromise({
+              catch: ledgerReadError,
+              try: () =>
+                ledgerStore.readPayoutAttemptByRef(
+                  existingReceipt.payoutAttemptRef!,
+                ),
+            })
+      const existingEvent =
+        existingReceipt.eventRef === null
+          ? undefined
+          : yield* Effect.tryPromise({
+              catch: ledgerReadError,
+              try: () =>
+                ledgerStore.readReconciliationEventByRef(
+                  existingReceipt.eventRef!,
+                ),
+            })
 
       return dependencies.appendRefreshedSessionCookies(
         noStoreJsonResponse({
@@ -1117,8 +1293,7 @@ const operatorAssignmentAcceptedWorkPayout = <
             }),
             walletReadiness,
           },
-          schemaVersion:
-            'openagents.nexus_pylon.accepted_work_payout.v1',
+          schemaVersion: 'openagents.nexus_pylon.accepted_work_payout.v1',
         }),
         session,
       )
@@ -1217,26 +1392,33 @@ const operatorAssignmentAcceptedWorkPayout = <
     const existingIntent = yield* Effect.tryPromise({
       catch: ledgerReadError,
       try: () =>
-        ledgerStore.readPayoutIntentByIdempotencyKeyHash(intent.idempotencyKeyHash),
+        ledgerStore.readPayoutIntentByIdempotencyKeyHash(
+          intent.idempotencyKeyHash,
+        ),
     })
-    const createdIntent = existingIntent === undefined
-      ? yield* authority.createPayoutIntent({
-          intent,
-          walletReadiness,
-        }).pipe(Effect.mapError(authorityErrorToBridgeBlocked))
-      : {
-          intent: existingIntent,
-          projection: projectNexusTreasuryPayoutLedgerRecord(
-            'intent',
-            existingIntent,
-            'operator',
-          ),
-          replayed: true,
-        }
-    const dispatch = yield* authority.dispatchPayout({
-      attempt: pendingAttempt,
-      payoutIntentRef: createdIntent.intent.payoutIntentRef,
-    }).pipe(Effect.mapError(authorityErrorToBridgeBlocked))
+    const createdIntent =
+      existingIntent === undefined
+        ? yield* authority
+            .createPayoutIntent({
+              intent,
+              walletReadiness,
+            })
+            .pipe(Effect.mapError(authorityErrorToBridgeBlocked))
+        : {
+            intent: existingIntent,
+            projection: projectNexusTreasuryPayoutLedgerRecord(
+              'intent',
+              existingIntent,
+              'operator',
+            ),
+            replayed: true,
+          }
+    const dispatch = yield* authority
+      .dispatchPayout({
+        attempt: pendingAttempt,
+        payoutIntentRef: createdIntent.intent.payoutIntentRef,
+      })
+      .pipe(Effect.mapError(authorityErrorToBridgeBlocked))
     const reconciliationInput: NexusTreasuryPayoutReconciliationEventRecord = {
       adapterKind,
       archivedAt: null,
@@ -1244,11 +1426,12 @@ const operatorAssignmentAcceptedWorkPayout = <
       eventRef: reconciliationEventRef,
       externalEventRef:
         dispatch.attempt.redactedPaymentRef ??
-          `payment.redacted.nexus_pylon.accepted_work.${suffix}`,
+        `payment.redacted.nexus_pylon.accepted_work.${suffix}`,
       id: `nexus_treasury_reconciliation_accepted_work_${suffix}`,
       idempotencyKeyHash: dispatch.attempt.idempotencyKeyHash,
       metadataRefs: uniqueRefs([
         ...metadataRefs,
+        ...dispatch.attempt.metadataRefs,
         'metadata.nexus.accepted_work_payout.reconciliation_requested',
       ]),
       payoutAttemptRef: dispatch.attempt.payoutAttemptRef,
@@ -1263,12 +1446,14 @@ const operatorAssignmentAcceptedWorkPayout = <
       }),
       resultRef:
         dispatch.attempt.redactedPaymentRef ??
-          `result.hosted_mdk.requested.${suffix}`,
+        `result.hosted_mdk.requested.${suffix}`,
       status: 'observed',
     }
-    const reconciliation = yield* authority.reconcilePayout({
-      event: reconciliationInput,
-    }).pipe(Effect.mapError(authorityErrorToBridgeBlocked))
+    const reconciliation = yield* authority
+      .reconcilePayout({
+        event: reconciliationInput,
+      })
+      .pipe(Effect.mapError(authorityErrorToBridgeBlocked))
     const settlementState = settlementStateForReconciliation(
       reconciliation.event.status,
     )
@@ -1319,8 +1504,7 @@ const operatorAssignmentAcceptedWorkPayout = <
             }),
             walletReadiness,
           },
-          schemaVersion:
-            'openagents.nexus_pylon.accepted_work_payout.v1',
+          schemaVersion: 'openagents.nexus_pylon.accepted_work_payout.v1',
         },
         { status: reconciliation.event.status === 'observed' ? 202 : 201 },
       ),
@@ -1417,7 +1601,7 @@ const operatorAssignmentSettlementBridge = <
     const reconciliationEventRef = `reconciliation.nexus_pylon.${suffix}`
     const redactedDestinationRef =
       body.redactedDestinationRef ??
-        `destination.redacted.nexus_pylon.${suffix}`
+      `destination.redacted.nexus_pylon.${suffix}`
     const providerRef =
       body.providerRef ?? `provider.public.nexus_pylon.${suffix}`
     const redactedPaymentRef = firstRef(
@@ -1430,9 +1614,10 @@ const operatorAssignmentSettlementBridge = <
     )
     const idempotencyKeyHash = yield* Effect.tryPromise({
       catch: ledgerReadError,
-      try: () => sha256Hex(
-        `nexus-pylon-settlement-bridge:${assignmentRef}:${idempotencyKey}`,
-      ),
+      try: () =>
+        sha256Hex(
+          `nexus-pylon-settlement-bridge:${assignmentRef}:${idempotencyKey}`,
+        ),
     })
     const hashRef = `hash.${idempotencyKeyHash.slice(0, 64)}`
 
@@ -1448,7 +1633,10 @@ const operatorAssignmentSettlementBridge = <
           { label: 'assignmentRef', value: assignmentRef },
           { label: 'artanisDispatchRef', value: body.artanisDispatchRef },
           { label: 'buyerPaymentRef', value: body.buyerPaymentRef },
-          { label: 'payoutTargetApprovalRef', value: body.payoutTargetApprovalRef },
+          {
+            label: 'payoutTargetApprovalRef',
+            value: body.payoutTargetApprovalRef,
+          },
           { label: 'payoutTargetRef', value: body.payoutTargetRef },
           { label: 'policySnapshotRef', value: body.policySnapshotRef },
           { label: 'providerRef', value: providerRef },
@@ -1505,24 +1693,29 @@ const operatorAssignmentSettlementBridge = <
     if (existingReceipt !== undefined) {
       const existingIntent = yield* Effect.tryPromise({
         catch: ledgerReadError,
-        try: () => ledgerStore.readPayoutIntentByRef(existingReceipt.payoutIntentRef),
+        try: () =>
+          ledgerStore.readPayoutIntentByRef(existingReceipt.payoutIntentRef),
       })
-      const existingAttempt = existingReceipt.payoutAttemptRef === null
-        ? undefined
-        : yield* Effect.tryPromise({
-            catch: ledgerReadError,
-            try: () =>
-              ledgerStore.readPayoutAttemptByRef(
-                existingReceipt.payoutAttemptRef!,
-              ),
-          })
-      const existingEvent = existingReceipt.eventRef === null
-        ? undefined
-        : yield* Effect.tryPromise({
-            catch: ledgerReadError,
-            try: () =>
-              ledgerStore.readReconciliationEventByRef(existingReceipt.eventRef!),
-          })
+      const existingAttempt =
+        existingReceipt.payoutAttemptRef === null
+          ? undefined
+          : yield* Effect.tryPromise({
+              catch: ledgerReadError,
+              try: () =>
+                ledgerStore.readPayoutAttemptByRef(
+                  existingReceipt.payoutAttemptRef!,
+                ),
+            })
+      const existingEvent =
+        existingReceipt.eventRef === null
+          ? undefined
+          : yield* Effect.tryPromise({
+              catch: ledgerReadError,
+              try: () =>
+                ledgerStore.readReconciliationEventByRef(
+                  existingReceipt.eventRef!,
+                ),
+            })
 
       return dependencies.appendRefreshedSessionCookies(
         noStoreJsonResponse({
@@ -1748,12 +1941,18 @@ const operatorAssignmentProofRun = <
           { label: 'assignmentRef', value: body.assignmentRef },
           { label: 'artanisRunRef', value: body.artanisRunRef },
           { label: 'buyerPaymentRef', value: body.buyerPaymentRef },
-          { label: 'payoutTargetApprovalRef', value: body.payoutTargetApprovalRef },
+          {
+            label: 'payoutTargetApprovalRef',
+            value: body.payoutTargetApprovalRef,
+          },
           { label: 'payoutTargetRef', value: body.payoutTargetRef },
           { label: 'policySnapshotRef', value: body.policySnapshotRef },
           { label: 'providerRef', value: body.providerRef },
           { label: 'pylonJobRef', value: body.pylonJobRef },
-          { label: 'redactedDestinationRef', value: body.redactedDestinationRef },
+          {
+            label: 'redactedDestinationRef',
+            value: body.redactedDestinationRef,
+          },
           { label: 'settlementIntentRef', value: body.settlementIntentRef },
         ]),
     })
@@ -1774,14 +1973,15 @@ const operatorAssignmentProofRun = <
     const nowIso = nowIsoFor(dependencies)
     const idempotencyKeyHash = yield* Effect.tryPromise({
       catch: ledgerReadError,
-      try: () => sha256Hex(
-        `nexus-pylon-proof-run:${body.assignmentRef}:${idempotencyKey}`,
-      ),
+      try: () =>
+        sha256Hex(
+          `nexus-pylon-proof-run:${body.assignmentRef}:${idempotencyKey}`,
+        ),
     })
-    const proofRunRef =
-      `proof_run.public.artanis_pylon.${bridgeSuffix(body.assignmentRef)}.${
-        idempotencyKeyHash.slice(0, 16)
-      }`
+    const proofRunRef = `proof_run.public.artanis_pylon.${bridgeSuffix(body.assignmentRef)}.${idempotencyKeyHash.slice(
+      0,
+      16,
+    )}`
     const preTrace = projectArtanisPylonProofTrace(
       proofTraceRecord(body, events, null, nowIso),
       'operator',
@@ -1798,9 +1998,9 @@ const operatorAssignmentProofRun = <
     bridgeHeaders.set('idempotency-key', idempotencyKey)
 
     const bridgeRequest = new Request(
-      `${new URL(request.url).origin}/api/operator/nexus-pylon/assignments/${
-        encodeURIComponent(body.assignmentRef)
-      }/settlement-bridges`,
+      `${new URL(request.url).origin}/api/operator/nexus-pylon/assignments/${encodeURIComponent(
+        body.assignmentRef,
+      )}/settlement-bridges`,
       {
         body: JSON.stringify({
           adapterKind: body.adapterKind,
@@ -1825,9 +2025,7 @@ const operatorAssignmentProofRun = <
       env,
       ctx,
       encodeURIComponent(body.assignmentRef),
-    ).pipe(
-      Effect.catch(error => Effect.succeed(routeErrorResponse(error))),
-    )
+    ).pipe(Effect.catch(error => Effect.succeed(routeErrorResponse(error))))
     const bridgeBody = yield* Effect.tryPromise({
       catch: () =>
         new NexusPylonVisibilityUnsafe({
@@ -1837,9 +2035,9 @@ const operatorAssignmentProofRun = <
     })
     const receiptDetail =
       bridgeResponse.status >= 200 &&
-        bridgeResponse.status < 300 &&
-        bridgeBody.bridge?.receipt !== undefined
-        ? bridgeBody.bridge.receipt as NexusPylonPublicReceiptDetail
+      bridgeResponse.status < 300 &&
+      bridgeBody.bridge?.receipt !== undefined
+        ? (bridgeBody.bridge.receipt as NexusPylonPublicReceiptDetail)
         : null
     const postTrace = projectArtanisPylonProofTrace(
       proofTraceRecord(body, events, receiptDetail, nowIso),
@@ -1847,7 +2045,9 @@ const operatorAssignmentProofRun = <
       nowIso,
     )
     const responseStatus =
-      bridgeResponse.status >= 400 ? bridgeResponse.status : bridgeResponse.status
+      bridgeResponse.status >= 400
+        ? bridgeResponse.status
+        : bridgeResponse.status
 
     return dependencies.appendRefreshedSessionCookies(
       noStoreJsonResponse(
@@ -1861,8 +2061,7 @@ const operatorAssignmentProofRun = <
             proofRunRef,
             publicReceiptUrl: receiptDetail?.receiptPageUrl ?? null,
           },
-          schemaVersion:
-            'openagents.nexus_pylon.assignment_proof_run.v1',
+          schemaVersion: 'openagents.nexus_pylon.assignment_proof_run.v1',
         },
         { status: responseStatus },
       ),
@@ -1897,21 +2096,18 @@ export const makeNexusPylonVisibilityRoutes = <
     const operatorProofRunMatch =
       /^\/api\/operator\/nexus-pylon\/proof-runs$/.exec(pathname)
     const operatorAssignmentAcceptedWorkPayoutMatch =
-      /^\/api\/operator\/nexus-pylon\/assignments\/([^/]+)\/accepted-work-payouts$/
-        .exec(pathname)
+      /^\/api\/operator\/nexus-pylon\/assignments\/([^/]+)\/accepted-work-payouts$/.exec(
+        pathname,
+      )
     const operatorAssignmentBridgeMatch =
-      /^\/api\/operator\/nexus-pylon\/assignments\/([^/]+)\/settlement-bridges$/
-        .exec(pathname)
+      /^\/api\/operator\/nexus-pylon\/assignments\/([^/]+)\/settlement-bridges$/.exec(
+        pathname,
+      )
 
     if (operatorProofRunMatch !== null) {
       return request.method !== 'POST'
         ? Effect.succeed(methodNotAllowed(['POST']))
-        : operatorAssignmentProofRun(
-            dependencies,
-            request,
-            env,
-            ctx,
-          ).pipe(
+        : operatorAssignmentProofRun(dependencies, request, env, ctx).pipe(
             Effect.catch(error => Effect.succeed(routeErrorResponse(error))),
           )
     }

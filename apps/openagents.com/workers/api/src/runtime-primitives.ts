@@ -4,6 +4,9 @@ export const currentIsoTimestamp = (): string => currentDate().toISOString()
 
 export const currentEpochMillis = (): number => Date.now()
 
+export const currentEpochSeconds = (): number =>
+  Math.floor(currentEpochMillis() / 1000)
+
 export const randomUuid = (): string => crypto.randomUUID()
 
 export const compactRandomId = (prefix: string): string =>
@@ -23,6 +26,13 @@ export const isoTimestampAfterIso = (
 export const utcStartOfDayIsoTimestamp = (timestamp: string): string => {
   const date = new Date(timestamp)
   date.setUTCHours(0, 0, 0, 0)
+
+  return date.toISOString()
+}
+
+export const utcStartOfHourIsoTimestamp = (timestamp: string): string => {
+  const date = new Date(timestamp)
+  date.setUTCMinutes(0, 0, 0)
 
   return date.toISOString()
 }

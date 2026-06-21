@@ -1,4 +1,6 @@
-import { assertPublicProjectionSafe } from "./state"
+import { assertPublicProjectionSafe } from "./state.js"
+import type { PsionicTrainingBoundaryProjection } from "./psionic-training-boundary.js"
+import { PYLON_VERSION, PYLON_CLIENT_VERSION } from "./version.js"
 
 export type LaunchClaimState = "allowed" | "blocked" | "planned"
 
@@ -12,26 +14,19 @@ export type LaunchClaimGate = {
 
 export const launchClaimGates: LaunchClaimGate[] = [
   {
-    claimRef: "claim.pylon.v0_3.rc_package",
-    publicPhrase: "@openagentsinc/pylon@0.3.0-rc1 is the v0.3 release candidate",
+    claimRef: "claim.pylon.v1_0.stable_package",
+    publicPhrase: `${PYLON_CLIENT_VERSION} is the v1.0 stable release`,
     state: "allowed",
     requiredEvidenceRefs: [
       "evidence.package.dry_run",
       "evidence.install.local",
-      "evidence.dashboard.startup_smoke",
+      "evidence.node.startup_smoke",
     ],
     blockerRefs: [],
   },
   {
-    claimRef: "claim.pylon.v0_3.stable",
-    publicPhrase: "Pylon v0.3.0 is stable",
-    state: "blocked",
-    requiredEvidenceRefs: ["evidence.release.full_gate_matrix"],
-    blockerRefs: ["blocker.copy.stable_release_not_cut"],
-  },
-  {
     claimRef: "claim.pylon.assignment_ready_network",
-    publicPhrase: "Pylon v0.3 is assignment-ready across the network",
+    publicPhrase: "Pylon v1.0 is assignment-ready across the network",
     state: "blocked",
     requiredEvidenceRefs: ["evidence.live.assignment.multi_host", "evidence.fresh.heartbeat.inventory.wallet"],
     blockerRefs: ["blocker.copy.live_network_assignment_not_proven"],
@@ -49,6 +44,13 @@ export const launchClaimGates: LaunchClaimGate[] = [
     state: "blocked",
     requiredEvidenceRefs: ["evidence.psionic.training.gate"],
     blockerRefs: ["blocker.copy.qwen_training_postponed"],
+  },
+  {
+    claimRef: "claim.pylon.psionic_training_boundary",
+    publicPhrase: "Pylon can verify Psionic training manifests, artifacts, sidecar health, and worker receipts",
+    state: "blocked",
+    requiredEvidenceRefs: ["evidence.psionic.training_boundary"],
+    blockerRefs: ["blocker.copy.psionic_training_boundary_not_real"],
   },
   {
     claimRef: "claim.pylon.optional_local_qwen_inference",
@@ -79,6 +81,7 @@ export const launchClaimGates: LaunchClaimGate[] = [
 
 const unsafePhrasePatterns = [
   /pylon v0\.3\.0 is stable/i,
+  /pylon v1\.0(?:\.0)? is assignment-ready across the network/i,
   /assignment-ready across the network/i,
   /paid pylon work settles bitcoin/i,
   /qwen .*training on people/i,
@@ -91,12 +94,25 @@ const unsafePhrasePatterns = [
   /data revenue .* live/i,
 ]
 
-export function projectLaunchGateMatrix() {
+export function projectLaunchGateMatrix(input: { psionicTrainingBoundary?: PsionicTrainingBoundaryProjection } = {}) {
+  const supportsTraining = input.psionicTrainingBoundary?.supportsTraining === true
+  const gates = launchClaimGates.map((gate) =>
+    gate.claimRef === "claim.pylon.psionic_training_boundary" && supportsTraining
+      ? {
+          ...gate,
+          state: "allowed" as const,
+          requiredEvidenceRefs: input.psionicTrainingBoundary?.evidenceRefs ?? gate.requiredEvidenceRefs,
+          blockerRefs: [],
+        }
+      : gate,
+  )
   const projection = {
     schema: "openagents.pylon.launch_gate_matrix.v0.3",
     packageName: "@openagentsinc/pylon",
-    version: "0.3.0-rc1",
-    gates: launchClaimGates,
+    version: PYLON_VERSION,
+    supportsTraining,
+    psionicTrainingBoundaryRef: supportsTraining ? "boundary.pylon.psionic_training.ready.v0_3" : null,
+    gates,
   }
   assertPublicProjectionSafe(projection)
   return projection

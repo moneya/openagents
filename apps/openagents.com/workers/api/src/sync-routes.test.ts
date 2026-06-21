@@ -1,4 +1,4 @@
-import { MutationId, SyncCommand, SyncScope } from '@openagents/sync-schema'
+import { MutationId, SyncCommand, SyncScope } from '@openagentsinc/sync-schema'
 import { Effect } from 'effect'
 import { describe, expect, test } from 'vitest'
 
@@ -369,5 +369,58 @@ describe('sync routes', () => {
       error: 'not_found',
     })
     expect(mutationResponse.status).toBe(404)
+  })
+
+  test('allows anonymous public settled-feed snapshots and streams', async () => {
+    const db = makeMemoryD1()
+    db.changes.push({
+      actor_id: 'system',
+      collection: 'settled_events',
+      created_at: '2026-06-17T00:00:00.000Z',
+      entity_id: 'settled.window.0',
+      mutation_id: null,
+      op: 'put',
+      patch_json: null,
+      scope: 'public-settled-feed:tassadar',
+      seq: 1,
+      value_json: JSON.stringify({
+        amountSats: 5,
+        contributorRef: 'pylon.worker.orrery',
+        totalSettledSats: 5,
+      }),
+    })
+
+    const snapshotResponse = await runRoute(
+      new Request(
+        'https://openagents.test/api/sync/public-settled-feed/tassadar/snapshot',
+      ),
+      makeEnv(db),
+      undefined,
+    )
+
+    await expect(snapshotResponse.json()).resolves.toMatchObject({
+      collections: {
+        settled_events: {
+          'settled.window.0': {
+            amountSats: 5,
+            totalSettledSats: 5,
+          },
+        },
+      },
+      scope: 'public-settled-feed:tassadar',
+    })
+    expect(snapshotResponse.status).toBe(200)
+
+    const capturedScopes: Array<string> = []
+    const streamResponse = await runRoute(
+      new Request(
+        'https://openagents.test/api/sync/public-settled-feed/tassadar/stream',
+      ),
+      makeEnv(makeMemoryD1(), makeSyncRoom(capturedScopes)),
+      undefined,
+    )
+
+    expect(streamResponse.status).toBe(204)
+    expect(capturedScopes).toEqual(['public-settled-feed:tassadar'])
   })
 })

@@ -1,28 +1,43 @@
 import { existsSync } from "node:fs"
-import { readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { join } from "node:path"
 import { createHash } from "node:crypto"
-import type { BootstrapSummary } from "./bootstrap"
-import { createSignedHeaders } from "./presence"
+import {
+  collectInterpreterOutputs,
+  executeTassadarNumericModel,
+  TASSADAR_EXECUTOR_CAPABILITY_REF,
+  TASSADAR_EXECUTOR_TRACE_HOMEWORK_JOB_KIND,
+  TASSADAR_EXECUTOR_TRACE_JOB_KIND,
+} from "@openagentsinc/tassadar-executor"
+import type { BootstrapSummary } from "./bootstrap.js"
+import type { ClaudeAgentProbeOptions } from "./claude-agent.js"
+import {
+  executeClaudeAgentAssignment,
+  type ClaudeAgentCheckoutRunner,
+  type ClaudeAgentRunner,
+} from "./claude-agent-executor.js"
+import type { CodexAgentProbeOptions } from "./codex-agent.js"
+import { executeCodexAgentAssignment, type CodexAgentRunner } from "./codex-agent-executor.js"
+import { createSignedHeaders } from "./presence.js"
 import {
   assertPublicProjectionSafe,
   ensurePylonLocalState,
   ensureStateDirectories,
   loadOrCreatePresenceState,
   type PylonLocalState,
-} from "./state"
-import { classifyMdkWallet, type WalletCommandRunner } from "./wallet"
+} from "./state.js"
 import {
   admitGepaAssignmentToEnvelope,
   createDefaultGepaCapabilityEnvelope,
   type PylonGepaAssignmentRequirements,
   type PylonGepaCapabilityEnvelope,
-} from "./gepa-capability"
+} from "./gepa-capability.js"
 import {
   PSIONIC_QWEN_MODEL_REFS,
   selectPsionicQwenModel,
   type PsionicQwenModelAdmission,
   type PsionicQwenTaskMode,
-} from "../packages/runtime/src/index"
+} from "../packages/runtime/src/index.js"
 
 export type AssignmentPaymentMode = "no-spend" | "paid"
 export type AssignmentStatus = "offered" | "accepted" | "running" | "closed" | "rejected" | "cancelled" | "timed-out" | "stale"
@@ -105,9 +120,13 @@ export type AssignmentClientOptions = {
   fetch?: typeof fetch
   now?: () => Date
   staleAfterMs?: number
-  walletRunner?: WalletCommandRunner
   gepaEnvelope?: PylonGepaCapabilityEnvelope
   psionicQwenAdmission?: PsionicQwenModelAdmission
+  claudeAgentCheckoutRunner?: ClaudeAgentCheckoutRunner
+  claudeAgentRunner?: ClaudeAgentRunner
+  claudeAgentProbe?: ClaudeAgentProbeOptions
+  codexAgentRunner?: CodexAgentRunner
+  codexAgentProbe?: CodexAgentProbeOptions
 }
 
 type AssignmentStore = {
@@ -115,8 +134,43 @@ type AssignmentStore = {
   leases: Record<string, { assignmentRef: string; status: AssignmentStatus; acceptedAt?: string; closedAt?: string }>
 }
 
+export type TrainingWorkerReceipt = {
+  schema: "openagents.psionic.training_worker_receipt.v0.3"
+  receiptRef: string
+  assignmentRef: string
+  workerRef: string
+  runRef: string
+  artifactRefs: string[]
+  checkpointRefs: string[]
+  metricRefs: string[]
+  proofRefs: string[]
+  signature: {
+    signatureRef: string
+    signerRef: string
+    verificationRef: string
+  }
+}
+
+export type TrainingWorkerReceiptsBundle = {
+  schema: "openagents.pylon.training_worker_receipts_bundle.v0.3"
+  generatedAt: string
+  sourceRefs: string[]
+  workerReceipts: TrainingWorkerReceipt[]
+  budgetLabel?: string
+  budgetRef?: string
+  evalRef?: string
+  lossCurve?: Array<{ step: number; validationLoss: number }>
+  maxValidationLoss?: number
+  mergeRef?: string
+}
+
 type JsonRecord = Record<string, unknown>
 type AutopilotCodingAssignmentPayload = Readonly<Record<string, unknown>>
+type RuntimeGatePayload = Readonly<{
+  agentKind: "codex_cli_or_fixture"
+  fixtureRef: "fixture.public.pylon.codex_runtime.sum_repair.v1"
+  schema: "openagents.pylon.runtime_gate.v0.3"
+}>
 type PublicPylonAssignmentProjection = Readonly<{
   assignmentRef?: unknown
   codingAssignment?: unknown
@@ -134,6 +188,488 @@ function safeStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
 }
 
+const publicSafeTrainingRefPattern = /^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/
+const trainingWorkerReceiptsFilename = "training-worker-receipts.json"
+
+const uniqueRefs = (refs: ReadonlyArray<string | null | undefined>): string[] => {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const ref of refs) {
+    const trimmed = ref?.trim() ?? ""
+    if (trimmed === "" || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    result.push(trimmed)
+  }
+  return result
+}
+
+const publicTrainingRef = (value: unknown): string | null => {
+  if (typeof value !== "string") return null
+  const trimmed = value.trim()
+  if (trimmed === "" || !publicSafeTrainingRefPattern.test(trimmed)) return null
+  try {
+    assertPublicProjectionSafe(trimmed)
+  } catch {
+    return null
+  }
+  return trimmed
+}
+
+const publicTrainingRefs = (value: unknown): string[] =>
+  uniqueRefs(safeStringArray(value).map(publicTrainingRef))
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
+
+export function trainingWorkerReceiptsPathForHome(home: string): string {
+  return join(home, trainingWorkerReceiptsFilename)
+}
+
+const trainingWorkerReceiptFromUnknown = (
+  value: unknown,
+): TrainingWorkerReceipt | null => {
+  if (!isRecord(value)) return null
+  const receiptRef = publicTrainingRef(value.receiptRef)
+  const assignmentRef = publicTrainingRef(value.assignmentRef)
+  const workerRef = publicTrainingRef(value.workerRef)
+  const runRef = publicTrainingRef(value.runRef)
+  const signature = isRecord(value.signature) ? value.signature : {}
+  const signatureRef = publicTrainingRef(signature.signatureRef)
+  const signerRef = publicTrainingRef(signature.signerRef)
+  const verificationRef = publicTrainingRef(signature.verificationRef)
+  if (
+    receiptRef === null ||
+    assignmentRef === null ||
+    workerRef === null ||
+    runRef === null ||
+    signatureRef === null ||
+    signerRef === null ||
+    verificationRef === null
+  ) {
+    return null
+  }
+
+  return {
+    schema: "openagents.psionic.training_worker_receipt.v0.3",
+    receiptRef,
+    assignmentRef,
+    workerRef,
+    runRef,
+    artifactRefs: publicTrainingRefs(value.artifactRefs),
+    checkpointRefs: publicTrainingRefs(value.checkpointRefs),
+    metricRefs: publicTrainingRefs(value.metricRefs),
+    proofRefs: publicTrainingRefs(value.proofRefs),
+    signature: {
+      signatureRef,
+      signerRef,
+      verificationRef,
+    },
+  }
+}
+
+const optionalBundleRef = (
+  bundle: Record<string, unknown>,
+  key: keyof TrainingWorkerReceiptsBundle,
+): string | undefined => publicTrainingRef(bundle[key]) ?? undefined
+
+const optionalLossCurve = (
+  value: unknown,
+): Array<{ step: number; validationLoss: number }> | undefined => {
+  const points = Array.isArray(value)
+    ? value.flatMap(point => {
+        if (!isRecord(point)) return []
+        const { step, validationLoss } = point
+        return typeof step === "number" &&
+          Number.isFinite(step) &&
+          typeof validationLoss === "number" &&
+          Number.isFinite(validationLoss)
+          ? [{ step, validationLoss }]
+          : []
+      })
+    : []
+  return points.length === 0 ? undefined : points
+}
+
+const readTrainingWorkerReceiptsBundle = async (
+  path: string,
+): Promise<TrainingWorkerReceiptsBundle | null> => {
+  if (!existsSync(path)) return null
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as unknown
+    if (!isRecord(parsed)) return null
+    const workerReceipts = Array.isArray(parsed.workerReceipts)
+      ? parsed.workerReceipts
+          .map(trainingWorkerReceiptFromUnknown)
+          .filter((receipt): receipt is TrainingWorkerReceipt => receipt !== null)
+      : []
+    const generatedAt =
+      typeof parsed.generatedAt === "string" ? parsed.generatedAt : new Date().toISOString()
+    const budgetLabel =
+      typeof parsed.budgetLabel === "string" && parsed.budgetLabel.trim() !== ""
+        ? parsed.budgetLabel.trim()
+        : undefined
+    const maxValidationLoss =
+      typeof parsed.maxValidationLoss === "number" &&
+      Number.isFinite(parsed.maxValidationLoss)
+        ? parsed.maxValidationLoss
+        : undefined
+    const budgetRef = optionalBundleRef(parsed, "budgetRef")
+    const evalRef = optionalBundleRef(parsed, "evalRef")
+    const mergeRef = optionalBundleRef(parsed, "mergeRef")
+    const lossCurve = optionalLossCurve(parsed.lossCurve)
+    return {
+      schema: "openagents.pylon.training_worker_receipts_bundle.v0.3",
+      generatedAt,
+      sourceRefs: publicTrainingRefs(parsed.sourceRefs),
+      workerReceipts,
+      ...(budgetLabel === undefined ? {} : { budgetLabel }),
+      ...(budgetRef === undefined ? {} : { budgetRef }),
+      ...(evalRef === undefined ? {} : { evalRef }),
+      ...(mergeRef === undefined ? {} : { mergeRef }),
+      ...(lossCurve === undefined ? {} : { lossCurve }),
+      ...(maxValidationLoss === undefined ? {} : { maxValidationLoss }),
+    }
+  } catch {
+    return null
+  }
+}
+
+const trainingRunRefForCloseout = (closeout: AssignmentCloseout): string =>
+  publicTrainingRef(
+    [
+      ...closeout.receiptRefs,
+      ...closeout.resultRefs,
+      ...closeout.summaryRefs,
+      ...closeout.buildRefs,
+    ].find(ref => ref.startsWith("run.") || ref.includes(".training.")),
+  ) ?? stableRef("run.pylon.assignment", closeout.assignmentRef)
+
+const trainingWorkerReceiptFromCloseout = (
+  state: PylonLocalState,
+  closeout: AssignmentCloseout,
+  closeoutRef: string,
+): TrainingWorkerReceipt => {
+  const receiptRef = stableRef(
+    "receipt.pylon.training_worker",
+    `${state.identity.pylonRef}:${closeoutRef}`,
+  )
+  return {
+    schema: "openagents.psionic.training_worker_receipt.v0.3",
+    receiptRef,
+    assignmentRef:
+      publicTrainingRef(closeout.assignmentRef) ??
+      stableRef("assignment.pylon", closeout.leaseRef),
+    workerRef:
+      publicTrainingRef(state.identity.pylonRef) ??
+      stableRef("pylon.identity", state.identity.nodeId),
+    runRef: trainingRunRefForCloseout(closeout),
+    artifactRefs: publicTrainingRefs(closeout.artifactRefs),
+    checkpointRefs: publicTrainingRefs([
+      closeoutRef,
+      ...closeout.closeoutRefs,
+      ...closeout.buildRefs,
+    ]),
+    metricRefs: publicTrainingRefs([...closeout.resultRefs, ...closeout.summaryRefs]),
+    proofRefs: publicTrainingRefs([...closeout.proofRefs, ...closeout.testRefs]),
+    signature: {
+      signatureRef: stableRef("signature.pylon.training_worker", receiptRef),
+      signerRef: state.identity.pylonRef,
+      verificationRef: stableRef(
+        "verification.pylon.training_worker",
+        `${receiptRef}:${closeout.completedAt}`,
+      ),
+    },
+  }
+}
+
+async function writeTrainingWorkerReceiptsBundle(
+  state: PylonLocalState,
+  closeout: AssignmentCloseout,
+  closeoutRef: string,
+): Promise<void> {
+  const path = trainingWorkerReceiptsPathForHome(state.paths.home)
+  const existing = await readTrainingWorkerReceiptsBundle(path)
+  const nextReceipt = trainingWorkerReceiptFromCloseout(state, closeout, closeoutRef)
+  const receiptsByAssignment = new Map<string, TrainingWorkerReceipt>()
+  for (const receipt of existing?.workerReceipts ?? []) {
+    receiptsByAssignment.set(`${receipt.assignmentRef}:${receipt.workerRef}`, receipt)
+  }
+  receiptsByAssignment.set(
+    `${nextReceipt.assignmentRef}:${nextReceipt.workerRef}`,
+    nextReceipt,
+  )
+
+  const bundle: TrainingWorkerReceiptsBundle = {
+    schema: "openagents.pylon.training_worker_receipts_bundle.v0.3",
+    generatedAt: closeout.completedAt,
+    sourceRefs: uniqueRefs([
+      ...(existing?.sourceRefs ?? []),
+      "source.pylon.assignment_closeout",
+      closeoutRef,
+      ...closeout.closeoutRefs,
+      ...closeout.summaryRefs,
+    ]),
+    workerReceipts: [...receiptsByAssignment.values()],
+    ...(existing?.budgetLabel === undefined ? {} : { budgetLabel: existing.budgetLabel }),
+    ...(existing?.budgetRef === undefined ? {} : { budgetRef: existing.budgetRef }),
+    ...(existing?.evalRef === undefined ? {} : { evalRef: existing.evalRef }),
+    ...(existing?.lossCurve === undefined ? {} : { lossCurve: existing.lossCurve }),
+    ...(existing?.maxValidationLoss === undefined ? {} : { maxValidationLoss: existing.maxValidationLoss }),
+    ...(existing?.mergeRef === undefined ? {} : { mergeRef: existing.mergeRef }),
+  }
+  assertPublicProjectionSafe(bundle)
+  await writeFile(path, `${JSON.stringify(bundle, null, 2)}\n`)
+}
+
+function runtimeGatePayloadFrom(codingAssignment: unknown): RuntimeGatePayload | null {
+  const runtimeGate = (codingAssignment as { runtimeGate?: unknown } | null)?.runtimeGate
+  if (runtimeGate === null || typeof runtimeGate !== "object") return null
+  const payload = runtimeGate as RuntimeGatePayload
+  return (
+    payload.schema === "openagents.pylon.runtime_gate.v0.3" &&
+    payload.agentKind === "codex_cli_or_fixture" &&
+    payload.fixtureRef === "fixture.public.pylon.codex_runtime.sum_repair.v1"
+  )
+    ? payload
+    : null
+}
+
+async function runCommand(input: {
+  args: string[]
+  cwd: string
+}): Promise<{ exitCode: number; stderrBytes: number; stdoutBytes: number }> {
+  const proc = Bun.spawn(input.args, {
+    cwd: input.cwd,
+    stderr: "pipe",
+    stdout: "pipe",
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).arrayBuffer(),
+    new Response(proc.stderr).arrayBuffer(),
+    proc.exited,
+  ])
+
+  return {
+    exitCode,
+    stderrBytes: stderr.byteLength,
+    stdoutBytes: stdout.byteLength,
+  }
+}
+
+type TassadarAssignmentPayload = {
+  expectedTraceDigest?: string
+  fixtureId?: string
+  model: Parameters<typeof executeTassadarNumericModel>[0]
+  steps: ReadonlyArray<ReadonlyArray<number>>
+}
+
+export function tassadarPayloadFrom(codingAssignment: unknown): TassadarAssignmentPayload | null {
+  const record = codingAssignment as
+    | { kind?: unknown; tassadar?: TassadarAssignmentPayload }
+    | null
+    | undefined
+  const kind = record?.kind
+  if (record === null || record === undefined) return null
+  if (kind !== TASSADAR_EXECUTOR_TRACE_JOB_KIND && kind !== TASSADAR_EXECUTOR_TRACE_HOMEWORK_JOB_KIND) {
+    return null
+  }
+  const tassadar = record.tassadar
+  if (tassadar === undefined || typeof tassadar !== "object") return null
+  if (tassadar.model === undefined || !Array.isArray(tassadar.steps)) return null
+  // The dispatch payload renames the model's seed_writes field to
+  // initialChannelWrites so it survives the public-projection scanner;
+  // restore the executor's wire format here.
+  const transit = tassadar.model as unknown as {
+    initialChannelWrites?: ReadonlyArray<readonly [number, number, number]>
+    seed_writes?: ReadonlyArray<readonly [number, number, number]>
+  }
+  if (transit.seed_writes === undefined && transit.initialChannelWrites !== undefined) {
+    const { initialChannelWrites, ...rest } = transit
+    return {
+      ...tassadar,
+      model: {
+        ...(rest as object),
+        seed_writes: initialChannelWrites,
+      } as TassadarAssignmentPayload["model"],
+    }
+  }
+  return tassadar
+}
+
+/**
+ * Executes a Tassadar executor-trace assignment: runs the embedded
+ * digest-pinned numeric-model workload through the shared executor and
+ * carries the computed trace digest into closeout refs. Exact-replay
+ * verification happens on a separate validator device; this gate only
+ * reports what this device computed.
+ */
+export async function executeTassadarAssignment(
+  lease: PylonAssignmentLease,
+  now: Date,
+) {
+  const payload = tassadarPayloadFrom(lease.codingAssignment)
+  if (payload === null) return null
+  const runRef = stableRef(
+    "run.pylon.tassadar_executor_trace",
+    `${lease.leaseRef}:${payload.fixtureId ?? "workload"}:${now.toISOString()}`,
+  )
+  try {
+    const trace = await executeTassadarNumericModel(payload.model, payload.steps)
+    const { outputs, halted } = collectInterpreterOutputs(trace.stepOutputs)
+    const digestMatchesExpectation =
+      payload.expectedTraceDigest === undefined ||
+      payload.expectedTraceDigest === trace.traceDigest
+    const artifactRef = `artifact.tassadar_poc.trace_digest.${trace.traceDigest}`
+    const proofRef = stableRef(
+      "proof.pylon.tassadar_executor_trace",
+      `${lease.assignmentRef}:${trace.traceDigest}:${trace.stepCount}`,
+    )
+    return {
+      artifactRefs: [artifactRef],
+      blockerRefs: digestMatchesExpectation
+        ? []
+        : ["blocker.assignment.tassadar_trace_digest_mismatch"],
+      buildRefs: [runRef],
+      message: digestMatchesExpectation
+        ? `Tassadar executor-trace workload executed: ${trace.stepCount} steps, halted=${halted}, ${outputs.length} output(s), trace digest ${trace.traceDigest.slice(0, 16)}… matches the dispatched expectation.`
+        : "Tassadar executor-trace workload executed but the trace digest does not match the dispatched expectation.",
+      previewRefs: [],
+      proofRefs: [proofRef],
+      resultRefs: [
+        `result.tassadar_poc.trace_digest.${trace.traceDigest}`,
+        `result.tassadar_poc.step_count.${trace.stepCount}`,
+        `result.tassadar_poc.halted.${halted}`,
+      ],
+      runRefs: [runRef],
+      status: digestMatchesExpectation ? ("accepted" as const) : ("rejected" as const),
+      summaryRefs: [
+        digestMatchesExpectation
+          ? "summary.tassadar_poc.trace_digest_match"
+          : "summary.tassadar_poc.trace_digest_mismatch",
+      ],
+      testRefs: [proofRef],
+    }
+  } catch (error) {
+    const failureRef = stableRef(
+      "proof.pylon.tassadar_executor_trace.refused",
+      `${lease.leaseRef}:${String(error)}`,
+    )
+    return {
+      artifactRefs: [],
+      blockerRefs: ["blocker.assignment.tassadar_execution_refused"],
+      buildRefs: [runRef],
+      message: "Tassadar executor-trace workload refused with a typed execution error.",
+      previewRefs: [],
+      proofRefs: [failureRef],
+      resultRefs: ["result.tassadar_poc.execution_refused"],
+      runRefs: [runRef],
+      status: "rejected" as const,
+      summaryRefs: ["summary.tassadar_poc.execution_refused"],
+      testRefs: [failureRef],
+    }
+  }
+}
+
+async function executeRuntimeGate(
+  state: PylonLocalState,
+  lease: PylonAssignmentLease,
+  now: Date,
+) {
+  const runtimeGate = runtimeGatePayloadFrom(lease.codingAssignment)
+
+  if (runtimeGate === null) {
+    return null
+  }
+
+  const workspaceRef = stableRef("workspace.pylon.runtime_gate", lease.leaseRef)
+  const workspace = join(state.paths.cache, "runtime-gates", workspaceRef)
+
+  await mkdir(workspace, { recursive: true })
+  await writeFile(
+    join(workspace, "package.json"),
+    `${JSON.stringify({
+      private: true,
+      scripts: {
+        test: "bun test sum.test.ts",
+      },
+      type: "module",
+    }, null, 2)}\n`,
+  )
+  await writeFile(
+    join(workspace, "sum.ts"),
+    "export const sum = (left: number, right: number) => left - right\n",
+  )
+  await writeFile(
+    join(workspace, "sum.test.ts"),
+    [
+      'import { describe, expect, test } from "bun:test"',
+      'import { sum } from "./sum"',
+      "",
+      'describe("sum fixture", () => {',
+      '  test("adds two numbers", () => {',
+      "    expect(sum(2, 3)).toBe(5)",
+      "  })",
+      "})",
+      "",
+    ].join("\n"),
+  )
+  await writeFile(
+    join(workspace, "sum.ts"),
+    "export const sum = (left: number, right: number) => left + right\n",
+  )
+
+  const command = await runCommand({
+    args: ["bun", "test", "sum.test.ts"],
+    cwd: workspace,
+  })
+  const commandRef = stableRef(
+    "command.pylon.runtime_gate.bun_test",
+    `${lease.leaseRef}:${command.exitCode}:${command.stdoutBytes}:${command.stderrBytes}`,
+  )
+  const runRef = stableRef(
+    "run.pylon.runtime_gate",
+    `${lease.leaseRef}:${runtimeGate.fixtureRef}:${now.toISOString()}`,
+  )
+  const artifactRef = stableRef(
+    "artifact.pylon.runtime_gate.fixture_patch",
+    `${lease.assignmentRef}:${runtimeGate.fixtureRef}:sum_plus`,
+  )
+  const proofRef = stableRef(
+    "proof.pylon.runtime_gate.test_passed",
+    `${artifactRef}:${commandRef}`,
+  )
+
+  if (command.exitCode !== 0) {
+    return {
+      artifactRefs: [artifactRef],
+      blockerRefs: ["blocker.assignment.runtime_gate_test_failed"],
+      buildRefs: [commandRef],
+      message: "Bounded runtime gate fixture repair failed its public-safe test command.",
+      previewRefs: [workspaceRef],
+      proofRefs: [proofRef],
+      resultRefs: ["result.public.pylon_runtime_gate.failed"],
+      runRefs: [runRef],
+      status: "rejected" as const,
+      summaryRefs: ["summary.public.pylon_runtime_gate.fixture_repair_failed"],
+      testRefs: [commandRef],
+    }
+  }
+
+  return {
+    artifactRefs: [artifactRef],
+    blockerRefs: [],
+    buildRefs: [commandRef],
+    message: "Bounded runtime gate fixture repair executed and verified by the local Pylon runtime.",
+    previewRefs: [workspaceRef],
+    proofRefs: [proofRef],
+    resultRefs: ["result.public.pylon_runtime_gate.fixture_repair_passed"],
+    runRefs: [runRef],
+    status: "accepted" as const,
+    summaryRefs: ["summary.public.pylon_runtime_gate.fixture_repair_passed"],
+    testRefs: [commandRef],
+  }
+}
+
 async function loadAssignmentStore(state: PylonLocalState): Promise<AssignmentStore> {
   await ensureStateDirectories(state.paths)
   if (!existsSync(state.paths.assignmentState)) {
@@ -145,6 +681,19 @@ async function loadAssignmentStore(state: PylonLocalState): Promise<AssignmentSt
 async function writeAssignmentStore(state: PylonLocalState, store: AssignmentStore) {
   assertPublicProjectionSafe(store)
   await writeFile(state.paths.assignmentState, `${JSON.stringify(store, null, 2)}\n`)
+}
+
+const locallyTerminalAssignmentStatuses = new Set<AssignmentStatus>([
+  "closed",
+  "rejected",
+  "cancelled",
+  "timed-out",
+  "stale",
+])
+
+function localLeaseIsTerminal(store: AssignmentStore, leaseRef: string): boolean {
+  const local = store.leases[leaseRef]
+  return local !== undefined && locallyTerminalAssignmentStatuses.has(local.status)
 }
 
 function isLegacyLease(value: unknown): value is PylonAssignmentLease {
@@ -242,7 +791,7 @@ function isExpired(lease: PylonAssignmentLease, now: Date) {
 export async function computeAssignmentAdmission(
   state: PylonLocalState,
   lease: PylonAssignmentLease,
-  options: Pick<AssignmentClientOptions, "now" | "staleAfterMs" | "walletRunner" | "psionicQwenAdmission"> = {},
+  options: Pick<AssignmentClientOptions, "now" | "staleAfterMs" | "psionicQwenAdmission" | "gepaEnvelope"> = {},
 ) {
   const now = options.now?.() ?? new Date()
   const presence = await loadOrCreatePresenceState(state.paths, state.identity)
@@ -284,15 +833,10 @@ export async function computeAssignmentAdmission(
     }
   }
   if (isExpired(lease, now)) blockerRefs.add("blocker.assignment.lease_expired")
-  if (lease.paymentMode === "paid") {
-    const wallet = await classifyMdkWallet(options.walletRunner)
-    if (!wallet.sendReady) blockerRefs.add("blocker.assignment.wallet_blocked")
-  }
-
   return { admissible: blockerRefs.size === 0, blockerRefs: [...blockerRefs] }
 }
 
-async function postJson(options: AssignmentClientOptions, path: string, body: JsonRecord, state: PylonLocalState) {
+async function postJson(options: AssignmentClientOptions, path: string, body: JsonRecord, state: PylonLocalState): Promise<JsonRecord> {
   assertPublicProjectionSafe(body)
   const fetchImpl = options.fetch ?? fetch
   const url = new URL(path, options.baseUrl).toString()
@@ -343,6 +887,35 @@ async function getJson(options: AssignmentClientOptions, path: string, state: Py
   const response = await fetchImpl(url, { method: "GET", headers })
   const responseText = await response.text()
   const json = responseText.trim() ? (JSON.parse(responseText) as JsonRecord) : {}
+  // Per-assignment safety isolation: one projection-unsafe assignment must
+  // not poison the entire poll. Unsafe entries are dropped with a typed
+  // marker; everything else still passes the full assertion.
+  const assignments = (json as { assignments?: unknown }).assignments
+  if (Array.isArray(assignments)) {
+    const safeAssignments: unknown[] = []
+    const droppedRefs: string[] = []
+    for (const assignment of assignments) {
+      try {
+        assertPublicProjectionSafe(assignment, "projection.assignment")
+        safeAssignments.push(assignment)
+      } catch {
+        const ref = (assignment as { assignmentRef?: unknown })?.assignmentRef
+        droppedRefs.push(typeof ref === "string" ? ref : "assignment.unknown")
+      }
+    }
+    const filtered: JsonRecord = {
+      ...json,
+      assignments: safeAssignments,
+      ...(droppedRefs.length > 0
+        ? { droppedUnsafeAssignmentRefs: droppedRefs }
+        : {}),
+    }
+    assertPublicProjectionSafe(filtered)
+    if (!response.ok) {
+      throw new Error(`OpenAgents assignment request failed (${response.status}): ${responseText}`)
+    }
+    return filtered
+  }
   assertPublicProjectionSafe(json)
   if (!response.ok) {
     throw new Error(`OpenAgents assignment request failed (${response.status}): ${responseText}`)
@@ -368,7 +941,11 @@ export async function acceptAssignment(
   const state = await ensurePylonLocalState(summary)
   const store = await loadAssignmentStore(state)
   const existing = store.leases[lease.leaseRef]
-  if (existing?.status === "accepted" || existing?.status === "running" || existing?.status === "closed") {
+  if (
+    existing?.status === "accepted" ||
+    existing?.status === "running" ||
+    localLeaseIsTerminal(store, lease.leaseRef)
+  ) {
     return {
       ok: false,
       accepted: false,
@@ -491,12 +1068,19 @@ export async function submitAssignmentCloseout(
     closedAt: closeout.completedAt,
   }
   await writeAssignmentStore(state, store)
-  return { closeoutRef: String(response.closeoutRef ?? stableRef("assignment.closeout", closeout.leaseRef)) }
+  const closeoutRef = String(response.closeoutRef ?? stableRef("assignment.closeout", closeout.leaseRef))
+  await writeTrainingWorkerReceiptsBundle(state, closeout, closeoutRef)
+  return { closeoutRef }
 }
 
 export async function runNoSpendAssignment(summary: BootstrapSummary, options: AssignmentClientOptions) {
+  const state = await ensurePylonLocalState(summary)
+  const store = await loadAssignmentStore(state)
   const leases = await pollAssignments(summary, options)
-  const lease = leases.find((candidate) => candidate.paymentMode === "no-spend")
+  const lease = leases.find((candidate) =>
+    candidate.paymentMode === "no-spend" &&
+    !localLeaseIsTerminal(store, candidate.leaseRef)
+  )
   if (!lease) {
     return { ok: false, reason: "no no-spend assignment lease available", leases }
   }
@@ -506,18 +1090,31 @@ export async function runNoSpendAssignment(summary: BootstrapSummary, options: A
     return { ok: false, acceptance }
   }
 
-  const observedAt = (options.now?.() ?? new Date()).toISOString()
-  const artifactRef = stableRef("assignment.artifact", `${lease.assignmentRef}:${lease.goal}`)
-  const proofRef = stableRef("assignment.proof", `${lease.leaseRef}:${artifactRef}`)
+  const observedAtDate = options.now?.() ?? new Date()
+  const observedAt = observedAtDate.toISOString()
+  const runtimeGate =
+    (await executeTassadarAssignment(lease, observedAtDate)) ??
+    (await executeClaudeAgentAssignment(state, lease, observedAtDate, {
+      ...(options.claudeAgentCheckoutRunner === undefined ? {} : { checkoutRunner: options.claudeAgentCheckoutRunner }),
+      ...(options.claudeAgentRunner === undefined ? {} : { claudeAgentRunner: options.claudeAgentRunner }),
+      ...(options.claudeAgentProbe === undefined ? {} : { claudeAgentProbe: options.claudeAgentProbe }),
+    })) ??
+    (await executeCodexAgentAssignment(state, lease, observedAtDate, {
+      ...(options.codexAgentRunner === undefined ? {} : { codexAgentRunner: options.codexAgentRunner }),
+      ...(options.codexAgentProbe === undefined ? {} : { codexAgentProbe: options.codexAgentProbe }),
+    })) ??
+    (await executeRuntimeGate(state, lease, observedAtDate))
+  const artifactRefs = runtimeGate?.artifactRefs ?? [stableRef("assignment.artifact", `${lease.assignmentRef}:${lease.goal}`)]
+  const proofRefs = runtimeGate?.proofRefs ?? [stableRef("assignment.proof", `${lease.leaseRef}:${artifactRefs[0]}`)]
   const progress: AssignmentProgress = {
     schema: "openagents.pylon.assignment_progress.v0.3",
     assignmentRef: lease.assignmentRef,
     leaseRef: lease.leaseRef,
     sequence: 1,
     status: "proof-ready",
-    message: "No-spend assignment executed in bounded local Pylon runtime.",
-    artifactRefs: [artifactRef],
-    proofRefs: [proofRef],
+    message: runtimeGate?.message ?? "No-spend assignment executed in bounded local Pylon runtime.",
+    artifactRefs,
+    proofRefs,
     observedAt,
   }
   let progressReceipt: { progressRef: string }
@@ -527,10 +1124,10 @@ export async function runNoSpendAssignment(summary: BootstrapSummary, options: A
     artifactReceipt = await submitAssignmentArtifacts(
       summary,
       {
-        artifactRefs: [artifactRef],
+        artifactRefs,
         assignmentRef: lease.assignmentRef,
         leaseRef: lease.leaseRef,
-        proofRefs: [proofRef],
+        proofRefs,
       },
       options,
     )
@@ -566,31 +1163,40 @@ export async function runNoSpendAssignment(summary: BootstrapSummary, options: A
     schema: "openagents.pylon.assignment_closeout.v0.3",
     assignmentRef: lease.assignmentRef,
     leaseRef: lease.leaseRef,
-    status: "accepted",
+    status: runtimeGate?.status ?? "accepted",
     paymentMode: "no-spend",
     settlementState: "not_applicable",
     payoutClaimAllowed: false,
-    artifactRefs: [artifactRef],
-    blockerRefs: [],
-    buildRefs: [stableRef("assignment.build.not_required", lease.leaseRef)],
+    artifactRefs,
+    blockerRefs: runtimeGate?.blockerRefs ?? [],
+    buildRefs: runtimeGate?.buildRefs ?? [stableRef("assignment.build.not_required", lease.leaseRef)],
     closeoutRefs: [stableRef("assignment.closeout.summary", lease.leaseRef)],
-    previewRefs: [stableRef("assignment.preview.not_required", lease.leaseRef)],
-    proofRefs: [proofRef],
+    previewRefs: runtimeGate?.previewRefs ?? [stableRef("assignment.preview.not_required", lease.leaseRef)],
+    proofRefs,
     receiptRefs: [
       acceptance.statusRef,
       progressReceipt.progressRef,
       ...(artifactReceipt === null ? [] : [artifactReceipt.artifactRef]),
+      ...(runtimeGate?.runRefs ?? []),
       ...psionicCloseoutReceiptRefs(lease, options),
     ],
-    resultRefs: [stableRef("assignment.result.public_safe", lease.assignmentRef)],
-    summaryRefs: [stableRef("assignment.summary.public_safe", lease.assignmentRef)],
-    testRefs: [stableRef("assignment.test.not_required", lease.leaseRef)],
+    resultRefs: runtimeGate?.resultRefs ?? [stableRef("assignment.result.public_safe", lease.assignmentRef)],
+    summaryRefs: runtimeGate?.summaryRefs ?? [stableRef("assignment.summary.public_safe", lease.assignmentRef)],
+    testRefs: runtimeGate?.testRefs ?? [stableRef("assignment.test.not_required", lease.leaseRef)],
     redacted: true,
     completedAt: observedAt,
   }
   assertPublicProjectionSafe(closeout)
   const closeoutReceipt = await submitAssignmentCloseout(summary, closeout, options)
-  return { ok: true, lease, acceptance, progress, closeout, progressReceipt, closeoutReceipt }
+  return {
+    ok: closeout.status === "accepted",
+    lease,
+    acceptance,
+    progress,
+    closeout,
+    progressReceipt,
+    closeoutReceipt,
+  }
 }
 
 function psionicAdmissionFromCapabilityRefs(capabilityRefs: string[]): PsionicQwenModelAdmission {

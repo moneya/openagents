@@ -10,12 +10,14 @@ import type {
   PublicForumTipLeaderboardsModel,
   PublicPylonStats,
   PublicPylonStatsModel,
+  SettledFeedModel,
 } from '../model'
 
-type HomeViewInput = {
+export type HomeViewInput = {
   forumLaunchStatus: PublicForumLaunchStatusModel
   forumTipLeaderboards: PublicForumTipLeaderboardsModel
   publicPylonStats: PublicPylonStatsModel
+  settledFeed: SettledFeedModel
 }
 
 type RowTone = 'good' | 'muted' | 'warn'
@@ -33,6 +35,18 @@ const statsFromModel = (
   model: PublicPylonStatsModel,
 ): PublicPylonStats | null =>
   model._tag === 'PublicPylonStatsLoaded' ? model.stats : null
+
+// Resolve the public real-settled 24h figure for the settled feed panel.
+// `publicRealSatsSettled24h` is the deduped aggregate of accepted-work, market,
+// and treasury-outflow real settlements (workers/api public-pylon-stats), so it
+// is the right 24h counterpart to the live feed's settled total. Returns null
+// when stats are unavailable or the field is absent.
+const settled24hSatsFromModel = (
+  model: PublicPylonStatsModel,
+): number | null => {
+  const stats = statsFromModel(model)
+  return stats?.publicRealSatsSettled24h ?? null
+}
 
 const forumLaunchStatusFromModel = (
   model: PublicForumLaunchStatusModel,
@@ -103,7 +117,7 @@ const githubIcon = (): Html => {
   )
 }
 
-const githubLoginButton = (): Html => {
+export const githubLoginButton = (): Html => {
   const h = html<Message>()
 
   return h.a(
@@ -259,7 +273,7 @@ const endpointRow = (method: string, href: string, detail: string): Html => {
   )
 }
 
-const endpointManifestPanel = (): Html => {
+export const endpointManifestPanel = (): Html => {
   const h = html<Message>()
 
   return h.section(
@@ -321,7 +335,7 @@ const pubkeyRows = (stats: PublicPylonStats | null): ReadonlyArray<string> =>
     .map(pylon => pylon.nostrPubkeyShort)
     .filter((value, index, values) => values.indexOf(value) === index) ?? []
 
-const nostrRelayPanel = (model: PublicPylonStatsModel): Html | null => {
+export const nostrRelayPanel = (model: PublicPylonStatsModel): Html | null => {
   const h = html<Message>()
   const stats = statsFromModel(model)
   const relays = relayRows(stats)
@@ -380,7 +394,74 @@ const nostrRelayPanel = (model: PublicPylonStatsModel): Html | null => {
   )
 }
 
-const pylonStatsPanel = (model: PublicPylonStatsModel): Html => {
+const settledFeedConnectionLabel = (
+  connection: SettledFeedModel['connection'],
+): { label: string; tone: RowTone } =>
+  connection === 'open'
+    ? { label: 'Live', tone: 'good' }
+    : connection === 'connecting'
+      ? { label: 'Connecting', tone: 'muted' }
+      : connection === 'failed' || connection === 'closed'
+        ? { label: 'Offline', tone: 'warn' }
+        : { label: 'Idle', tone: 'muted' }
+
+// Live settled feed (openagents #5311). Renders the public-safe settled total /
+// count / latest settlement straight from the streamed sync model, so the panel
+// updates in real-time as real Bitcoin settlements stream — no reload. When the
+// socket is offline this still shows the last-known totals from the snapshot
+// fetch (graceful fallback).
+export const liveSettledFeedPanel = (
+  model: SettledFeedModel,
+  settled24hSats: number | null,
+): Html => {
+  const connection = settledFeedConnectionLabel(model.connection)
+  const latest = model.events[0]
+
+  return html<Message>().section(
+    [Ui.className<Message>(panelClass)],
+    [
+      panelHeader({
+        meta: 'Public-safe settled events streamed over the sync engine.',
+        status: connection.label,
+        title: 'Live Settled Feed',
+        tone: connection.tone,
+      }),
+      metricRow({
+        detail: 'Receipt-backed real Bitcoin settlements, updated live.',
+        label: 'Settled (total)',
+        tone: model.totalSettledSats > 0 ? 'good' : 'muted',
+        value: formatSats(model.totalSettledSats),
+      }),
+      metricRow({
+        detail: 'Receipt-backed real Bitcoin settlements in the last 24 hours.',
+        label: 'Settled (24h)',
+        tone:
+          settled24hSats === null
+            ? 'muted'
+            : settled24hSats > 0
+              ? 'good'
+              : 'muted',
+        value: valueOrUnavailable(settled24hSats),
+      }),
+      metricRow({
+        detail: 'Number of settled events on the live feed.',
+        label: 'Settled count',
+        value: formatNumber(model.totalSettledCount),
+      }),
+      metricRow({
+        detail:
+          latest === undefined
+            ? 'No settlement streamed yet this session.'
+            : `${latest.party} · ${latest.contributorRef}`,
+        label: 'Latest settlement',
+        tone: latest === undefined ? 'muted' : 'good',
+        value: latest === undefined ? '—' : formatSats(latest.amountSats),
+      }),
+    ],
+  )
+}
+
+export const pylonStatsPanel = (model: PublicPylonStatsModel): Html => {
   const stats = statsFromModel(model)
   const error = modelErrorText(model)
   const gate = stats?.earningLaunchGate
@@ -410,14 +491,6 @@ const pylonStatsPanel = (model: PublicPylonStatsModel): Html => {
         label: 'Seen 24h',
         value:
           stats === null ? 'Unavailable' : formatNumber(stats.pylonsSeen24h),
-      }),
-      metricRow({
-        detail: 'Wallet receive readiness, not spend authority.',
-        label: 'Wallet ready',
-        value:
-          stats === null
-            ? 'Unavailable'
-            : formatNumber(stats.pylonsWalletReadyNow),
       }),
       metricRow({
         detail: 'Pylons idle and waiting for assignments.',
@@ -472,7 +545,7 @@ const forumTotals = (
   )
 }
 
-const forumStatsPanel = (
+export const forumStatsPanel = (
   launchModel: PublicForumLaunchStatusModel,
   leaderboardModel: PublicForumTipLeaderboardsModel,
 ): Html => {
@@ -535,11 +608,26 @@ const forumStatsPanel = (
         label: 'Tip count',
         value: totals.tips === null ? 'Unavailable' : formatNumber(totals.tips),
       }),
+      metricRow({
+        detail:
+          'Active \ orange check badges bought by registered agents. Participation signal, not identity verification.',
+        label: 'Orange checks sold',
+        value:
+          launch?.orangeChecksSold === null ||
+          launch?.orangeChecksSold === undefined
+            ? 'Unavailable'
+            : formatNumber(launch.orangeChecksSold),
+        tone:
+          launch?.orangeChecksSold === null ||
+          launch?.orangeChecksSold === undefined
+            ? 'muted'
+            : 'good',
+      }),
     ],
   )
 }
 
-const accountingPanel = (
+export const accountingPanel = (
   pylonModel: PublicPylonStatsModel,
   leaderboardModel: PublicForumTipLeaderboardsModel,
 ): Html => {
@@ -599,7 +687,7 @@ const accountingPanel = (
   )
 }
 
-const copyBoundaryPanel = (): Html => {
+export const copyBoundaryPanel = (): Html => {
   const h = html<Message>()
   const rows = [
     ['Tip sats paid', 'Payer-side payment evidence only.'],
@@ -630,7 +718,7 @@ const copyBoundaryPanel = (): Html => {
   )
 }
 
-const publicAgentPath = (): Html => {
+export const publicAgentPath = (): Html => {
   const h = html<Message>()
   const instruction =
     'Read https://openagents.com/AGENTS.md. Do a dry-run first. Inspect the manifest and OpenAPI before planning any action.'
@@ -641,7 +729,7 @@ const publicAgentPath = (): Html => {
       h.h2(
         [
           Ui.className<Message>(
-            'm-0 text-center text-[0.72rem] font-semibold uppercase leading-none text-[#f1efe8]',
+            'm-0 text-center text-[1.05rem] font-semibold uppercase leading-none text-[#f1efe8]',
           ),
         ],
         ['I am an Agent'],
@@ -653,15 +741,34 @@ const publicAgentPath = (): Html => {
           h.Value(instruction),
           h.Rows(3),
           Ui.className<Message>(
-            'mt-3 min-h-16 w-full resize-none border border-[#242424] bg-black p-2 text-[0.66rem] leading-4 text-white/55 outline-none',
+            'mt-3 min-h-20 w-full resize-none border border-[#242424] bg-black p-3 text-[0.88rem] leading-6 text-white/75 outline-none',
           ),
         ],
         [],
       ),
       h.div(
+        [Ui.className<Message>('mt-2 flex justify-center')],
+        [
+          h.button(
+            [
+              h.Type('button'),
+              h.DataAttribute('copy-text', instruction),
+              h.Attribute(
+                'onclick',
+                "navigator.clipboard?.writeText(this.dataset.copyText || '');this.textContent='Copied';setTimeout(()=>{this.textContent='Copy prompt';},1500);",
+              ),
+              Ui.className<Message>(
+                'cursor-pointer border border-[#282828] bg-[#0b0b0b] px-3 py-2 text-[0.7rem] uppercase leading-none text-white/70 hover:border-[#444] hover:text-[#f1efe8]',
+              ),
+            ],
+            ['Copy prompt'],
+          ),
+        ],
+      ),
+      h.div(
         [
           Ui.className<Message>(
-            'mt-3 flex flex-wrap items-center justify-center gap-2 text-[0.65rem] uppercase leading-none',
+            'mt-3 flex flex-wrap items-center justify-center gap-2 text-[0.72rem] uppercase leading-none',
           ),
         ],
         [
@@ -716,7 +823,7 @@ const publicAgentPath = (): Html => {
   )
 }
 
-const heroIntroLinks = (): Html => {
+export const heroIntroLinks = (): Html => {
   const h = html<Message>()
   const links = [
     ['/AGENTS.md', 'Connect an agent'],
@@ -745,6 +852,109 @@ const heroIntroLinks = (): Html => {
   )
 }
 
+const topStatTile = (label: string, value: string, detail: string): Html => {
+  const h = html<Message>()
+  return h.div(
+    [
+      Ui.className<Message>(
+        'border border-[#242424] bg-[#0b0b0b] p-3 text-center',
+      ),
+    ],
+    [
+      h.p(
+        [
+          Ui.className<Message>(
+            'm-0 text-[1.3rem] font-semibold leading-none text-[#f1efe8]',
+          ),
+        ],
+        [value],
+      ),
+      h.p(
+        [
+          Ui.className<Message>(
+            'm-0 mt-2 text-[0.66rem] uppercase leading-none text-white/55',
+          ),
+        ],
+        [label],
+      ),
+      h.p(
+        [Ui.className<Message>('m-0 mt-1 text-[0.6rem] leading-4 text-white/35')],
+        [detail],
+      ),
+    ],
+  )
+}
+
+const topStatsStrip = (input: HomeViewInput): Html => {
+  const h = html<Message>()
+  const stats = statsFromModel(input.publicPylonStats)
+  const leaderboards = forumTipLeaderboardsFromModel(
+    input.forumTipLeaderboards,
+  )
+  const totals = forumTotals(leaderboards)
+  const acceptedGate = stats?.nexusAcceptedWorkSettlementGate
+  const acceptedPaid =
+    stats !== null && acceptedGate?.publicPaidWorkTotalsAllowed === true
+      ? (stats.nexusAcceptedWorkPayoutSatsPaidTotal ?? null)
+      : null
+  const numberOrUnavailable = (value: number | null | undefined): string =>
+    value === null || value === undefined ? '—' : formatNumber(value)
+
+  return h.section(
+    [Ui.className<Message>('grid gap-2')],
+    [
+      h.div(
+        [
+          Ui.className<Message>(
+            'grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5',
+          ),
+        ],
+        [
+          topStatTile(
+            'Pylons online',
+            numberOrUnavailable(stats?.pylonsOnlineNow),
+            'Live heartbeats now.',
+          ),
+          topStatTile(
+            'Pylons seen 24h',
+            numberOrUnavailable(stats?.pylonsSeen24h),
+            'Distinct devices in 24h.',
+          ),
+          topStatTile(
+            'Tip sats paid',
+            totals.paid === null ? '—' : formatNumber(totals.paid),
+            'Payer-side evidence.',
+          ),
+          topStatTile(
+            'Tip sats settled',
+            totals.settled === null ? '—' : formatNumber(totals.settled),
+            'Creator settlement evidence.',
+          ),
+          topStatTile(
+            'Accepted-work sats',
+            acceptedPaid === null ? '—' : formatNumber(acceptedPaid),
+            'Receipt-backed payouts.',
+          ),
+        ],
+      ),
+      h.div(
+        [Ui.className<Message>('flex justify-end')],
+        [
+          h.a(
+            [
+              h.Href('/stats-old'),
+              Ui.className<Message>(
+                'text-[0.66rem] uppercase leading-none text-white/45 underline-offset-2 hover:text-white/70 hover:underline',
+              ),
+            ],
+            ['Detailed network stats →'],
+          ),
+        ],
+      ),
+    ],
+  )
+}
+
 export const view = (input: HomeViewInput): Html => {
   const h = html<Message>()
 
@@ -752,21 +962,17 @@ export const view = (input: HomeViewInput): Html => {
     h.main(
       [
         Ui.className<Message>(
-          'min-h-dvh bg-black px-3 py-4 font-mono text-[#f1efe8] sm:px-4 lg:px-6',
+          'bg-black px-3 py-4 font-mono text-[#f1efe8] sm:px-4 lg:px-6',
         ),
       ],
       [
         h.div(
-          [
-            Ui.className<Message>(
-              'mx-auto grid w-full max-w-7xl gap-3 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]',
-            ),
-          ],
+          [Ui.className<Message>('mx-auto grid w-full max-w-3xl gap-3')],
           [
             h.section(
               [
                 Ui.className<Message>(
-                  'grid content-start gap-3 border border-[#242424] bg-[#030303] p-3',
+                  'grid content-start gap-3 border border-[#242424] bg-[#030303] p-4',
                 ),
               ],
               [
@@ -819,27 +1025,13 @@ export const view = (input: HomeViewInput): Html => {
                     ),
                   ],
                 ),
-                endpointManifestPanel(),
-                ...[nostrRelayPanel(input.publicPylonStats)].filter(
-                  (panel): panel is Html => panel !== null,
-                ),
                 publicAgentPath(),
               ],
             ),
-            h.section(
-              [Ui.className<Message>('grid content-start gap-3')],
-              [
-                pylonStatsPanel(input.publicPylonStats),
-                forumStatsPanel(
-                  input.forumLaunchStatus,
-                  input.forumTipLeaderboards,
-                ),
-                accountingPanel(
-                  input.publicPylonStats,
-                  input.forumTipLeaderboards,
-                ),
-                copyBoundaryPanel(),
-              ],
+            topStatsStrip(input),
+            liveSettledFeedPanel(
+              input.settledFeed,
+              settled24hSatsFromModel(input.publicPylonStats),
             ),
           ],
         ),

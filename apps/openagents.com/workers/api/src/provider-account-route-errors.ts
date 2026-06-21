@@ -1,4 +1,4 @@
-import { redactProviderAccountLogValue } from '@openagents/provider-account-schema'
+import { redactProviderAccountLogValue } from '@openagentsinc/provider-account-schema'
 
 import {
   type ProviderAccountError,
@@ -15,6 +15,8 @@ export const providerAccountHttpStatusByTag = {
   ProviderDeviceLoginAttemptExpired: 409,
   ProviderDeviceLoginAttemptNotPending: 409,
   ProviderAccountNotConnectedHealthy: 409,
+  ProviderApiKeyInvalid: 400,
+  ProviderApiKeyRejected: 422,
   ProviderGrantAccountMismatch: 409,
   ProviderGrantExpired: 409,
   ProviderGrantNotIssued: 409,

@@ -71,5 +71,32 @@ credentials or live provider availability.
   where they describe the current product rather than historical source.
 - Decide whether `@openagentsinc/pylon-runtime` should be published separately
   or kept as packaged source inside `@openagentsinc/pylon`.
-- Add Codex backend wiring when the Codex runtime contract is finalized.
 - Keep Qwen work postponed; GEPA remains the priority backend/evaluation loop.
+
+## 2026-06-13 Pylon Autopilot Follow-Up
+
+- Issues #4868-#4870 added per-session Codex/Claude account selection,
+  multi-session local proof orchestration, and loopback control-session verbs.
+- Issue #4871 adds the account usage diagnostics path: Pylon now parses Codex
+  rate-limit header/event shapes (`x-codex-primary-*`,
+  `x-codex-secondary-*`, multi-bucket `x-{limit-id}-*`, and
+  `codex.rate_limits`) into public-safe snapshots, stores observed
+  provider/local-session truth by hashed account ref, exposes
+  `pylon accounts list --json` and `pylon accounts usage --json`, and includes
+  an optional usage summary in `pylon dev doctor --json` / `pylon context
+  --json`.
+- The local Codex source check found that the current TypeScript SDK event
+  surface exposes token usage on `turn.completed`; richer rate-limit state is
+  represented in Codex core/app-server `TokenCount` /
+  `account/rateLimits/read` paths. Pylon therefore captures provider
+  snapshots whenever those structured payloads appear, and labels missing
+  provider truth honestly rather than deriving it from token totals.
+- Issue #4872 completed the worker-side companion leg in `openagents.com`:
+  token-usage rows can now carry provider-account refs, admin/owner usage
+  aggregates are exposed without credential material, and per-account budget
+  signals remain advisory events rather than enforcement authority.
+- The local dogfood run exposed a targeting papercut: unnamed default homes
+  were listed but could not be selected by a human-friendly ref. The CLI now
+  accepts provider/default selectors such as `--account codex`, `--account
+  chatgpt`, `--provider codex`, and `--provider claude` while preserving
+  registered account refs.

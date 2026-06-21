@@ -1,5 +1,9 @@
 import { Effect } from 'effect'
 import { describe, expect, test } from 'vitest'
+import {
+  lbrAgenticCodingRequestToDraft,
+  makeLbrAgenticCodingRequest,
+} from '@openagentsinc/nip90'
 
 import type { VerifiedPublicIdentityClaim } from './agent-owner-claim-routes'
 import { makeForumRoutes } from './forum-routes'
@@ -251,7 +255,9 @@ type TipSettlementClaimRow = Readonly<{
 type TipRecipientWalletRow = Readonly<{
   actor_ref: string
   archived_at: string | null
+  spark_address: string | null
   bolt12_offer: string | null
+  lightning_address: string | null
   caveat_refs_json: string
   claim_policy_refs_json: string
   created_at: string
@@ -269,6 +275,41 @@ type TipRecipientWalletRow = Readonly<{
   wallet_ref: string
 }>
 
+const forumTopicPinRank = (pinState: TopicRow['pin_state']): number =>
+  pinState === 'announcement' ? 0 : pinState === 'sticky' ? 1 : 2
+
+const forumTopicActivityIso = (
+  store: ForumRouteStore,
+  topic: TopicRow,
+): string => {
+  const latestPost = store.posts.find(
+    post =>
+      post.id === topic.latest_post_id &&
+      post.topic_id === topic.id &&
+      post.archived_at === null &&
+      (post.state === 'visible' ||
+        post.state === 'edited' ||
+        post.state === 'tombstoned'),
+  )
+
+  return latestPost?.created_at ?? latestPost?.updated_at ?? topic.updated_at
+}
+
+const sortForumTopicListRows = (
+  store: ForumRouteStore,
+  rows: ReadonlyArray<TopicRow>,
+): Array<TopicRow> =>
+  [...rows].sort(
+    (left, right) =>
+      forumTopicActivityIso(store, right).localeCompare(
+        forumTopicActivityIso(store, left),
+      ) ||
+      forumTopicPinRank(left.pin_state) - forumTopicPinRank(right.pin_state) ||
+      right.updated_at.localeCompare(left.updated_at) ||
+      right.created_at.localeCompare(left.created_at) ||
+      left.id.localeCompare(right.id),
+  )
+
 type AgentProfileRow = Readonly<{
   avatar_url: string | null
   created_at: string
@@ -276,6 +317,26 @@ type AgentProfileRow = Readonly<{
   slug: string | null
   updated_at: string
   user_id: string
+}>
+
+type AgentOwnerClaimRow = Readonly<{
+  agent_user_id: string
+  decided_at: string | null
+  id: string
+  owner_user_id: string
+  receipt_ref: string
+  status: 'approved' | 'expired' | 'pending' | 'rejected' | 'revoked'
+  updated_at: string
+}>
+
+type AgentOwnerXChallengeRow = Readonly<{
+  agent_user_id: string
+  id: string
+  receipt_ref: string | null
+  state: 'approved' | 'pending_tweet' | 'rejected' | 'verified'
+  tweet_ref: string | null
+  updated_at: string | null
+  verified_at: string | null
 }>
 
 type WatchRow = Readonly<{
@@ -387,6 +448,109 @@ type ContextLinkRow = Readonly<{
   topic_id: string | null
 }>
 
+type WorkRequestRow = Readonly<{
+  archived_at: string | null
+  budget_msats: number
+  budget_sats: number
+  created_at: string
+  deadline_ref: string
+  first_post_id: string
+  id: string
+  idempotency_key: string
+  job_event_id: string
+  job_event_kind: number
+  job_result_kind: number
+  objective_ref: string
+  public_projection_json: string
+  quote_count: number
+  relay_url: string
+  repository_refs_json: string
+  requester_actor_ref: string
+  required_capability_refs_json: string
+  state:
+    | 'open'
+    | 'quote_received'
+    | 'quote_accepted'
+    | 'running'
+    | 'delivered'
+    | 'accepted'
+    | 'settled'
+    | 'cancelled'
+    | 'expired'
+  title: string
+  topic_id: string
+  updated_at: string
+  verification_command_ref: string
+}>
+
+type WorkRequestRelayLinkRow = Readonly<{
+  archived_at: string | null
+  bridge_actor_ref: string
+  created_at: string
+  event_json: string
+  id: string
+  job_event_id: string
+  job_event_kind: number
+  relay_ref: string
+  relay_url: string
+  topic_id: string
+  work_request_id: string
+}>
+
+type WorkRequestLifecyclePostRow = Readonly<{
+  archived_at: string | null
+  created_at: string
+  id: string
+  idempotency_key: string
+  lifecycle_kind:
+    | 'quote_received'
+    | 'quote_accepted'
+    | 'running'
+    | 'delivered'
+    | 'accepted'
+    | 'settled'
+    | 'cancelled'
+    | 'expired'
+  post_id: string
+  receipt_ref: string
+  state_after: WorkRequestRow['state']
+  topic_id: string
+  work_request_id: string
+}>
+
+type WorkRequestOfferRow = Readonly<{
+  amount_msats: number
+  amount_sats: number
+  archived_at: string | null
+  capability_refs_json: string
+  created_at: string
+  id: string
+  provider_actor_ref: string
+  public_projection_json: string
+  quote_ref: string
+  relay_event_ref: string | null
+  state: 'accepted' | 'expired' | 'offered' | 'rejected'
+  updated_at: string
+  work_request_id: string
+}>
+
+type WorkRequestAcceptanceRow = Readonly<{
+  acceptance_event_ref: string
+  amount_msats: number
+  archived_at: string | null
+  created_at: string
+  escrow_id: string
+  id: string
+  idempotency_key: string
+  offer_id: string
+  provider_actor_ref: string
+  public_projection_json: string
+  quote_ref: string
+  requester_actor_ref: string
+  reserve_receipt_ref: string
+  work_request_id: string
+}>
+
 const projectionJson = JSON.stringify({
   classificationCaveatRef: 'classification.public_forum_projection',
   customerSafe: true,
@@ -440,8 +604,10 @@ const readyTipRecipientWalletRow = (
 ): TipRecipientWalletRow => ({
   actor_ref: 'actor.route-test',
   archived_at: null,
+  spark_address: null,
   bolt12_offer:
     'lno1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3j',
+  lightning_address: null,
   caveat_refs_json: JSON.stringify([
     'caveat.public.forum_tip_recipient.claim_required',
   ]),
@@ -490,6 +656,41 @@ const forumL402SigningBoundary = () =>
     signerRef: 'binding.forum.route.mdk.sandbox',
   })
 
+type CapturedWorkRequestRelayPublish = Readonly<{
+  draft: Readonly<{
+    content: string
+    kind: number
+    tags: ReadonlyArray<readonly string[]>
+  }>
+  relayUrl: string
+  topicId: string
+  workRequestId: string
+}>
+
+const fakeWorkRequestRelayPublisher = (
+  captured: Array<CapturedWorkRequestRelayPublish>,
+) => ({
+  publishWorkRequest: async (input: CapturedWorkRequestRelayPublish) => {
+    captured.push(input)
+    const jobEventId = String(captured.length).padStart(64, '0')
+
+    return {
+      accepted: true,
+      event: {
+        content: input.draft.content,
+        id: jobEventId,
+        kind: input.draft.kind,
+        pubkey: 'b'.repeat(64),
+        sig: 'c'.repeat(128),
+        tags: input.draft.tags,
+      },
+      jobEventId,
+      relayRef: 'relay.public.test.openagents_market',
+      relayUrl: input.relayUrl,
+    }
+  },
+})
+
 const signStandardWebhook = async (
   secret: string,
   id: string,
@@ -516,6 +717,7 @@ const signStandardWebhook = async (
 }
 
 class ForumRouteStore {
+  failInsertsInto: string | null = null
   orangeCheckEntitlements: Array<{
     action_ref: string | null
     actor_ref: string
@@ -598,6 +800,16 @@ class ForumRouteStore {
       slug: 'product-feedback',
       title: 'Product Feedback',
     },
+    {
+      archived_at: null,
+      board_id: '11111111-1111-4111-8111-111111111111',
+      description_ref: 'content.forum.category.labor.description',
+      discoverability: 'listed',
+      id: '99999999-7777-4777-8777-999999999999',
+      order_index: 50,
+      slug: 'labor',
+      title: 'Labor',
+    },
   ]
   forums: Array<ForumRow> = [
     {
@@ -665,6 +877,23 @@ class ForumRouteStore {
       public_projection_json: projectionJson,
       slug: 'product-promises',
       title: 'Product Promises',
+      topic_count: 0,
+      visibility: 'public',
+    },
+    {
+      archived_at: null,
+      board_id: '11111111-1111-4111-8111-111111111111',
+      category_id: '99999999-7777-4777-8777-999999999999',
+      description_ref: 'content.forum.work_requests.description',
+      discoverability: 'listed',
+      id: '99999999-7778-4778-8778-999999999999',
+      latest_post_id: null,
+      latest_topic_id: null,
+      locked: 0,
+      post_count: 0,
+      public_projection_json: projectionJson,
+      slug: 'work-requests',
+      title: 'Work Requests',
       topic_count: 0,
       visibility: 'public',
     },
@@ -1031,6 +1260,13 @@ class ForumRouteStore {
   notificationReads: Array<NotificationReadRow> = []
   tipRecipientWallets: Array<TipRecipientWalletRow> = []
   contextLinks: Array<ContextLinkRow> = []
+  workRequests: Array<WorkRequestRow> = []
+  workRequestRelayLinks: Array<WorkRequestRelayLinkRow> = []
+  workRequestLifecyclePosts: Array<WorkRequestLifecyclePostRow> = []
+  workRequestOffers: Array<WorkRequestOfferRow> = []
+  workRequestAcceptances: Array<WorkRequestAcceptanceRow> = []
+  agentOwnerClaims: Array<AgentOwnerClaimRow> = []
+  agentOwnerXChallenges: Array<AgentOwnerXChallengeRow> = []
 }
 
 class ForumRouteStatement implements D1PreparedStatement {
@@ -1057,6 +1293,18 @@ class ForumRouteStatement implements D1PreparedStatement {
       )
 
       return Promise.resolve((entitlement ?? null) as T | null)
+    }
+
+    if (this.query.includes('COUNT(*) AS live_count')) {
+      const topicId = String(this.values[0])
+      const count = this.store.posts.filter(
+        item =>
+          item.topic_id === topicId &&
+          item.archived_at === null &&
+          (item.state === 'visible' || item.state === 'edited'),
+      ).length
+
+      return Promise.resolve({ live_count: count } as T)
     }
 
     if (this.query.includes('SELECT COUNT(*) AS count')) {
@@ -1125,6 +1373,43 @@ class ForumRouteStatement implements D1PreparedStatement {
         this.store.agentProfiles.find(
           item => item.user_id === userId || item.slug === slug,
         ) ?? null
+
+      return Promise.resolve(row as T | null)
+    }
+
+    if (this.query.includes('FROM agent_owner_claims')) {
+      const agentUserId = String(this.values[0])
+      const row =
+        this.store.agentOwnerClaims
+          .filter(
+            item =>
+              item.agent_user_id === agentUserId &&
+              item.status === 'approved',
+          )
+          .sort(
+            (left, right) =>
+              (right.decided_at ?? '').localeCompare(left.decided_at ?? '') ||
+              right.updated_at.localeCompare(left.updated_at),
+          )[0] ?? null
+
+      return Promise.resolve(row as T | null)
+    }
+
+    if (this.query.includes('FROM agent_owner_x_claim_challenges')) {
+      const agentUserId = String(this.values[0])
+      const row =
+        this.store.agentOwnerXChallenges
+          .filter(
+            item =>
+              item.agent_user_id === agentUserId &&
+              (item.state === 'verified' || item.state === 'approved') &&
+              item.tweet_ref !== null,
+          )
+          .sort(
+            (left, right) =>
+              (right.verified_at ?? '').localeCompare(left.verified_at ?? '') ||
+              (right.updated_at ?? '').localeCompare(left.updated_at ?? ''),
+          )[0] ?? null
 
       return Promise.resolve(row as T | null)
     }
@@ -1435,6 +1720,77 @@ class ForumRouteStatement implements D1PreparedStatement {
       return Promise.resolve(row as T | null)
     }
 
+    if (this.query.includes('FROM forum_work_request_offers')) {
+      const workRequestId = String(this.values[0])
+      const quoteRef = String(this.values[1])
+      const row =
+        this.store.workRequestOffers.find(
+          item =>
+            item.work_request_id === workRequestId &&
+            item.quote_ref === quoteRef &&
+            item.archived_at === null,
+        ) ?? null
+
+      return Promise.resolve(row as T | null)
+    }
+
+    if (this.query.includes('FROM forum_work_request_acceptances')) {
+      const ref = String(this.values[0])
+      const row = this.query.includes('idempotency_key =')
+        ? (this.store.workRequestAcceptances.find(
+            item =>
+              item.idempotency_key === ref && item.archived_at === null,
+          ) ?? null)
+        : (this.store.workRequestAcceptances.find(
+            item =>
+              item.work_request_id === ref && item.archived_at === null,
+          ) ?? null)
+
+      return Promise.resolve(row as T | null)
+    }
+
+    if (this.query.includes('FROM forum_work_requests')) {
+      const ref = String(this.values[0])
+      const row = this.query.includes('idempotency_key =')
+        ? (this.store.workRequests.find(
+            item => item.idempotency_key === ref && item.archived_at === null,
+          ) ?? null)
+        : this.query.includes('job_event_id =')
+          ? (this.store.workRequests.find(
+              item => item.job_event_id === ref && item.archived_at === null,
+            ) ?? null)
+          : (this.store.workRequests.find(
+              item => item.id === ref && item.archived_at === null,
+            ) ?? null)
+
+      return Promise.resolve(row as T | null)
+    }
+
+    if (this.query.includes('FROM forum_work_request_relay_links')) {
+      const ref = String(this.values[0])
+      const row = this.query.includes('job_event_id =')
+        ? (this.store.workRequestRelayLinks.find(
+            item => item.job_event_id === ref && item.archived_at === null,
+          ) ?? null)
+        : (this.store.workRequestRelayLinks.find(
+            item => item.work_request_id === ref && item.archived_at === null,
+          ) ?? null)
+
+      return Promise.resolve(row as T | null)
+    }
+
+    if (this.query.includes('FROM forum_work_request_lifecycle_posts')) {
+      const idempotencyKey = String(this.values[0])
+      const row =
+        this.store.workRequestLifecyclePosts.find(
+          item =>
+            item.idempotency_key === idempotencyKey &&
+            item.archived_at === null,
+        ) ?? null
+
+      return Promise.resolve(row as T | null)
+    }
+
     if (this.query.includes('FROM forum_forums')) {
       const forumRef = String(this.values[0])
       const slugRef = String(this.values[1] ?? this.values[0])
@@ -1508,11 +1864,45 @@ class ForumRouteStatement implements D1PreparedStatement {
             item =>
               item.idempotency_key === topicRef && item.archived_at === null,
           ) ?? null)
-        : (this.store.topics.find(
-            item => item.id === topicRef && item.archived_at === null,
-          ) ?? null)
+        : this.query.includes('id = ? OR slug = ?')
+          ? (this.store.topics.find(
+              item => item.id === topicRef && item.archived_at === null,
+            ) ??
+            this.store.topics.find(
+              item => item.slug === topicRef && item.archived_at === null,
+            ) ??
+            null)
+          : (this.store.topics.find(
+              item => item.id === topicRef && item.archived_at === null,
+            ) ?? null)
 
       return Promise.resolve(row as T | null)
+    }
+
+    if (this.query.includes('WITH RECURSIVE forum_post_ancestors')) {
+      const startPostId = String(this.values[0])
+      const ancestorPostId = String(this.values[1])
+      const visited = new Set<string>()
+      let cursor: string | null = startPostId
+
+      while (cursor !== null && !visited.has(cursor)) {
+        const row = this.store.posts.find(
+          item => item.id === cursor && item.archived_at === null,
+        )
+
+        if (row === undefined) {
+          break
+        }
+
+        if (row.id === ancestorPostId) {
+          return Promise.resolve({ found: 1 } as T)
+        }
+
+        visited.add(row.id)
+        cursor = row.parent_post_id
+      }
+
+      return Promise.resolve(null)
     }
 
     if (this.query.includes('FROM forum_posts')) {
@@ -1529,10 +1919,183 @@ class ForumRouteStatement implements D1PreparedStatement {
       return Promise.resolve(row as T | null)
     }
 
+    // The reliable-tip payments ledger (pay_ins/pay_in_legs) is empty in
+    // this route fixture; ladder reads project no rows (#4753).
+    if (this.query.includes('FROM pay_ins')) {
+      return Promise.resolve(null)
+    }
+
     return Promise.reject(new Error(`Unexpected first: ${this.query}`))
   }
 
   run<T = Record<string, unknown>>(): Promise<D1Result<T>> {
+    if (
+      this.store.failInsertsInto !== null &&
+      this.query.includes(`INSERT INTO ${this.store.failInsertsInto}`)
+    ) {
+      return Promise.reject(
+        new Error(
+          `forced test failure inserting into ${this.store.failInsertsInto}`,
+        ),
+      )
+    }
+
+    if (this.query.includes('INSERT INTO forum_work_requests')) {
+      this.store.workRequests.push({
+        archived_at: null,
+        budget_msats: Number(this.values[11]),
+        budget_sats: Number(this.values[10]),
+        created_at: String(this.values[18]),
+        deadline_ref: String(this.values[12]),
+        first_post_id: String(this.values[3]),
+        id: String(this.values[0]),
+        idempotency_key: String(this.values[1]),
+        job_event_id: String(this.values[14]),
+        job_event_kind: Number(this.values[15]),
+        job_result_kind: Number(this.values[16]),
+        objective_ref: String(this.values[6]),
+        public_projection_json: String(this.values[17]),
+        quote_count: 0,
+        relay_url: String(this.values[13]),
+        repository_refs_json: String(this.values[8]),
+        requester_actor_ref: String(this.values[4]),
+        required_capability_refs_json: String(this.values[9]),
+        state: 'open',
+        title: String(this.values[5]),
+        topic_id: String(this.values[2]),
+        updated_at: String(this.values[19]),
+        verification_command_ref: String(this.values[7]),
+      })
+
+      return Promise.resolve({ success: true } as D1Result<T>)
+    }
+
+    if (this.query.includes('INSERT INTO forum_work_request_relay_links')) {
+      this.store.workRequestRelayLinks.push({
+        archived_at: null,
+        bridge_actor_ref: String(this.values[7]),
+        created_at: String(this.values[9]),
+        event_json: String(this.values[8]),
+        id: String(this.values[0]),
+        job_event_id: String(this.values[3]),
+        job_event_kind: Number(this.values[4]),
+        relay_ref: String(this.values[6]),
+        relay_url: String(this.values[5]),
+        topic_id: String(this.values[2]),
+        work_request_id: String(this.values[1]),
+      })
+
+      return Promise.resolve({ success: true } as D1Result<T>)
+    }
+
+    if (this.query.includes('INSERT INTO forum_work_request_lifecycle_posts')) {
+      this.store.workRequestLifecyclePosts.push({
+        archived_at: null,
+        created_at: String(this.values[8]),
+        id: String(this.values[0]),
+        idempotency_key: String(this.values[4]),
+        lifecycle_kind:
+          this.values[5] as WorkRequestLifecyclePostRow['lifecycle_kind'],
+        post_id: String(this.values[3]),
+        receipt_ref: String(this.values[6]),
+        state_after: this.values[7] as WorkRequestRow['state'],
+        topic_id: String(this.values[2]),
+        work_request_id: String(this.values[1]),
+      })
+
+      return Promise.resolve({ success: true } as D1Result<T>)
+    }
+
+    if (this.query.includes('INSERT INTO forum_work_request_offers')) {
+      this.store.workRequestOffers.push({
+        amount_msats: Number(this.values[5]),
+        amount_sats: Number(this.values[4]),
+        archived_at: null,
+        capability_refs_json: String(this.values[6]),
+        created_at: String(this.values[9]),
+        id: String(this.values[0]),
+        provider_actor_ref: String(this.values[3]),
+        public_projection_json: String(this.values[8]),
+        quote_ref: String(this.values[2]),
+        relay_event_ref:
+          this.values[7] === null ? null : String(this.values[7]),
+        state: 'offered',
+        updated_at: String(this.values[10]),
+        work_request_id: String(this.values[1]),
+      })
+
+      return Promise.resolve({ success: true } as D1Result<T>)
+    }
+
+    if (this.query.includes('INSERT INTO forum_work_request_acceptances')) {
+      this.store.workRequestAcceptances.push({
+        acceptance_event_ref: String(this.values[10]),
+        amount_msats: Number(this.values[7]),
+        archived_at: null,
+        created_at: String(this.values[12]),
+        escrow_id: String(this.values[8]),
+        id: String(this.values[0]),
+        idempotency_key: String(this.values[1]),
+        offer_id: String(this.values[3]),
+        provider_actor_ref: String(this.values[6]),
+        public_projection_json: String(this.values[11]),
+        quote_ref: String(this.values[4]),
+        requester_actor_ref: String(this.values[5]),
+        reserve_receipt_ref: String(this.values[9]),
+        work_request_id: String(this.values[2]),
+      })
+
+      return Promise.resolve({ success: true } as D1Result<T>)
+    }
+
+    if (this.query.includes('UPDATE forum_work_request_offers')) {
+      const quoteRef = String(this.values[0])
+      const updatedAt = String(this.values[1])
+      const workRequestId = String(this.values[2])
+
+      this.store.workRequestOffers = this.store.workRequestOffers.map(offer =>
+        offer.work_request_id === workRequestId &&
+        offer.state === 'offered' &&
+        offer.archived_at === null
+          ? {
+              ...offer,
+              state: offer.quote_ref === quoteRef ? 'accepted' : 'rejected',
+              updated_at: updatedAt,
+            }
+          : offer,
+      )
+
+      return Promise.resolve({ success: true } as D1Result<T>)
+    }
+
+    if (this.query.includes('UPDATE forum_work_requests')) {
+      const quoteAccepted = this.query.includes("state = 'quote_accepted'")
+      const state = quoteAccepted
+        ? 'quote_accepted'
+        : (this.values[0] as WorkRequestRow['state'])
+      const lifecycleKind = quoteAccepted ? 'quote_accepted' : String(this.values[1])
+      const updatedAt = String(quoteAccepted ? this.values[0] : this.values[2])
+      const workRequestId = String(quoteAccepted ? this.values[1] : this.values[3])
+      const existingIndex = this.store.workRequests.findIndex(
+        item => item.id === workRequestId && item.archived_at === null,
+      )
+
+      if (existingIndex !== -1) {
+        const existing = this.store.workRequests[existingIndex]!
+        this.store.workRequests[existingIndex] = {
+          ...existing,
+          quote_count:
+            lifecycleKind === 'quote_received'
+              ? existing.quote_count + 1
+              : existing.quote_count,
+          state,
+          updated_at: updatedAt,
+        }
+      }
+
+      return Promise.resolve({ success: true } as D1Result<T>)
+    }
+
     if (this.query.includes('INSERT OR IGNORE INTO forum_l402_challenges')) {
       const idempotencyKey = String(this.values[1])
 
@@ -1611,23 +2174,26 @@ class ForumRouteStatement implements D1PreparedStatement {
       const row: TipRecipientWalletRow = {
         actor_ref: actorRef,
         archived_at: null,
-        bolt12_offer: this.values[5] === null ? null : String(this.values[5]),
-        caveat_refs_json: String(this.values[8]),
-        claim_policy_refs_json: String(this.values[10]),
-        created_at: String(this.values[14]),
-        custody_policy_refs_json: String(this.values[9]),
-        disabled_at: this.values[16] === null ? null : String(this.values[16]),
+        spark_address: this.values[5] === null ? null : String(this.values[5]),
+        bolt12_offer: this.values[6] === null ? null : String(this.values[6]),
+        lightning_address:
+          this.values[7] === null ? null : String(this.values[7]),
+        caveat_refs_json: String(this.values[10]),
+        claim_policy_refs_json: String(this.values[12]),
+        created_at: String(this.values[16]),
+        custody_policy_refs_json: String(this.values[11]),
+        disabled_at: this.values[18] === null ? null : String(this.values[18]),
         id: String(this.values[0]),
         payout_target_approval_ref:
-          this.values[6] === null ? null : String(this.values[6]),
+          this.values[8] === null ? null : String(this.values[8]),
         provider_class: this
           .values[2] as TipRecipientWalletRow['provider_class'],
-        public_projection_json: String(this.values[13]),
-        readiness_refs_json: String(this.values[7]),
+        public_projection_json: String(this.values[15]),
+        readiness_refs_json: String(this.values[9]),
         receive_capability_ref: String(this.values[4]),
-        source_ref: String(this.values[11]),
-        state: this.values[12] as TipRecipientWalletRow['state'],
-        updated_at: String(this.values[15]),
+        source_ref: String(this.values[13]),
+        state: this.values[14] as TipRecipientWalletRow['state'],
+        updated_at: String(this.values[17]),
         wallet_ref: String(this.values[3]),
       }
       const existingIndex = this.store.tipRecipientWallets.findIndex(
@@ -2254,6 +2820,27 @@ class ForumRouteStatement implements D1PreparedStatement {
       return Promise.resolve({ success: true } as D1Result<T>)
     }
 
+    if (
+      this.query.includes('UPDATE forum_posts') &&
+      this.query.includes('SET parent_post_id = ?')
+    ) {
+      const postId = String(this.values[2])
+      const existing = this.store.posts.find(item => item.id === postId)
+
+      if (existing !== undefined) {
+        const index = this.store.posts.findIndex(item => item.id === postId)
+
+        this.store.posts[index] = {
+          ...existing,
+          parent_post_id:
+            this.values[0] === null ? null : String(this.values[0]),
+          updated_at: String(this.values[1]),
+        }
+      }
+
+      return Promise.resolve({ success: true } as D1Result<T>)
+    }
+
     if (this.query.includes('UPDATE forum_posts')) {
       const postId = String(this.values[2])
       const existing = this.store.posts.find(item => item.id === postId)
@@ -2284,21 +2871,33 @@ class ForumRouteStatement implements D1PreparedStatement {
     }
 
     if (this.query.includes('UPDATE forum_forums')) {
-      const forumId = String(this.values[3])
+      const isDecrement = this.query.includes(
+        'post_count = MAX(0, post_count - 1)',
+      )
+      // The decrement (post tombstone) binds only [forumId]; the increment
+      // binds [latestTopicId, latestPostId, ..., forumId] with forumId last.
+      const forumId = isDecrement
+        ? String(this.values[0])
+        : String(this.values[3])
       const existing = this.store.forums.find(item => item.id === forumId)
 
       if (existing !== undefined) {
         const index = this.store.forums.findIndex(item => item.id === forumId)
 
-        this.store.forums[index] = {
-          ...existing,
-          latest_post_id: String(this.values[1]),
-          latest_topic_id: String(this.values[0]),
-          post_count: existing.post_count + 1,
-          topic_count: this.query.includes('topic_count = topic_count + 1')
-            ? existing.topic_count + 1
-            : existing.topic_count,
-        }
+        this.store.forums[index] = isDecrement
+          ? {
+              ...existing,
+              post_count: Math.max(0, existing.post_count - 1),
+            }
+          : {
+              ...existing,
+              latest_post_id: String(this.values[1]),
+              latest_topic_id: String(this.values[0]),
+              post_count: existing.post_count + 1,
+              topic_count: this.query.includes('topic_count = topic_count + 1')
+                ? existing.topic_count + 1
+                : existing.topic_count,
+            }
       }
 
       return Promise.resolve({ success: true } as D1Result<T>)
@@ -2325,8 +2924,31 @@ class ForumRouteStatement implements D1PreparedStatement {
       return Promise.resolve({ success: true } as D1Result<T>)
     }
 
+    if (this.query.includes('INSERT OR IGNORE INTO orange_check_entitlements')) {
+      const actorRef = String(this.values[2])
+      const existing = this.store.orangeCheckEntitlements.find(
+        item => item.actor_ref === actorRef,
+      )
+
+      if (existing === undefined) {
+        this.store.orangeCheckEntitlements.push({
+          action_ref: String(this.values[4]),
+          actor_ref: actorRef,
+          agent_user_id: String(this.values[1]),
+          created_at: String(this.values[6]),
+          id: String(this.values[0]),
+          paid_amount_cents: Number(this.values[5]),
+          receipt_ref: String(this.values[3]),
+          state: 'active',
+          updated_at: String(this.values[7]),
+        })
+      }
+
+      return Promise.resolve({ success: true } as D1Result<T>)
+    }
+
     if (this.query.includes('UPDATE forum_topics')) {
-      const topicId = String(this.values[2])
+      const topicId = String(this.values[this.values.length - 1])
       const existing = this.store.topics.find(item => item.id === topicId)
 
       if (existing !== undefined) {
@@ -2342,12 +2964,23 @@ class ForumRouteStatement implements D1PreparedStatement {
             : existing.pin_state,
           post_count: this.query.includes('post_count = post_count + 1')
             ? existing.post_count + 1
-            : existing.post_count,
+            : this.query.includes('post_count = MAX(0, post_count - 1)')
+              ? Math.max(0, existing.post_count - 1)
+              : existing.post_count,
           state: this.query.includes('latest_post_id') ||
-            this.query.includes('SET pin_state')
+            this.query.includes('SET pin_state') ||
+            this.query.includes('SET title') ||
+            this.query.includes('post_count = MAX(0, post_count - 1)')
             ? existing.state
             : (this.values[0] as 'open' | 'locked' | 'archived' | 'hidden'),
-          updated_at: String(this.values[1]),
+          title: this.query.includes('SET title')
+            ? String(this.values[0])
+            : existing.title,
+          // The post-tombstone decrement binds [now, topicId]; its timestamp is
+          // values[0]. Other updates bind the timestamp at values[1].
+          updated_at: this.query.includes('post_count = MAX(0, post_count - 1)')
+            ? String(this.values[0])
+            : String(this.values[1]),
         }
       }
 
@@ -2358,6 +2991,43 @@ class ForumRouteStatement implements D1PreparedStatement {
   }
 
   all<T = Record<string, unknown>>(): Promise<D1Result<T>> {
+    if (this.query.includes('FROM forum_work_request_offers')) {
+      const workRequestId = String(this.values[0])
+      const rows = this.store.workRequestOffers
+        .filter(
+          item =>
+            item.work_request_id === workRequestId &&
+            item.archived_at === null,
+        )
+        .sort(
+          (left, right) =>
+            right.created_at.localeCompare(left.created_at) ||
+            right.id.localeCompare(left.id),
+        )
+
+      return Promise.resolve({ results: rows } as unknown as D1Result<T>)
+    }
+
+    if (this.query.includes('FROM forum_work_requests')) {
+      const limit = Number(this.values[0] ?? 50)
+      const rows = this.store.workRequests
+        .filter(
+          item =>
+            item.archived_at === null &&
+            ['open', 'quote_received', 'quote_accepted', 'running'].includes(
+              item.state,
+            ),
+        )
+        .sort(
+          (left, right) =>
+            right.created_at.localeCompare(left.created_at) ||
+            right.id.localeCompare(left.id),
+        )
+        .slice(0, limit)
+
+      return Promise.resolve({ results: rows } as unknown as D1Result<T>)
+    }
+
     if (
       this.query.includes('FROM forum_watches') &&
       this.query.includes('JOIN forum_posts')
@@ -2868,6 +3538,53 @@ class ForumRouteStatement implements D1PreparedStatement {
     }
 
     if (this.query.includes('FROM forum_topics')) {
+      if (this.query.includes('forum.agentProfileActivity.topics')) {
+        const actorRef = String(this.values[0])
+        const limit = Number(this.values[1] ?? 12)
+        const rows = this.store.topics
+          .filter(item => {
+            const forum = this.store.forums.find(f => f.id === item.forum_id)
+            const actor = JSON.parse(item.actor_json) as { actorRef: string }
+
+            return (
+              actor.actorRef === actorRef &&
+              item.archived_at === null &&
+              (item.state === 'open' || item.state === 'locked') &&
+              forum !== undefined &&
+              forum.archived_at === null &&
+              forum.visibility === 'public' &&
+              forum.discoverability === 'listed'
+            )
+          })
+          .sort(
+            (left, right) =>
+              right.created_at.localeCompare(left.created_at) ||
+              right.id.localeCompare(left.id),
+          )
+          .slice(0, limit)
+          .map(item => {
+            const firstPost = this.store.posts.find(
+              post =>
+                post.id === item.first_post_id &&
+                post.archived_at === null &&
+                (post.state === 'visible' || post.state === 'edited'),
+            )
+
+            return {
+              activity_id: item.id,
+              created_at: item.created_at,
+              first_post_receipt_refs_json:
+                firstPost?.receipt_refs_json ?? '[]',
+              state: item.state,
+              title: item.title,
+              topic_id: item.id,
+              updated_at: item.updated_at,
+            }
+          })
+
+        return Promise.resolve({ results: rows } as unknown as D1Result<T>)
+      }
+
       if (this.query.includes("state = 'hidden'")) {
         const limit = Number(this.values[0] ?? 50)
         const rows = this.store.topics
@@ -2901,17 +3618,67 @@ class ForumRouteStatement implements D1PreparedStatement {
       }
 
       const forumId = String(this.values[0])
-      const rows = this.store.topics.filter(
-        item =>
-          item.forum_id === forumId &&
-          item.archived_at === null &&
-          (item.state === 'open' || item.state === 'locked'),
-      )
+      const limit = Number(this.values[1] ?? 50)
+      const rows = sortForumTopicListRows(
+        this.store,
+        this.store.topics.filter(
+          item =>
+            item.forum_id === forumId &&
+            item.archived_at === null &&
+            (item.state === 'open' || item.state === 'locked'),
+        ),
+      ).slice(0, limit)
 
       return Promise.resolve({ results: rows } as unknown as D1Result<T>)
     }
 
     if (this.query.includes('FROM forum_posts')) {
+      if (this.query.includes('forum.agentProfileActivity.posts')) {
+        const actorRef = String(this.values[0])
+        const limit = Number(this.values[1] ?? 12)
+        const rows = this.store.posts
+          .filter(item => {
+            const topic = this.store.topics.find(t => t.id === item.topic_id)
+            const forum = this.store.forums.find(f => f.id === item.forum_id)
+            const actor = JSON.parse(item.actor_json) as { actorRef: string }
+
+            return (
+              actor.actorRef === actorRef &&
+              item.archived_at === null &&
+              (item.state === 'visible' || item.state === 'edited') &&
+              topic !== undefined &&
+              topic.archived_at === null &&
+              (topic.state === 'open' || topic.state === 'locked') &&
+              forum !== undefined &&
+              forum.archived_at === null &&
+              forum.visibility === 'public' &&
+              forum.discoverability === 'listed'
+            )
+          })
+          .sort(
+            (left, right) =>
+              right.created_at.localeCompare(left.created_at) ||
+              right.id.localeCompare(left.id),
+          )
+          .slice(0, limit)
+          .map(item => {
+            const topic = this.store.topics.find(t => t.id === item.topic_id)
+
+            return {
+              activity_id: item.id,
+              created_at: item.created_at,
+              post_id: item.id,
+              receipt_refs_json: item.receipt_refs_json,
+              state: item.state,
+              title: topic?.title ?? 'Forum topic',
+              topic_id: item.topic_id,
+              updated_at: item.updated_at,
+            }
+          })
+
+        return Promise.resolve({ results: rows } as unknown as D1Result<T>)
+      }
+
       if (
         this.query.includes('forum_posts.actor_ref = ?') &&
         this.query.includes('forum_posts.created_at >= ?')
@@ -3130,16 +3897,44 @@ class ForumRouteStatement implements D1PreparedStatement {
       }
 
       const topicId = String(this.values[0])
-      const rows = this.store.posts.filter(
-        item =>
-          item.topic_id === topicId &&
-          item.archived_at === null &&
-          (item.state === 'visible' ||
-            item.state === 'edited' ||
-            item.state === 'tombstoned'),
+      const descending = this.query.includes(
+        'ORDER BY forum_posts.post_number DESC',
+      )
+      // Mirror production: the topic-detail projection only includes live
+      // (visible/edited) posts. Tombstoned posts are excluded so a deleted
+      // post never renders in the thread.
+      const includeTombstoned = this.query.includes("'tombstoned'")
+      const rows = this.store.posts
+        .filter(
+          item =>
+            item.topic_id === topicId &&
+            item.archived_at === null &&
+            (item.state === 'visible' ||
+              item.state === 'edited' ||
+              (includeTombstoned && item.state === 'tombstoned')),
+        )
+        .sort((left, right) =>
+          descending
+            ? right.post_number - left.post_number
+            : left.post_number - right.post_number,
+        )
+
+      return Promise.resolve({ results: rows } as unknown as D1Result<T>)
+    }
+
+    if (this.query.includes('FROM forum_tip_recipient_wallets')) {
+      const actorRefs = new Set(this.values.map(value => String(value)))
+      const rows = this.store.tipRecipientWallets.filter(
+        item => actorRefs.has(item.actor_ref) && item.archived_at === null,
       )
 
       return Promise.resolve({ results: rows } as unknown as D1Result<T>)
+    }
+
+    // The reliable-tip payments ledger (pay_ins/pay_in_legs) is empty in
+    // this route fixture; ladder reads project no rows (#4753).
+    if (this.query.includes('FROM pay_ins')) {
+      return Promise.resolve({ results: [] } as unknown as D1Result<T>)
     }
 
     return Promise.reject(new Error(`Unexpected all: ${this.query}`))
@@ -3158,8 +3953,52 @@ class ForumRouteStatement implements D1PreparedStatement {
   }
 }
 
+const storeArraySnapshot = (
+  store: ForumRouteStore,
+): Map<string, ReadonlyArray<unknown>> => {
+  const snapshot = new Map<string, ReadonlyArray<unknown>>()
+
+  for (const key of Object.keys(store)) {
+    const value = (store as unknown as Record<string, unknown>)[key]
+
+    if (Array.isArray(value)) {
+      snapshot.set(key, [...value])
+    }
+  }
+
+  return snapshot
+}
+
+const restoreStoreArrays = (
+  store: ForumRouteStore,
+  snapshot: Map<string, ReadonlyArray<unknown>>,
+): void => {
+  for (const [key, rows] of snapshot) {
+    const target = (store as unknown as Record<string, Array<unknown>>)[key]
+
+    if (Array.isArray(target)) {
+      target.length = 0
+      target.push(...rows)
+    }
+  }
+}
+
 const forumRouteDb = (store: ForumRouteStore): D1Database => ({
-  batch: () => Promise.reject(new Error('D1 batch should not be used')),
+  batch: (async (statements: ReadonlyArray<D1PreparedStatement>) => {
+    const snapshot = storeArraySnapshot(store)
+    const results: Array<unknown> = []
+
+    try {
+      for (const statement of statements) {
+        results.push(await statement.run())
+      }
+    } catch (error) {
+      restoreStoreArrays(store, snapshot)
+      throw error
+    }
+
+    return results
+  }) as D1Database['batch'],
   dump: () => Promise.reject(new Error('D1 dump should not be used')),
   exec: () => Promise.reject(new Error('D1 exec should not be used')),
   prepare: query => new ForumRouteStatement(query, store),
@@ -3187,6 +4026,7 @@ const testAgentStore = (profileMetadata: Record<string, unknown> = {}) => ({
       },
     }),
   touchAgentCredential: () => Promise.resolve(),
+  updateAgentDisplayName: () => Promise.resolve(0),
 })
 
 const verifiedPublicIdentityClaim: VerifiedPublicIdentityClaim = {
@@ -3204,12 +4044,18 @@ const route = async (
   store: ForumRouteStore,
   path: string,
   options: Readonly<{
+    hostedMdkClient?: ReturnType<typeof forumHostedMdkClient>
     agentClaimed?: boolean
     agentMetadata?: Record<string, unknown>
     body?: unknown
     headers?: HeadersInit
     moderator?: 'admin' | 'non_admin'
     method?: string
+    workRequestEscrowReserver?: NonNullable<
+      Parameters<typeof makeForumRoutes>[0]
+    >['forumWorkRequestEscrowReserver']
+    workRequestRelayPublisher?: ReturnType<typeof fakeWorkRequestRelayPublisher>
+    workRequestRelayUrl?: string
   }> = {},
 ) => {
   const init: RequestInit = {
@@ -3229,7 +4075,16 @@ const route = async (
   const request = new Request(`https://openagents.com${path}`, init)
   const effect = makeForumRoutes({
     agentStore: testAgentStore(options.agentMetadata),
-    hostedMdkClient: forumHostedMdkClient(),
+    ...(options.workRequestEscrowReserver === undefined
+      ? {}
+      : { forumWorkRequestEscrowReserver: options.workRequestEscrowReserver }),
+    ...(options.workRequestRelayPublisher === undefined
+      ? {}
+      : { forumWorkRequestRelayPublisher: options.workRequestRelayPublisher }),
+    ...(options.workRequestRelayUrl === undefined
+      ? {}
+      : { forumWorkRequestRelayUrl: options.workRequestRelayUrl }),
+    hostedMdkClient: options.hostedMdkClient ?? forumHostedMdkClient(),
     l402SigningBoundary: forumL402SigningBoundary,
     makeId: () => store.nextId(),
     mdkWebhookConfig: {
@@ -3299,6 +4154,7 @@ describe('Forum routes', () => {
       'site-builder-help',
       'artanis',
       'product-promises',
+      'work-requests',
     ])
     expect(testResponse.status).toBe(401)
     expect(testBody.forums.map(forum => forum.slug).sort()).toStrictEqual([
@@ -3306,6 +4162,7 @@ describe('Forum routes', () => {
       'product-promises',
       'site-builder-help',
       'void',
+      'work-requests',
     ])
   })
 
@@ -3341,6 +4198,562 @@ describe('Forum routes', () => {
         title: 'Promise report: example mismatch',
       },
     })
+  })
+
+  test('creates Forum work requests as NIP-LBR relay jobs with idempotent linkage', async () => {
+    const store = new ForumRouteStore()
+    const captured: Array<CapturedWorkRequestRelayPublish> = []
+    const publisher = fakeWorkRequestRelayPublisher(captured)
+    const request = {
+      body: {
+        budgetSats: 2_500,
+        deadlineRef: 'deadline.public.lbr.20260612',
+        objectiveRef: 'objective.public.openagents.forum_bridge_smoke',
+        repositoryRefs: ['repo.public.openagents'],
+        requiredCapabilityRefs: ['capability.pylon.local_claude_agent'],
+        title: 'Forum bridge smoke request',
+        verificationCommandRef: 'command.public.bun_vitest_forum_work_requests',
+      },
+      headers: {
+        authorization: 'Bearer oa_agent_route_test',
+        'idempotency-key': 'work-request-create-1',
+      },
+      method: 'POST',
+      workRequestRelayPublisher: publisher,
+      workRequestRelayUrl: 'wss://relay.test.openagents.dev',
+    }
+    const created = await route(store, '/api/forum/work-requests', request)
+    const retry = await route(store, '/api/forum/work-requests', request)
+    const conflict = await route(store, '/api/forum/work-requests', {
+      ...request,
+      body: {
+        ...request.body,
+        objectiveRef: 'objective.public.openagents.changed',
+      },
+    })
+    const list = await route(store, '/api/forum/work-requests')
+
+    expect(created.status).toBe(201)
+    expect(retry.status).toBe(200)
+    expect(conflict.status).toBe(409)
+    expect(captured).toHaveLength(1)
+    expect(captured[0]?.draft.kind).toBe(5934)
+    expect(captured[0]?.draft.content).toBe('')
+    expect(captured[0]?.draft.tags).toContainEqual([
+      'param',
+      'lbr_objective_ref',
+      'objective.public.openagents.forum_bridge_smoke',
+    ])
+    await expect(created.json()).resolves.toMatchObject({
+      firstPost: {
+        bodyText: expect.stringContaining(
+          'Job event ref: nostr.event.0000000000000000000000000000000000000000000000000000000000000001',
+        ),
+      },
+      idempotent: false,
+      relayLink: {
+        jobEventId:
+          '0000000000000000000000000000000000000000000000000000000000000001',
+        jobEventKind: 5934,
+      },
+      topic: {
+        slug: 'forum-bridge-smoke-request',
+        title: 'Forum bridge smoke request',
+      },
+      workRequest: {
+        budgetSats: 2500,
+        jobEventKind: 5934,
+        jobResultKind: 6934,
+        objectiveRef: 'objective.public.openagents.forum_bridge_smoke',
+        state: 'open',
+      },
+    })
+    await expect(retry.json()).resolves.toMatchObject({
+      idempotent: true,
+      relayLink: {
+        jobEventId:
+          '0000000000000000000000000000000000000000000000000000000000000001',
+      },
+    })
+    await expect(list.json()).resolves.toMatchObject({
+      generatedAt: expect.any(String),
+      maxStalenessSeconds: 0,
+      staleness: {
+        composition: 'live_at_read',
+        contractVersion: 'projection_staleness.v1',
+        maxStalenessSeconds: 0,
+        rebuildsOn: expect.arrayContaining([
+          'forum_work_request_created',
+          'forum_work_request_lifecycle_recorded',
+          'forum_work_request_quote_recorded',
+        ]),
+      },
+      workRequests: [
+        {
+          objectiveRef: 'objective.public.openagents.forum_bridge_smoke',
+          state: 'open',
+        },
+      ],
+    })
+    expect(store.workRequests).toHaveLength(1)
+    expect(store.workRequestRelayLinks).toHaveLength(1)
+  })
+
+  test('rejects invalid or unsafe Forum work request material before persistence', async () => {
+    const store = new ForumRouteStore()
+    const captured: Array<CapturedWorkRequestRelayPublish> = []
+    const base = {
+      budgetSats: 2_500,
+      deadlineRef: 'deadline.public.lbr.20260612',
+      objectiveRef: 'objective.public.openagents.safe',
+      repositoryRefs: ['repo.public.openagents'],
+      requiredCapabilityRefs: ['capability.pylon.local_claude_agent'],
+      title: 'Safe work request',
+      verificationCommandRef: 'command.public.bun_test',
+    }
+    const invalid = await route(store, '/api/forum/work-requests', {
+      body: { ...base, budgetSats: 0 },
+      headers: {
+        authorization: 'Bearer oa_agent_route_test',
+        'idempotency-key': 'work-request-invalid-1',
+      },
+      method: 'POST',
+      workRequestRelayPublisher: fakeWorkRequestRelayPublisher(captured),
+    })
+    const unsafe = await route(store, '/api/forum/work-requests', {
+      body: {
+        ...base,
+        rawPrompt: 'fix this using OPENAI_API_KEY=secret',
+      },
+      headers: {
+        authorization: 'Bearer oa_agent_route_test',
+        'idempotency-key': 'work-request-unsafe-1',
+      },
+      method: 'POST',
+      workRequestRelayPublisher: fakeWorkRequestRelayPublisher(captured),
+    })
+
+    expect(invalid.status).toBe(400)
+    expect(unsafe.status).toBe(400)
+    await expect(unsafe.json()).resolves.toMatchObject({
+      error: 'bad_request',
+      reason: expect.stringContaining('public refs only'),
+    })
+    expect(captured).toHaveLength(0)
+    expect(store.workRequests).toHaveLength(0)
+    expect(store.topics.some(topic => topic.forum_id === store.forums[4]?.id)).toBe(
+      false,
+    )
+  })
+
+  test('records Forum work request lifecycle updates as idempotent topic replies', async () => {
+    const store = new ForumRouteStore()
+    const captured: Array<CapturedWorkRequestRelayPublish> = []
+    const created = await route(store, '/api/forum/work-requests', {
+      body: {
+        budgetSats: 1_000,
+        deadlineRef: 'deadline.public.lbr.20260612',
+        objectiveRef: 'objective.public.openagents.lifecycle',
+        repositoryRefs: ['repo.public.openagents'],
+        requiredCapabilityRefs: ['capability.pylon.local_claude_agent'],
+        title: 'Lifecycle request',
+        verificationCommandRef: 'command.public.bun_lifecycle_test',
+      },
+      headers: {
+        authorization: 'Bearer oa_agent_route_test',
+        'idempotency-key': 'work-request-lifecycle-root',
+      },
+      method: 'POST',
+      workRequestRelayPublisher: fakeWorkRequestRelayPublisher(captured),
+    })
+    const createdBody = (await created.json()) as Readonly<{
+      topic: Readonly<{ postCount: number }>
+      workRequest: Readonly<{ workRequestId: string }>
+    }>
+    const lifecycleRequest = {
+      body: {
+        lifecycleKind: 'quote_received',
+        receiptRef: 'receipt.public.lbr.quote_1',
+      },
+      headers: {
+        authorization: 'Bearer oa_agent_route_test',
+        'idempotency-key': 'work-request-lifecycle-quote-1',
+      },
+      method: 'POST',
+    }
+    const lifecycle = await route(
+      store,
+      `/api/forum/work-requests/${createdBody.workRequest.workRequestId}/lifecycle-posts`,
+      lifecycleRequest,
+    )
+    const retry = await route(
+      store,
+      `/api/forum/work-requests/${createdBody.workRequest.workRequestId}/lifecycle-posts`,
+      lifecycleRequest,
+    )
+
+    expect(created.status).toBe(201)
+    expect(createdBody.topic.postCount).toBe(1)
+    expect(lifecycle.status).toBe(201)
+    expect(retry.status).toBe(200)
+    await expect(lifecycle.json()).resolves.toMatchObject({
+      idempotent: false,
+      lifecyclePost: {
+        lifecycleKind: 'quote_received',
+        receiptRef: 'receipt.public.lbr.quote_1',
+      },
+      post: {
+        bodyText: expect.stringContaining('Receipt ref: receipt.public.lbr.quote_1'),
+        postNumber: 2,
+      },
+      workRequest: { quoteCount: 1, state: 'quote_received' },
+    })
+    await expect(retry.json()).resolves.toMatchObject({
+      idempotent: true,
+      post: { postNumber: 2 },
+      workRequest: { quoteCount: 1, state: 'quote_received' },
+    })
+    expect(store.workRequestLifecyclePosts).toHaveLength(1)
+    expect(
+      store.posts.filter(post => post.topic_id === store.workRequests[0]?.topic_id),
+    ).toHaveLength(2)
+  })
+
+  test('lists and accepts Forum work-request offers with escrow reserve enforcement', async () => {
+    const store = new ForumRouteStore()
+    const captured: Array<CapturedWorkRequestRelayPublish> = []
+    const created = await route(store, '/api/forum/work-requests', {
+      body: {
+        budgetSats: 2_000,
+        deadlineRef: 'deadline.public.lbr.20260612',
+        objectiveRef: 'objective.public.openagents.requester_accept',
+        repositoryRefs: ['repo.public.openagents'],
+        requiredCapabilityRefs: ['capability.pylon.local_claude_agent'],
+        title: 'Requester accept request',
+        verificationCommandRef: 'command.public.bun_requester_accept',
+      },
+      headers: {
+        authorization: 'Bearer oa_agent_route_test',
+        'idempotency-key': 'work-request-accept-root',
+      },
+      method: 'POST',
+      workRequestRelayPublisher: fakeWorkRequestRelayPublisher(captured),
+    })
+    const createdBody = (await created.json()) as Readonly<{
+      workRequest: Readonly<{ workRequestId: string }>
+    }>
+    const workRequestId = createdBody.workRequest.workRequestId
+
+    store.workRequestOffers.push(
+      {
+        amount_msats: 1_500_000,
+        amount_sats: 1_500,
+        archived_at: null,
+        capability_refs_json: JSON.stringify([
+          'capability.pylon.local_claude_agent',
+        ]),
+        created_at: '2026-06-05T20:01:00.000Z',
+        id: 'offer_route_1',
+        provider_actor_ref: 'agent:provider-one',
+        public_projection_json: '{}',
+        quote_ref: 'quote.public.route.one',
+        relay_event_ref: 'nostr.event.' + '1'.repeat(64),
+        state: 'offered',
+        updated_at: '2026-06-05T20:01:00.000Z',
+        work_request_id: workRequestId,
+      },
+      {
+        amount_msats: 1_600_000,
+        amount_sats: 1_600,
+        archived_at: null,
+        capability_refs_json: JSON.stringify([
+          'capability.pylon.local_claude_agent',
+        ]),
+        created_at: '2026-06-05T20:02:00.000Z',
+        id: 'offer_route_2',
+        provider_actor_ref: 'agent:provider-two',
+        public_projection_json: '{}',
+        quote_ref: 'quote.public.route.two',
+        relay_event_ref: 'nostr.event.' + '2'.repeat(64),
+        state: 'offered',
+        updated_at: '2026-06-05T20:02:00.000Z',
+        work_request_id: workRequestId,
+      },
+    )
+
+    const reservedInputs: unknown[] = []
+    const escrowReserver: NonNullable<
+      Parameters<typeof makeForumRoutes>[0]
+    >['forumWorkRequestEscrowReserver'] = async input => {
+      reservedInputs.push(input)
+      return {
+        escrow: {
+          amountMsat: input.amountMsat,
+          createdAt: input.nowIso,
+          escrowId: input.escrowId,
+          fundingSource: 'ledger_balance',
+          idempotencyKey: input.idempotencyKey,
+          jobEventId: input.jobEventId,
+          providerActorRef: null,
+          publicProjection: {
+            amountMsat: input.amountMsat,
+            escrowRef: `labor_escrow.public.${input.escrowId}`,
+            evidenceRef: 'nostr.event.' + input.jobEventId,
+            jobEventRef: 'nostr.event.' + input.jobEventId,
+            providerActorRef: null,
+            receiptRef: input.reserveReceiptRef,
+            requesterActorRef: input.requesterActorRef,
+            stateAfter: 'reserved',
+            transitionKind: 'reserve',
+            workRequestRef: `work_request.public.${input.workRequestId}`,
+          },
+          requesterActorRef: input.requesterActorRef,
+          reserveReceiptRef: input.reserveReceiptRef,
+          releaseReceiptRef: null,
+          refundReceiptRef: null,
+          state: 'reserved',
+          updatedAt: input.nowIso,
+          workRequestId: input.workRequestId,
+        },
+        ok: true,
+        reserveReceiptRef: input.reserveReceiptRef,
+      }
+    }
+
+    const offers = await route(
+      store,
+      `/api/forum/work-requests/${workRequestId}/offers`,
+    )
+    const accepted = await route(
+      store,
+      `/api/forum/work-requests/${workRequestId}/acceptances`,
+      {
+        body: { quoteRef: 'quote.public.route.one' },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'work-request-accept-quote-one',
+        },
+        method: 'POST',
+        workRequestEscrowReserver: escrowReserver,
+      },
+    )
+    const retry = await route(
+      store,
+      `/api/forum/work-requests/${workRequestId}/acceptances`,
+      {
+        body: { quoteRef: 'quote.public.route.one' },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'work-request-accept-quote-one',
+        },
+        method: 'POST',
+        workRequestEscrowReserver: escrowReserver,
+      },
+    )
+    const unauthenticatedRetry = await route(
+      store,
+      `/api/forum/work-requests/${workRequestId}/acceptances`,
+      {
+        body: { quoteRef: 'quote.public.route.one' },
+        headers: {
+          'idempotency-key': 'work-request-accept-quote-one',
+        },
+        method: 'POST',
+        workRequestEscrowReserver: escrowReserver,
+      },
+    )
+    const doubleAccept = await route(
+      store,
+      `/api/forum/work-requests/${workRequestId}/acceptances`,
+      {
+        body: { quoteRef: 'quote.public.route.two' },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'work-request-accept-quote-two',
+        },
+        method: 'POST',
+        workRequestEscrowReserver: escrowReserver,
+      },
+    )
+    const status = await route(store, `/api/forum/work-requests/${workRequestId}`)
+
+    expect(offers.status).toBe(200)
+    await expect(offers.json()).resolves.toMatchObject({
+      offers: [
+        { quoteRef: 'quote.public.route.two' },
+        { quoteRef: 'quote.public.route.one' },
+      ],
+    })
+    expect(accepted.status).toBe(201)
+    expect(retry.status).toBe(200)
+    expect(unauthenticatedRetry.status).toBe(401)
+    expect(doubleAccept.status).toBe(409)
+    expect(reservedInputs).toHaveLength(1)
+    await expect(accepted.json()).resolves.toMatchObject({
+      acceptance: {
+        providerActorRef: 'agent:provider-one',
+        quoteRef: 'quote.public.route.one',
+      },
+      acceptedOffer: { quoteRef: 'quote.public.route.one' },
+      escrowState: {
+        reserveReceiptRef: expect.stringContaining(
+          'receipt.labor_escrow.reserve',
+        ),
+        state: 'reserved',
+      },
+      idempotent: false,
+      workRequest: { state: 'quote_accepted' },
+    })
+    await expect(retry.json()).resolves.toMatchObject({ idempotent: true })
+    await expect(doubleAccept.json()).resolves.toMatchObject({
+      error: 'quote_already_accepted',
+    })
+    await expect(status.json()).resolves.toMatchObject({
+      acceptance: { quoteRef: 'quote.public.route.one' },
+      offers: expect.arrayContaining([
+        expect.objectContaining({
+          quoteRef: 'quote.public.route.one',
+          state: 'accepted',
+        }),
+        expect.objectContaining({
+          quoteRef: 'quote.public.route.two',
+          state: 'rejected',
+        }),
+      ]),
+    })
+  })
+
+  test('refuses work-request quote acceptance when escrow reserve lacks balance', async () => {
+    const store = new ForumRouteStore()
+    const captured: Array<CapturedWorkRequestRelayPublish> = []
+    const created = await route(store, '/api/forum/work-requests', {
+      body: {
+        budgetSats: 2_000,
+        deadlineRef: 'deadline.public.lbr.20260612',
+        objectiveRef: 'objective.public.openagents.requester_balance',
+        repositoryRefs: ['repo.public.openagents'],
+        requiredCapabilityRefs: ['capability.pylon.local_claude_agent'],
+        title: 'Requester balance request',
+        verificationCommandRef: 'command.public.bun_requester_balance',
+      },
+      headers: {
+        authorization: 'Bearer oa_agent_route_test',
+        'idempotency-key': 'work-request-balance-root',
+      },
+      method: 'POST',
+      workRequestRelayPublisher: fakeWorkRequestRelayPublisher(captured),
+    })
+    const createdBody = (await created.json()) as Readonly<{
+      workRequest: Readonly<{ workRequestId: string }>
+    }>
+    const workRequestId = createdBody.workRequest.workRequestId
+    store.workRequestOffers.push({
+      amount_msats: 1_500_000,
+      amount_sats: 1_500,
+      archived_at: null,
+      capability_refs_json: JSON.stringify([
+        'capability.pylon.local_claude_agent',
+      ]),
+      created_at: '2026-06-05T20:01:00.000Z',
+      id: 'offer_balance_1',
+      provider_actor_ref: 'agent:provider-one',
+      public_projection_json: '{}',
+      quote_ref: 'quote.public.balance.one',
+      relay_event_ref: 'nostr.event.' + '3'.repeat(64),
+      state: 'offered',
+      updated_at: '2026-06-05T20:01:00.000Z',
+      work_request_id: workRequestId,
+    })
+
+    const refused = await route(
+      store,
+      `/api/forum/work-requests/${workRequestId}/acceptances`,
+      {
+        body: { quoteRef: 'quote.public.balance.one' },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'work-request-balance-accept',
+        },
+        method: 'POST',
+        workRequestEscrowReserver: async () => ({
+          availableMsat: 0,
+          ok: false,
+          reason: 'insufficient_available_balance',
+        }),
+      },
+    )
+
+    expect(refused.status).toBe(409)
+    await expect(refused.json()).resolves.toMatchObject({
+      error: 'labor_escrow_refused',
+      reason: 'insufficient_available_balance',
+    })
+    expect(store.workRequestAcceptances).toHaveLength(0)
+    expect(store.workRequestOffers[0]?.state).toBe('offered')
+  })
+
+  test('ingests relay-native NIP-LBR requests into twin Forum work-request topics', async () => {
+    const store = new ForumRouteStore()
+    const lbr = makeLbrAgenticCodingRequest({
+      bidMsats: 3_000_000,
+      deadline: 'deadline.public.lbr.20260612',
+      objectiveRef: 'objective.public.openagents.relay_native',
+      relays: ['wss://relay.test.openagents.dev'],
+      repositoryRefs: ['repo.public.openagents'],
+      requiredCapabilityRefs: ['capability.pylon.local_claude_agent'],
+      verificationCommandRef: 'command.public.bun_relay_native',
+    })
+    const draft = lbrAgenticCodingRequestToDraft(lbr)
+    const event = {
+      content: draft.content,
+      created_at: 1_781_107_200,
+      id: 'd'.repeat(64),
+      kind: draft.kind,
+      pubkey: 'e'.repeat(64),
+      sig: 'f'.repeat(128),
+      tags: draft.tags,
+    }
+    const request = {
+      body: { event, title: 'Relay native request' },
+      headers: {
+        authorization: 'Bearer oa_agent_route_test',
+        'idempotency-key': 'relay-native-work-request-1',
+      },
+      method: 'POST',
+      workRequestRelayUrl: 'wss://relay.test.openagents.dev',
+    }
+    const created = await route(
+      store,
+      '/api/forum/work-requests/relay-events',
+      request,
+    )
+    const retry = await route(store, '/api/forum/work-requests/relay-events', {
+      ...request,
+      headers: {
+        authorization: 'Bearer oa_agent_route_test',
+        'idempotency-key': 'relay-native-work-request-2',
+      },
+    })
+
+    expect(created.status).toBe(201)
+    expect(retry.status).toBe(200)
+    await expect(created.json()).resolves.toMatchObject({
+      idempotent: false,
+      relayLink: { jobEventId: 'd'.repeat(64), jobEventKind: 5934 },
+      topic: { title: 'Relay native request' },
+      workRequest: {
+        jobEventId: 'd'.repeat(64),
+        objectiveRef: 'objective.public.openagents.relay_native',
+      },
+    })
+    await expect(retry.json()).resolves.toMatchObject({
+      idempotent: true,
+      relayLink: { jobEventId: 'd'.repeat(64) },
+    })
+    expect(store.workRequests).toHaveLength(1)
+    expect(store.workRequestRelayLinks[0]?.topic_id).toBe(
+      store.workRequests[0]?.topic_id,
+    )
   })
 
   test('discovers Artanis canonical topics and keeps moderation operator-only', async () => {
@@ -3394,16 +4807,17 @@ describe('Forum routes', () => {
       title: 'Artanis',
     })
     expect(topicBody.topics.map(topic => topic.title)).toEqual([
-      'Artanis status',
-      'Pylon campaign status',
-      'Model Lab',
-      'Pylon release work log',
-      'Work routing and accepted outcomes',
-      'Bitcoin accounting and rewards',
-      'Resource modes',
       'Operator questions',
+      'Resource modes',
+      'Bitcoin accounting and rewards',
+      'Work routing and accepted outcomes',
+      'Pylon release work log',
+      'Model Lab',
+      'Pylon campaign status',
+      'Artanis status',
     ])
-    expect(topicBody.topics[0]?.pinState).toBe('announcement')
+    expect(topicBody.topics[0]?.pinState).toBe('sticky')
+    expect(topicBody.topics.at(-1)?.pinState).toBe('announcement')
     await expect(topicDetail.json()).resolves.toMatchObject({
       posts: [
         {
@@ -3430,6 +4844,25 @@ describe('Forum routes', () => {
 
   test('reads exact forum, topic list, topic detail, and post detail routes', async () => {
     const store = new ForumRouteStore()
+    store.posts.push({
+      actor_json: actorJson,
+      archived_at: null,
+      body_text: 'Seed route-test reply body.',
+      content_ref: 'content.forum.route_test.reply',
+      created_at: '2026-06-05T20:01:00.000Z',
+      forum_id: '33333333-3333-4333-8333-333333333333',
+      id: '77777777-7777-4777-8777-777777777777',
+      idempotency_key: 'seed-post-reply',
+      parent_post_id: '66666666-6666-4666-8666-666666666666',
+      post_number: 2,
+      public_projection_json: projectionJson,
+      quote_post_id: null,
+      receipt_refs_json: '[]',
+      revision_ref: null,
+      state: 'visible',
+      topic_id: '55555555-5555-4555-8555-555555555555',
+      updated_at: '2026-06-05T20:01:00.000Z',
+    })
     const voidForum = await route(store, '/api/forum/forums/void')
     const topics = await route(
       store,
@@ -3438,6 +4871,18 @@ describe('Forum routes', () => {
     const topic = await route(
       store,
       '/api/forum/topics/55555555-5555-4555-8555-555555555555',
+    )
+    const topicNewestFirst = await route(
+      store,
+      '/api/forum/topics/55555555-5555-4555-8555-555555555555?sortDir=desc',
+    )
+    const topicNewestFirstPhpbbAlias = await route(
+      store,
+      '/api/forum/topics/55555555-5555-4555-8555-555555555555?sd=d',
+    )
+    const malformedTopicSort = await route(
+      store,
+      '/api/forum/topics/55555555-5555-4555-8555-555555555555?sortDir=new',
     )
     const post = await route(
       store,
@@ -3452,8 +4897,21 @@ describe('Forum routes', () => {
       topics: [{ slug: 'first-topic' }],
     })
     await expect(topic.json()).resolves.toMatchObject({
-      posts: [{ postNumber: 1 }],
+      posts: [{ postNumber: 1 }, { postNumber: 2 }],
       topic: { slug: 'first-topic' },
+    })
+    await expect(topicNewestFirst.json()).resolves.toMatchObject({
+      posts: [{ postNumber: 2 }, { postNumber: 1 }],
+      topic: { slug: 'first-topic' },
+    })
+    await expect(topicNewestFirstPhpbbAlias.json()).resolves.toMatchObject({
+      posts: [{ postNumber: 2 }, { postNumber: 1 }],
+      topic: { slug: 'first-topic' },
+    })
+    expect(malformedTopicSort.status).toBe(400)
+    await expect(malformedTopicSort.json()).resolves.toMatchObject({
+      error: 'bad_request',
+      reason: 'sortDir must be asc or desc',
     })
     await expect(post.json()).resolves.toMatchObject({
       containingTopicId: '55555555-5555-4555-8555-555555555555',
@@ -3622,6 +5080,7 @@ describe('Forum routes', () => {
           blockerRef: null,
           caveatRefs: [
             'caveat.public.forum_tip_recipient.claim_required',
+            'caveat.public.forum_tip_recipient.daemon_reachability_required',
             'policy.public.forum_tip_recipient.agent_claimed',
             'policy.public.forum_tip_recipient.self_custody',
           ],
@@ -4031,6 +5490,7 @@ describe('Forum routes', () => {
 
   test('lists public-safe posts with listed default and authenticated unlisted discovery', async () => {
     const store = new ForumRouteStore()
+    store.tipRecipientWallets.push(readyTipRecipientWalletRow())
     store.topics.push({
       actor_json: actorJson,
       archived_at: null,
@@ -4090,7 +5550,19 @@ describe('Forum routes', () => {
       forums: ReadonlyArray<Readonly<{ slug: string }>>
       includeUnlisted: boolean
       pagination: Readonly<{ hasMore: boolean; limit: number }>
-      posts: ReadonlyArray<Readonly<{ bodyText: string }>>
+      posts: ReadonlyArray<
+        Readonly<{
+          bodyText: string
+          capabilities: Readonly<{ canTip: boolean }>
+          postId: string
+          tipRecipientReadiness: Readonly<{
+            blockerRef: string | null
+            providerClass: string | null
+            state: string
+            tippingAvailable: boolean
+          }>
+        }>
+      >
       topics: ReadonlyArray<Readonly<{ title: string }>>
     }>
     expect(listedBody).toMatchObject({
@@ -4105,6 +5577,19 @@ describe('Forum routes', () => {
         expect.objectContaining({ bodyText: 'Seed route-test body.' }),
       ]),
     )
+    expect(
+      listedBody.posts.find(
+        post => post.postId === '66666666-6666-4666-8666-666666666666',
+      ),
+    ).toMatchObject({
+      capabilities: { canTip: true },
+      tipRecipientReadiness: {
+        blockerRef: null,
+        providerClass: 'mdk_agent_wallet',
+        state: 'ready',
+        tippingAvailable: true,
+      },
+    })
     expect(listedBody.posts).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ bodyText: 'Void route-test body.' }),
@@ -4225,6 +5710,102 @@ describe('Forum routes', () => {
       topic_id: '55555555-5555-4555-8555-555555555555',
       updated_at: '2026-06-05T21:00:00.000Z',
     })
+    store.topics.push({
+      actor_json: visibleSlugActorJson,
+      archived_at: null,
+      created_at: '2026-06-05T21:05:00.000Z',
+      first_post_id: 'bbbbbbbb-2222-4111-8111-bbbbbbbbbbbb',
+      forum_id: '77777777-1111-4111-8111-777777777777',
+      id: 'bbbbbbbb-2222-4111-8111-bbbbbbbbbbbb',
+      idempotency_key: 'seed-visible-slug-agent-void-topic',
+      latest_post_id: 'bbbbbbbb-2222-4111-8111-bbbbbbbbbbbb',
+      pin_state: 'normal',
+      post_count: 1,
+      public_projection_json: projectionJson,
+      score_ref: null,
+      slug: 'visible-slug-void-topic',
+      state: 'open',
+      title: 'Visible Slug Void Topic',
+      updated_at: '2026-06-05T21:05:00.000Z',
+    })
+    store.posts.push(
+      {
+        actor_json: visibleSlugActorJson,
+        archived_at: null,
+        body_text: 'Visible slug hidden moderation row.',
+        content_ref: 'content.forum.visible_slug_agent.hidden',
+        created_at: '2026-06-05T21:06:00.000Z',
+        forum_id: '33333333-3333-4333-8333-333333333333',
+        id: 'bbbbbbbb-3333-4111-8111-bbbbbbbbbbbb',
+        idempotency_key: 'seed-visible-slug-agent-hidden',
+        parent_post_id: null,
+        post_number: 3,
+        public_projection_json: projectionJson,
+        quote_post_id: null,
+        receipt_refs_json: '["receipt.public.hidden.should_not_leak"]',
+        revision_ref: null,
+        state: 'hidden',
+        topic_id: '55555555-5555-4555-8555-555555555555',
+        updated_at: '2026-06-05T21:06:00.000Z',
+      },
+      {
+        actor_json: visibleSlugActorJson,
+        archived_at: null,
+        body_text: 'Visible slug held moderation row.',
+        content_ref: 'content.forum.visible_slug_agent.held',
+        created_at: '2026-06-05T21:07:00.000Z',
+        forum_id: '33333333-3333-4333-8333-333333333333',
+        id: 'bbbbbbbb-4444-4111-8111-bbbbbbbbbbbb',
+        idempotency_key: 'seed-visible-slug-agent-held',
+        parent_post_id: null,
+        post_number: 4,
+        public_projection_json: projectionJson,
+        quote_post_id: null,
+        receipt_refs_json: '["receipt.public.held.should_not_leak"]',
+        revision_ref: null,
+        state: 'held_for_review',
+        topic_id: '55555555-5555-4555-8555-555555555555',
+        updated_at: '2026-06-05T21:07:00.000Z',
+      },
+      {
+        actor_json: visibleSlugActorJson,
+        archived_at: null,
+        body_text: 'Visible slug tombstoned row.',
+        content_ref: 'content.forum.visible_slug_agent.tombstoned',
+        created_at: '2026-06-05T21:08:00.000Z',
+        forum_id: '33333333-3333-4333-8333-333333333333',
+        id: 'bbbbbbbb-5555-4111-8111-bbbbbbbbbbbb',
+        idempotency_key: 'seed-visible-slug-agent-tombstoned',
+        parent_post_id: null,
+        post_number: 5,
+        public_projection_json: projectionJson,
+        quote_post_id: null,
+        receipt_refs_json: '["receipt.public.tombstoned.should_not_leak"]',
+        revision_ref: null,
+        state: 'tombstoned',
+        topic_id: '55555555-5555-4555-8555-555555555555',
+        updated_at: '2026-06-05T21:08:00.000Z',
+      },
+      {
+        actor_json: visibleSlugActorJson,
+        archived_at: null,
+        body_text: 'Visible slug unlisted row.',
+        content_ref: 'content.forum.visible_slug_agent.unlisted',
+        created_at: '2026-06-05T21:09:00.000Z',
+        forum_id: '77777777-1111-4111-8111-777777777777',
+        id: 'bbbbbbbb-6666-4111-8111-bbbbbbbbbbbb',
+        idempotency_key: 'seed-visible-slug-agent-unlisted',
+        parent_post_id: null,
+        post_number: 1,
+        public_projection_json: projectionJson,
+        quote_post_id: null,
+        receipt_refs_json: '["receipt.public.unlisted.should_not_leak"]',
+        revision_ref: null,
+        state: 'visible',
+        topic_id: 'bbbbbbbb-2222-4111-8111-bbbbbbbbbbbb',
+        updated_at: '2026-06-05T21:09:00.000Z',
+      },
+    )
     const profileResponse = await route(
       store,
       '/api/agents/profiles/route-test-agent',
@@ -4284,6 +5865,19 @@ describe('Forum routes', () => {
         source: 'agent_profile',
       },
     })
+    expect(visibleSlugProfile).toMatchObject({
+      profile: {
+        activity: [
+          expect.objectContaining({
+            href: 'https://openagents.com/forum/t/55555555-5555-4555-8555-555555555555#post-bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb',
+            kind: 'post',
+            postId: 'bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb',
+            receiptRefs: [],
+            title: 'First Topic',
+          }),
+        ],
+      },
+    })
     expect(agentProfileRefResponse.status).toBe(200)
     expect(agentProfileRef).toMatchObject({
       profile: {
@@ -4291,6 +5885,12 @@ describe('Forum routes', () => {
           actorRef: `agent:${visibleSlugAgentId}`,
           slug: 'visible-slug-agent',
         },
+        activity: [
+          expect.objectContaining({
+            postId: 'bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb',
+            title: 'First Topic',
+          }),
+        ],
       },
     })
     expect(browserProfileResponse.status).toBe(200)
@@ -4299,6 +5899,11 @@ describe('Forum routes', () => {
     )
     expect(browserProfile).toContain('data-agent-profile-page')
     expect(browserProfile).toContain('Visible Slug Agent')
+    expect(browserProfile).toContain('Public activity')
+    expect(browserProfile).toContain('First Topic')
+    expect(browserProfile).toContain('Tips')
+    expect(browserProfile).toContain('Not enabled - no tip wallet claimed yet')
+    expect(browserProfile).toContain('No settled tips yet')
     expect(browserProfile).toContain(
       'https://openagents.com/login/github?returnTo=/agents/claims/CLAIM_ID',
     )
@@ -4315,6 +5920,163 @@ describe('Forum routes', () => {
     })
     expect(JSON.stringify(profile)).not.toContain('agent@example.com')
     expect(JSON.stringify(profile)).not.toContain('oa_agent')
+    expect(JSON.stringify(visibleSlugProfile)).not.toContain(
+      'should_not_leak',
+    )
+    expect(browserProfile).not.toContain('should_not_leak')
+    expect(browserProfile).not.toContain('Visible Slug Void Topic')
+  })
+
+  test('refreshes public agent profiles from approved owner claims', async () => {
+    const store = new ForumRouteStore()
+    const agentUserId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const beforeResponse = await route(
+      store,
+      '/api/agents/profiles/route-test-agent',
+    )
+    const before = await beforeResponse.json()
+
+    store.agentOwnerClaims.push({
+      agent_user_id: agentUserId,
+      decided_at: '2026-06-10T21:27:56.197Z',
+      id: 'agent_claim_45535152-f195-4b01-95fa-0c1b9bf1f6ff',
+      owner_user_id: 'github:17035300',
+      receipt_ref:
+        'agent_claim_receipt_agent_claim_45535152-f195-4b01-95fa-0c1b9bf1f6ff',
+      status: 'approved',
+      updated_at: '2026-06-10T21:27:56.197Z',
+    })
+
+    const afterResponse = await route(
+      store,
+      '/api/agents/profiles/route-test-agent',
+    )
+    const browserResponse = await route(
+      store,
+      `/forum/u/${agentUserId}/route-test-agent`,
+    )
+    const after = await afterResponse.json()
+    const browserProfile = await browserResponse.text()
+
+    expect(beforeResponse.status).toBe(200)
+    expect(before).toMatchObject({
+      profile: {
+        ownerHandoff: {
+          humanLoginStatus: 'owner_claim_required',
+          ownerUserRef: null,
+        },
+        updatedAt: '2026-06-05T20:00:00.000Z',
+        verificationState: 'registered_agent',
+      },
+    })
+    expect(afterResponse.status).toBe(200)
+    expect(after).toMatchObject({
+      profile: {
+        ownerHandoff: {
+          claimReceiptRefs: [
+            'agent_claim_receipt_agent_claim_45535152-f195-4b01-95fa-0c1b9bf1f6ff',
+          ],
+          claimRef: 'agent_claim_45535152-f195-4b01-95fa-0c1b9bf1f6ff',
+          humanLoginStatus: 'owner_claim_approved',
+          ownerUserRef: 'owner:github:17035300',
+        },
+        publicProjection: {
+          safeReceiptRefs: [
+            'agent_claim_receipt_agent_claim_45535152-f195-4b01-95fa-0c1b9bf1f6ff',
+          ],
+          trustTier: 'verified',
+        },
+        updatedAt: '2026-06-10T21:27:56.197Z',
+        verificationState: 'owner_claimed_agent',
+      },
+    })
+    expect(browserResponse.status).toBe(200)
+    expect(browserProfile).toContain('owner_claim_approved')
+    expect(browserProfile).toContain('owner:github:17035300')
+    expect(browserProfile).toContain(
+      'agent_claim_receipt_agent_claim_45535152-f195-4b01-95fa-0c1b9bf1f6ff',
+    )
+    expect(JSON.stringify(after)).not.toContain('agent@example.com')
+    expect(JSON.stringify(after)).not.toContain('oa_agent')
+    expect(browserProfile).not.toContain('CLAIM_ID')
+    expect(browserProfile).not.toContain('owner_claim_required')
+  })
+
+  // Epic #4751 instances 1-2 (#4744): the profile projection composes
+  // the verified X-proof challenge live and declares its staleness
+  // contract, so neither the owner-claim write nor the X-verification
+  // write can be lost by a frozen public trust surface.
+  test('reflects verified X proofs on agent profiles and declares projection staleness', async () => {
+    const store = new ForumRouteStore()
+    const agentUserId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+
+    store.agentOwnerClaims.push({
+      agent_user_id: agentUserId,
+      decided_at: '2026-06-10T21:27:56.197Z',
+      id: 'agent_claim_45535152-f195-4b01-95fa-0c1b9bf1f6ff',
+      owner_user_id: 'github:17035300',
+      receipt_ref:
+        'agent_claim_receipt_agent_claim_45535152-f195-4b01-95fa-0c1b9bf1f6ff',
+      status: 'approved',
+      updated_at: '2026-06-10T21:27:56.197Z',
+    })
+
+    const claimedResponse = await route(
+      store,
+      '/api/agents/profiles/route-test-agent',
+    )
+    const claimed = (await claimedResponse.json()) as {
+      generatedAt?: string
+      profile: { verificationState: string }
+      staleness?: Record<string, unknown>
+    }
+
+    store.agentOwnerXChallenges.push({
+      agent_user_id: agentUserId,
+      id: 'x_claim_challenge_5f0a8e3c',
+      receipt_ref: 'x_claim_receipt_x_claim_challenge_5f0a8e3c',
+      state: 'verified',
+      tweet_ref: 'tweet:1932575113341271138',
+      updated_at: '2026-06-11T01:12:00.000Z',
+      verified_at: '2026-06-11T01:12:00.000Z',
+    })
+
+    const verifiedResponse = await route(
+      store,
+      '/api/agents/profiles/route-test-agent',
+    )
+    const verified = await verifiedResponse.json()
+
+    expect(claimedResponse.status).toBe(200)
+    expect(claimed.profile.verificationState).toBe('owner_claimed_agent')
+    expect(typeof claimed.generatedAt).toBe('string')
+    expect(claimed.staleness).toMatchObject({
+      composition: 'live_at_read',
+      contractVersion: 'projection_staleness.v1',
+      maxStalenessSeconds: 0,
+      rebuildsOn: expect.arrayContaining([
+        'agent_owner_claim_approved',
+        'agent_owner_x_claim_verified',
+      ]),
+    })
+    expect(verifiedResponse.status).toBe(200)
+    expect(verified).toMatchObject({
+      profile: {
+        publicProjection: {
+          safeReceiptRefs: [
+            'agent_claim_receipt_agent_claim_45535152-f195-4b01-95fa-0c1b9bf1f6ff',
+            'x_claim_receipt_x_claim_challenge_5f0a8e3c',
+          ],
+          trustTier: 'verified',
+        },
+        updatedAt: '2026-06-11T01:12:00.000Z',
+        verificationState: 'x_verified_agent',
+      },
+    })
+    // The verified X identity surfaces as refs only — no handle, token,
+    // or raw tweet URL leaves the ledger through this projection.
+    expect(JSON.stringify(verified)).not.toContain('oauth')
+    expect(JSON.stringify(verified)).not.toContain('x.com/')
   })
 
   test('creates idempotent watches, bookmarks, and follows for authorized agents', async () => {
@@ -4555,6 +6317,123 @@ describe('Forum routes', () => {
     })
   })
 
+  test('filters the notifications array to unread items when unread=true is set', async () => {
+    const store = new ForumRouteStore()
+    store.posts[0] = {
+      ...store.posts[0]!,
+      body_text: 'Seed route-test body mentioning @route-test-agent.',
+    }
+    store.watches.push({
+      actor_ref: 'agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      archived_at: null,
+      created_at: '2026-06-05T20:05:00.000Z',
+      forum_id: '33333333-3333-4333-8333-333333333333',
+      id: 'watch-topic-existing',
+      idempotency_key: 'watch-topic-existing',
+      topic_id: '55555555-5555-4555-8555-555555555555',
+      watch_kind: 'topic',
+    })
+
+    const initialResponse = await route(store, '/api/agents/notifications', {
+      headers: { authorization: 'Bearer oa_agent_route_test' },
+    })
+    const initialBody = JSON.parse(await initialResponse.text()) as Readonly<{
+      notifications: ReadonlyArray<
+        Readonly<{ id: string; kind: string; readState: string }>
+      >
+      summary: Readonly<{ unreadCount: number; totalCount: number }>
+    }>
+    expect(initialResponse.status).toBe(200)
+    const initialNotifications = [...initialBody.notifications]
+    const mention = initialNotifications.find(
+      notification => notification.kind === 'mention',
+    )
+    const watchedTopicReply = initialNotifications.find(
+      notification => notification.kind === 'watched_topic_reply',
+    )
+    expect(mention).toBeDefined()
+    expect(watchedTopicReply).toBeDefined()
+    expect(initialNotifications.every(n => n.readState === 'unread')).toBe(true)
+
+    // Mark exactly one notification (the mention) as read.
+    const markRead = await route(
+      store,
+      `/api/agents/notifications/${encodeURIComponent(mention!.id)}/read`,
+      {
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'notification-read-unread-filter-1',
+        },
+        method: 'POST',
+      },
+    )
+    expect(markRead.status).toBe(201)
+
+    // No param: the broad feed still returns both the read and unread items.
+    const broadResponse = await route(store, '/api/agents/notifications', {
+      headers: { authorization: 'Bearer oa_agent_route_test' },
+    })
+    const broadBody = JSON.parse(await broadResponse.text()) as Readonly<{
+      notifications: ReadonlyArray<
+        Readonly<{ id: string; kind: string; readState: string }>
+      >
+      summary: Readonly<{ unreadCount: number; totalCount: number }>
+    }>
+    expect(broadResponse.status).toBe(200)
+    const broadNotifications = [...broadBody.notifications]
+    expect(broadNotifications).toHaveLength(initialNotifications.length)
+    expect(
+      broadNotifications.some(
+        notification =>
+          notification.id === mention!.id && notification.readState === 'read',
+      ),
+    ).toBe(true)
+    expect(
+      broadNotifications.some(
+        notification => notification.id === watchedTopicReply!.id,
+      ),
+    ).toBe(true)
+
+    // unread=true: only the unread item(s) come back in the array, but the
+    // summary still reports the true server-computed unread count.
+    const unreadResponse = await route(
+      store,
+      '/api/agents/notifications?unread=true',
+      { headers: { authorization: 'Bearer oa_agent_route_test' } },
+    )
+    const unreadBody = JSON.parse(await unreadResponse.text()) as Readonly<{
+      notifications: ReadonlyArray<
+        Readonly<{ id: string; kind: string; readState: string }>
+      >
+      summary: Readonly<{ unreadCount: number; totalCount: number }>
+    }>
+    expect(unreadResponse.status).toBe(200)
+    const unreadNotifications = [...unreadBody.notifications]
+    expect(
+      unreadNotifications.every(
+        notification => notification.readState === 'unread',
+      ),
+    ).toBe(true)
+    expect(
+      unreadNotifications.some(
+        notification => notification.id === mention!.id,
+      ),
+    ).toBe(false)
+    expect(
+      unreadNotifications.some(
+        notification => notification.id === watchedTopicReply!.id,
+      ),
+    ).toBe(true)
+
+    // summary.unreadCount is consistent across both views and equals the true
+    // server unread count (one item was marked read).
+    expect(broadBody.summary.unreadCount).toBe(initialBody.summary.unreadCount - 1)
+    expect(unreadBody.summary.unreadCount).toBe(broadBody.summary.unreadCount)
+    expect(unreadBody.summary.totalCount).toBe(broadBody.summary.totalCount)
+    // The filtered array length matches the true unread count here.
+    expect(unreadNotifications).toHaveLength(unreadBody.summary.unreadCount)
+  })
+
   test('denies participation writes and notifications without a bearer token', async () => {
     const store = new ForumRouteStore()
     const watch = await route(
@@ -4632,6 +6511,7 @@ describe('Forum routes', () => {
         postId,
         tipStats: {
           tipCount: 0,
+          totalCreditedSats: 0,
           totalPaidSats: 0,
           totalSettledSats: 0,
         },
@@ -4769,10 +6649,122 @@ describe('Forum routes', () => {
     expect(store.directTipAttempts).toHaveLength(1)
     expect(store.receipts).toHaveLength(0)
     expect(postDetail.post.tipStats).toStrictEqual({
+      staleness: {
+        composition: 'live_at_read',
+        contractVersion: 'projection_staleness.v1',
+        maxStalenessSeconds: 0,
+        rebuildsOn: [
+          'forum_payment_event_confirmed',
+          'forum_tip_settlement_claimed',
+          'tip_ladder_pay_in_paid',
+        ],
+      },
       tipCount: 0,
+      totalCreditedSats: 0,
       totalPaidSats: 0,
       totalSettledSats: 0,
     })
+  })
+
+  test('keeps refunded and reversed direct tips explicit without public settled stats', async () => {
+    const store = new ForumRouteStore()
+    store.tipRecipientWallets.push(readyTipRecipientWalletRow())
+    const postId = '66666666-6666-4666-8666-666666666666'
+
+    for (const status of ['refunded', 'reversed'] as const) {
+      const response = await route(
+        store,
+        `/api/forum/posts/${encodeURIComponent(postId)}/direct-tips`,
+        {
+          body: {
+            amount: { amount: 15, asset: 'sats' },
+            paymentEvidence: {
+              externalRef: `external.payment.redacted.route_direct_tip_${status}`,
+              paymentMode: 'live',
+              providerRef: 'provider.mdk_agent_wallet.redacted',
+              redactedEvidenceRef: `evidence.payment.redacted.route_direct_tip_${status}`,
+              status,
+            },
+          },
+          headers: {
+            authorization: 'Bearer oa_agent_route_test',
+            'idempotency-key': `forum-direct-tip-route-${status}`,
+          },
+          method: 'POST',
+        },
+      )
+      const body = (await response.json()) as {
+        attemptId: string
+        paymentEvidence: { status: string }
+        receipt: unknown
+        status: string
+      }
+      const lookupResponse = await route(
+        store,
+        `/api/forum/direct-tips/${encodeURIComponent(body.attemptId)}`,
+      )
+      const lookup = await lookupResponse.json()
+
+      expect(response.status).toBe(201)
+      expect(body).toMatchObject({
+        paymentEvidence: { status },
+        receipt: null,
+        status: 'failed',
+      })
+      expect(lookupResponse.status).toBe(200)
+      expect(lookup).toMatchObject({
+        attemptId: body.attemptId,
+        paymentEvidence: { status },
+        receipt: null,
+        status: 'failed',
+      })
+    }
+
+    const postDetailResponse = await route(
+      store,
+      `/api/forum/posts/${encodeURIComponent(postId)}`,
+    )
+    const postDetail = (await postDetailResponse.json()) as {
+      post: {
+        tipStats: {
+          tipCount: number
+          totalPaidSats: number
+          totalSettledSats: number
+        }
+      }
+    }
+    const leaderboardsResponse = await route(
+      store,
+      '/api/forum/tip-leaderboards',
+    )
+    const leaderboards = await leaderboardsResponse.json()
+
+    expect(store.directTipAttempts).toHaveLength(2)
+    expect(store.receipts).toHaveLength(0)
+    expect(store.paymentEvents).toHaveLength(2)
+    expect(postDetail.post.tipStats).toStrictEqual({
+      staleness: {
+        composition: 'live_at_read',
+        contractVersion: 'projection_staleness.v1',
+        maxStalenessSeconds: 0,
+        rebuildsOn: [
+          'forum_payment_event_confirmed',
+          'forum_tip_settlement_claimed',
+          'tip_ladder_pay_in_paid',
+        ],
+      },
+      tipCount: 0,
+      totalCreditedSats: 0,
+      totalPaidSats: 0,
+      totalSettledSats: 0,
+    })
+    expect(leaderboardsResponse.status).toBe(200)
+    expect(leaderboards).toMatchObject({
+      creators: [],
+      posts: [],
+    })
+    expect(JSON.stringify(leaderboards)).not.toContain('refunded')
+    expect(JSON.stringify(leaderboards)).not.toContain('reversed')
   })
 
   test('reconciles recovery-pending direct tips from signed MDK webhook events', async () => {
@@ -4917,7 +6909,18 @@ describe('Forum routes', () => {
     expect(store.directTipWebhookEvents[0]?.delivery_count).toBe(2)
     expect(store.receipts).toHaveLength(1)
     expect(postDetail.post.tipStats).toStrictEqual({
+      staleness: {
+        composition: 'live_at_read',
+        contractVersion: 'projection_staleness.v1',
+        maxStalenessSeconds: 0,
+        rebuildsOn: [
+          'forum_payment_event_confirmed',
+          'forum_tip_settlement_claimed',
+          'tip_ladder_pay_in_paid',
+        ],
+      },
       tipCount: 1,
+      totalCreditedSats: 0,
       totalPaidSats: 15,
       totalSettledSats: 15,
     })
@@ -5910,6 +7913,67 @@ describe('Forum routes', () => {
     })
   })
 
+  test('topic detail resolves by slug as well as topicId', async () => {
+    const store = new ForumRouteStore()
+    const createResponse = await route(
+      store,
+      '/api/forum/forums/void/topics',
+      {
+        body: {
+          bodyText: 'Pretty slug URLs should resolve like topicId URLs.',
+          title: 'Slug resolution works',
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'slug-resolution-topic',
+        },
+        method: 'POST',
+      },
+    )
+    const createBody = (await createResponse.json()) as Readonly<{
+      topic: Readonly<{ slug: string; topicId: string }>
+    }>
+    const topicId = createBody.topic.topicId
+    const slug = createBody.topic.slug
+
+    expect(createResponse.status).toBe(201)
+    expect(typeof slug).toBe('string')
+    expect(slug.length).toBeGreaterThan(0)
+    // The created slug must differ from the topicId so the two lookup forms are
+    // genuinely distinct (otherwise the test would not exercise slug
+    // resolution).
+    expect(slug).not.toBe(topicId)
+
+    const byId = await route(store, `/api/forum/topics/${topicId}`)
+    const bySlug = await route(
+      store,
+      `/api/forum/topics/${encodeURIComponent(slug)}`,
+    )
+    const unknown = await route(
+      store,
+      '/api/forum/topics/this-ref-does-not-exist',
+    )
+
+    expect(byId.status).toBe(200)
+    expect(bySlug.status).toBe(200)
+    // Unknown ref (neither topicId nor slug) must be a clean not-found, never a
+    // 500.
+    expect(unknown.status).toBe(404)
+
+    const byIdBody = (await byId.json()) as Readonly<{
+      topic: Readonly<{ slug: string; title: string; topicId: string }>
+    }>
+    const bySlugBody = (await bySlug.json()) as Readonly<{
+      topic: Readonly<{ slug: string; title: string; topicId: string }>
+    }>
+
+    // Both URL forms must resolve to the very same topic.
+    expect(bySlugBody.topic.topicId).toBe(topicId)
+    expect(bySlugBody.topic.topicId).toBe(byIdBody.topic.topicId)
+    expect(bySlugBody.topic.slug).toBe(slug)
+    expect(bySlugBody.topic.title).toBe('Slug resolution works')
+  })
+
   test('search only returns listed public visible content', async () => {
     const store = new ForumRouteStore()
     const listed = await route(store, '/api/forum/search?q=First')
@@ -5994,9 +8058,9 @@ describe('Forum routes', () => {
       publicTipping: {
         onboarding: {
           payerReadiness: {
-            blockerRefs: ['blocker.public.forum_tip_payer.wallet_missing'],
-            state: 'missing',
-            tippingSpendAllowed: false,
+            blockerRefs: [],
+            state: 'send_ready',
+            tippingSpendAllowed: true,
           },
           recipientStateRefs: [
             'state.public.forum_post_tip.recipient_missing',
@@ -6007,11 +8071,8 @@ describe('Forum routes', () => {
             'state.public.forum_post_tip.settled',
           ],
         },
-        postTips: 'gated',
-        remainingBeforeLiveTips: [
-          'Tip payer wallet onboarding',
-          'Tip signet/live smoke',
-        ],
+        postTips: 'ready',
+        remainingBeforeLiveTips: [],
       },
       status: 'ready',
     })
@@ -6440,25 +8501,618 @@ describe('Forum routes', () => {
         state: 'tombstoned',
       },
     })
-    await expect(topicResponse.json()).resolves.toMatchObject({
-      posts: [
-        {
-          bodyText: null,
-          postNumber: 1,
-          state: 'tombstoned',
-        },
-        {
-          bodyText: 'Reply that quotes the seed post.',
-          postNumber: 2,
-          state: 'visible',
-        },
-      ],
-    })
+    // A deleted (tombstoned) post must NOT appear in the thread at all: no
+    // placeholder, no empty shell. Only the surviving visible reply remains,
+    // and the topic counts drop to reflect the single live post.
+    const topicBody = (await topicResponse.json()) as {
+      posts: ReadonlyArray<{
+        bodyText: string | null
+        postNumber: number
+        state: string
+      }>
+      topic: { postCount: number; replyCount: number }
+    }
+    expect(topicBody.posts).toHaveLength(1)
+    expect(topicBody.posts).toEqual([
+      expect.objectContaining({
+        bodyText: 'Reply that quotes the seed post.',
+        postNumber: 2,
+        state: 'visible',
+      }),
+    ])
+    expect(
+      topicBody.posts.some(post => post.state === 'tombstoned'),
+    ).toBe(false)
+    expect(topicBody.topic.postCount).toBe(1)
+    expect(topicBody.topic.replyCount).toBe(0)
     expect(store.postRevisions.map(revision => revision.action_kind)).toEqual([
       'edit',
       'tombstone',
     ])
     expect(store.reports).toHaveLength(1)
+  })
+
+  test('deleting a parent post removes it from the thread without orphaning its surviving child reply', async () => {
+    const store = new ForumRouteStore()
+    store.topics[0] = {
+      ...store.topics[0]!,
+      actor_json: authenticatedAgentActorJson,
+    }
+    store.posts[0] = {
+      ...store.posts[0]!,
+      actor_json: authenticatedAgentActorJson,
+    }
+
+    const parentPostId = '66666666-6666-4666-8666-666666666666'
+    const topicId = '55555555-5555-4555-8555-555555555555'
+
+    // A child reply threaded under the (soon-to-be-deleted) parent.
+    const childResponse = await route(
+      store,
+      `/api/forum/topics/${topicId}/posts`,
+      {
+        body: {
+          bodyText: 'Child reply under the parent post.',
+          parentPostId,
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'thread-child-1',
+        },
+        method: 'POST',
+      },
+    )
+    expect(childResponse.status).toBe(201)
+    const childBody = (await childResponse.json()) as {
+      post: { parentPostId: string | null; postId: string; postNumber: number }
+    }
+    expect(childBody.post.parentPostId).toBe(parentPostId)
+    const childPostId = childBody.post.postId
+
+    // Author deletes the PARENT.
+    const deleteResponse = await route(
+      store,
+      `/api/forum/posts/${parentPostId}`,
+      {
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'thread-delete-parent-1',
+        },
+        method: 'DELETE',
+      },
+    )
+    expect(deleteResponse.status).toBe(200)
+    await expect(deleteResponse.json()).resolves.toMatchObject({
+      action: 'tombstone',
+      post: { state: 'tombstoned' },
+    })
+
+    // Idempotent repeat with the SAME key returns the prior result, not a
+    // second tombstone (counts must not be decremented twice).
+    const idempotentRepeat = await route(
+      store,
+      `/api/forum/posts/${parentPostId}`,
+      {
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'thread-delete-parent-1',
+        },
+        method: 'DELETE',
+      },
+    )
+    expect(idempotentRepeat.status).toBe(200)
+    await expect(idempotentRepeat.json()).resolves.toMatchObject({
+      idempotent: true,
+      post: { state: 'tombstoned' },
+    })
+
+    const topicResponse = await route(store, `/api/forum/topics/${topicId}`)
+    const topicBody = (await topicResponse.json()) as {
+      posts: ReadonlyArray<{
+        bodyText: string | null
+        contentRef: string
+        parentPostId: string | null
+        postId: string
+        state: string
+      }>
+      topic: { postCount: number; replyCount: number }
+    }
+
+    // The deleted parent is GONE from the thread (no placeholder, no shell).
+    expect(topicBody.posts.map(post => post.postId)).toEqual([childPostId])
+    expect(
+      topicBody.posts.some(post => post.postId === parentPostId),
+    ).toBe(false)
+    // No post renders the unresolved `content.forum.post.<id>` placeholder.
+    expect(topicBody.posts.some(post => post.bodyText === null)).toBe(false)
+    // The surviving child still carries its parent ref (no orphan/crash) and
+    // its own body, and counts reflect exactly one live post.
+    expect(topicBody.posts[0]?.parentPostId).toBe(parentPostId)
+    expect(topicBody.posts[0]?.bodyText).toBe(
+      'Child reply under the parent post.',
+    )
+    expect(topicBody.topic.postCount).toBe(1)
+    expect(topicBody.topic.replyCount).toBe(0)
+  })
+
+  test('forum post deletion is author-only and returns typed 403/404 errors', async () => {
+    const postId = '66666666-6666-4666-8666-666666666666'
+
+    // Non-author cannot delete: the seed post is NOT owned by the route-test
+    // agent in a default store, so a DELETE is forbidden.
+    const foreignStore = new ForumRouteStore()
+    const forbiddenResponse = await route(
+      foreignStore,
+      `/api/forum/posts/${postId}`,
+      {
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'delete-foreign-post-1',
+        },
+        method: 'DELETE',
+      },
+    )
+    expect(forbiddenResponse.status).toBe(403)
+    await expect(forbiddenResponse.json()).resolves.toMatchObject({
+      error: 'forbidden',
+      reason: 'only the post author can tombstone this post',
+    })
+
+    // Missing post: 404.
+    const missingStore = new ForumRouteStore()
+    missingStore.topics[0] = {
+      ...missingStore.topics[0]!,
+      actor_json: authenticatedAgentActorJson,
+    }
+    missingStore.posts[0] = {
+      ...missingStore.posts[0]!,
+      actor_json: authenticatedAgentActorJson,
+    }
+    const missingResponse = await route(
+      missingStore,
+      '/api/forum/posts/00000000-0000-4000-8000-000000000000',
+      {
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'delete-missing-post-1',
+        },
+        method: 'DELETE',
+      },
+    )
+    expect(missingResponse.status).toBe(404)
+    await expect(missingResponse.json()).resolves.toMatchObject({
+      error: 'not_found',
+    })
+
+    // Missing Idempotency-Key: 400.
+    const noKeyResponse = await route(
+      missingStore,
+      `/api/forum/posts/${postId}`,
+      {
+        headers: { authorization: 'Bearer oa_agent_route_test' },
+        method: 'DELETE',
+      },
+    )
+    expect(noKeyResponse.status).toBe(400)
+    await expect(noKeyResponse.json()).resolves.toMatchObject({
+      error: 'bad_request',
+      reason: 'Idempotency-Key header is required',
+    })
+  })
+
+  test('renames owned topics and refuses non-author, missing, or invalid renames', async () => {
+    const topicId = '55555555-5555-4555-8555-555555555555'
+
+    const ownedStore = new ForumRouteStore()
+    ownedStore.topics[0] = {
+      ...ownedStore.topics[0]!,
+      actor_json: authenticatedAgentActorJson,
+    }
+
+    const renameResponse = await route(
+      ownedStore,
+      `/api/forum/topics/${topicId}`,
+      {
+        body: { title: 'Renamed by the topic author' },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'rename-owned-topic-1',
+        },
+        method: 'PATCH',
+      },
+    )
+
+    expect(renameResponse.status).toBe(200)
+    await expect(renameResponse.json()).resolves.toMatchObject({
+      action: 'rename',
+      idempotent: false,
+      topic: { title: 'Renamed by the topic author' },
+    })
+
+    const renamedTopicResponse = await route(
+      ownedStore,
+      `/api/forum/topics/${topicId}`,
+    )
+    await expect(renamedTopicResponse.json()).resolves.toMatchObject({
+      topic: { title: 'Renamed by the topic author' },
+    })
+
+    const shortTitleResponse = await route(
+      ownedStore,
+      `/api/forum/topics/${topicId}`,
+      {
+        body: { title: 'ab' },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'rename-owned-topic-short-1',
+        },
+        method: 'PATCH',
+      },
+    )
+
+    expect(shortTitleResponse.status).toBe(400)
+    await expect(shortTitleResponse.json()).resolves.toMatchObject({
+      error: 'bad_request',
+    })
+
+    const longTitleResponse = await route(
+      ownedStore,
+      `/api/forum/topics/${topicId}`,
+      {
+        body: { title: 'x'.repeat(161) },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'rename-owned-topic-long-1',
+        },
+        method: 'PATCH',
+      },
+    )
+
+    expect(longTitleResponse.status).toBe(400)
+    await expect(longTitleResponse.json()).resolves.toMatchObject({
+      error: 'bad_request',
+    })
+
+    const missingIdempotencyResponse = await route(
+      ownedStore,
+      `/api/forum/topics/${topicId}`,
+      {
+        body: { title: 'Rename without an idempotency key' },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+        },
+        method: 'PATCH',
+      },
+    )
+
+    expect(missingIdempotencyResponse.status).toBe(400)
+    await expect(missingIdempotencyResponse.json()).resolves.toMatchObject({
+      error: 'bad_request',
+      reason: 'Idempotency-Key header is required',
+    })
+
+    const foreignStore = new ForumRouteStore()
+    const forbiddenResponse = await route(
+      foreignStore,
+      `/api/forum/topics/${topicId}`,
+      {
+        body: { title: 'Rename attempt by a non-author' },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'rename-foreign-topic-1',
+        },
+        method: 'PATCH',
+      },
+    )
+
+    expect(forbiddenResponse.status).toBe(403)
+    await expect(forbiddenResponse.json()).resolves.toMatchObject({
+      error: 'forbidden',
+      reason: 'only the topic author can rename this topic',
+    })
+
+    const missingStore = new ForumRouteStore()
+    missingStore.topics[0] = {
+      ...missingStore.topics[0]!,
+      actor_json: authenticatedAgentActorJson,
+    }
+    const missingResponse = await route(
+      missingStore,
+      '/api/forum/topics/00000000-0000-4000-8000-000000000000',
+      {
+        body: { title: 'Rename a topic that does not exist' },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'rename-missing-topic-1',
+        },
+        method: 'PATCH',
+      },
+    )
+
+    expect(missingResponse.status).toBe(404)
+    await expect(missingResponse.json()).resolves.toMatchObject({
+      error: 'not_found',
+    })
+  })
+
+  test('validates reply parentPostId against same-topic visible posts', async () => {
+    const store = new ForumRouteStore()
+    const topicId = '55555555-5555-4555-8555-555555555555'
+    const seedPostId = '66666666-6666-4666-8666-666666666666'
+    const crossTopicPostId = '88888888-5001-4001-8001-888888888888'
+
+    const validResponse = await route(
+      store,
+      `/api/forum/topics/${topicId}/posts`,
+      {
+        body: {
+          bodyText: 'Reply threaded under the seed post.',
+          parentPostId: seedPostId,
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-ref-valid-1',
+        },
+        method: 'POST',
+      },
+    )
+    const truncatedResponse = await route(
+      store,
+      `/api/forum/topics/${topicId}/posts`,
+      {
+        body: {
+          bodyText: 'Reply carrying a truncated parent ref.',
+          parentPostId: '95993529',
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-ref-truncated-1',
+        },
+        method: 'POST',
+      },
+    )
+    const crossTopicResponse = await route(
+      store,
+      `/api/forum/topics/${topicId}/posts`,
+      {
+        body: {
+          bodyText: 'Reply carrying a cross-topic parent ref.',
+          parentPostId: crossTopicPostId,
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-ref-cross-topic-1',
+        },
+        method: 'POST',
+      },
+    )
+
+    const seedIndex = store.posts.findIndex(item => item.id === seedPostId)
+    store.posts[seedIndex] = {
+      ...store.posts[seedIndex]!,
+      state: 'tombstoned',
+    }
+
+    const tombstonedResponse = await route(
+      store,
+      `/api/forum/topics/${topicId}/posts`,
+      {
+        body: {
+          bodyText: 'Reply carrying a tombstoned parent ref.',
+          parentPostId: seedPostId,
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-ref-tombstoned-1',
+        },
+        method: 'POST',
+      },
+    )
+
+    expect(validResponse.status).toBe(201)
+    await expect(validResponse.json()).resolves.toMatchObject({
+      post: { parentPostId: seedPostId, postNumber: 2 },
+    })
+    expect(truncatedResponse.status).toBe(400)
+    await expect(truncatedResponse.json()).resolves.toMatchObject({
+      error: 'bad_request',
+      reason: 'parentPostId must reference an existing post',
+    })
+    expect(crossTopicResponse.status).toBe(400)
+    await expect(crossTopicResponse.json()).resolves.toMatchObject({
+      error: 'bad_request',
+      reason: 'parentPostId must belong to the target topic',
+    })
+    expect(tombstonedResponse.status).toBe(400)
+    await expect(tombstonedResponse.json()).resolves.toMatchObject({
+      error: 'bad_request',
+      reason: 'parentPostId must reference a visible post',
+    })
+    expect(
+      store.posts.filter(item => item.topic_id === topicId),
+    ).toHaveLength(2)
+  })
+
+  test('honors PATCH parentPostId repairs with validation and a cycle guard', async () => {
+    const store = new ForumRouteStore()
+    const topicId = '55555555-5555-4555-8555-555555555555'
+    const seedPostId = '66666666-6666-4666-8666-666666666666'
+
+    const firstReplyResponse = await route(
+      store,
+      `/api/forum/topics/${topicId}/posts`,
+      {
+        body: { bodyText: 'First reply in the repair thread.' },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-repair-reply-1',
+        },
+        method: 'POST',
+      },
+    )
+    const firstReply = (await firstReplyResponse.json()) as Readonly<{
+      post: Readonly<{ postId: string }>
+    }>
+    const secondReplyResponse = await route(
+      store,
+      `/api/forum/topics/${topicId}/posts`,
+      {
+        body: {
+          bodyText: 'Second reply nested under the first.',
+          parentPostId: firstReply.post.postId,
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-repair-reply-2',
+        },
+        method: 'POST',
+      },
+    )
+    const secondReply = (await secondReplyResponse.json()) as Readonly<{
+      post: Readonly<{ postId: string }>
+    }>
+
+    const cycleResponse = await route(
+      store,
+      `/api/forum/posts/${firstReply.post.postId}`,
+      {
+        body: {
+          bodyText: 'Attempt to nest the first reply under its child.',
+          parentPostId: secondReply.post.postId,
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-repair-cycle-1',
+        },
+        method: 'PATCH',
+      },
+    )
+    const selfResponse = await route(
+      store,
+      `/api/forum/posts/${secondReply.post.postId}`,
+      {
+        body: {
+          bodyText: 'Attempt to nest the second reply under itself.',
+          parentPostId: secondReply.post.postId,
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-repair-self-1',
+        },
+        method: 'PATCH',
+      },
+    )
+
+    // Mirror the live dangling-ref shape: a truncated parent ref persisted
+    // before validation existed (#4856).
+    const brokenIndex = store.posts.findIndex(
+      item => item.id === secondReply.post.postId,
+    )
+    store.posts[brokenIndex] = {
+      ...store.posts[brokenIndex]!,
+      parent_post_id: '95993529',
+    }
+
+    const missingResponse = await route(
+      store,
+      `/api/forum/posts/${secondReply.post.postId}`,
+      {
+        body: {
+          bodyText: 'Attempt to repair with another dangling ref.',
+          parentPostId: '12345678',
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-repair-missing-1',
+        },
+        method: 'PATCH',
+      },
+    )
+    const repairResponse = await route(
+      store,
+      `/api/forum/posts/${secondReply.post.postId}`,
+      {
+        body: {
+          bodyText: 'Repaired thread ref pointing at the seed post.',
+          parentPostId: seedPostId,
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-repair-fix-1',
+        },
+        method: 'PATCH',
+      },
+    )
+    const repairRetryResponse = await route(
+      store,
+      `/api/forum/posts/${secondReply.post.postId}`,
+      {
+        body: {
+          bodyText: 'Repaired thread ref pointing at the seed post.',
+          parentPostId: seedPostId,
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-repair-fix-1',
+        },
+        method: 'PATCH',
+      },
+    )
+    const topLevelResponse = await route(
+      store,
+      `/api/forum/posts/${firstReply.post.postId}`,
+      {
+        body: {
+          bodyText: 'First reply re-parented to top level.',
+          parentPostId: null,
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'parent-repair-top-level-1',
+        },
+        method: 'PATCH',
+      },
+    )
+
+    expect(cycleResponse.status).toBe(400)
+    await expect(cycleResponse.json()).resolves.toMatchObject({
+      error: 'bad_request',
+      reason: 'parentPostId must not create a reply cycle',
+    })
+    expect(selfResponse.status).toBe(400)
+    await expect(selfResponse.json()).resolves.toMatchObject({
+      error: 'bad_request',
+      reason: 'parentPostId must not reference the edited post',
+    })
+    expect(missingResponse.status).toBe(400)
+    await expect(missingResponse.json()).resolves.toMatchObject({
+      error: 'bad_request',
+      reason: 'parentPostId must reference an existing post',
+    })
+    expect(repairResponse.status).toBe(200)
+    await expect(repairResponse.json()).resolves.toMatchObject({
+      action: 'edit',
+      idempotent: false,
+      post: {
+        bodyText: 'Repaired thread ref pointing at the seed post.',
+        parentPostId: seedPostId,
+        state: 'edited',
+      },
+    })
+    expect(repairRetryResponse.status).toBe(200)
+    await expect(repairRetryResponse.json()).resolves.toMatchObject({
+      idempotent: true,
+      post: { parentPostId: seedPostId },
+    })
+    expect(topLevelResponse.status).toBe(200)
+    await expect(topLevelResponse.json()).resolves.toMatchObject({
+      action: 'edit',
+      post: { parentPostId: null },
+    })
+    expect(store.postRevisions.map(revision => revision.action_kind)).toEqual([
+      'edit',
+      'edit',
+    ])
   })
 
   test('moderator queue and actions are admin-only and public-safe', async () => {
@@ -6642,6 +9296,228 @@ describe('Forum routes', () => {
     expect(store.moderationEvents).toHaveLength(3)
   })
 
+  test('keeps redemption writes atomic when a mid-batch statement fails', async () => {
+    const store = new ForumRouteStore()
+    const path = '/api/forum/orange-check'
+    const previewResponse = await route(
+      store,
+      '/api/forum/paid-actions/preview',
+      {
+        body: {
+          actionKind: 'orange_check',
+          method: 'POST',
+          path,
+          requestBodyDigest: 'sha256:orange-check-atomicity-body',
+          routeParams: {},
+          spendCap: { amount: 500, asset: 'usd' },
+          target: { forumId: null, postId: null, topicId: null },
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'orange-check-atomic-preview-1',
+        },
+        method: 'POST',
+      },
+    )
+    const preview = (await previewResponse.json()) as Readonly<{
+      challenge: Readonly<{ challengeId: string }>
+    }>
+    const privatePaymentResponse = await route(
+      store,
+      '/api/forum/paid-actions/private-payment',
+      {
+        body: {
+          challengeId: preview.challenge.challengeId,
+          method: 'POST',
+          path,
+          requestBodyDigest: 'sha256:orange-check-atomicity-body',
+          routeParams: {},
+          spendCap: { amount: 500, asset: 'usd' },
+        },
+        headers: { authorization: 'Bearer oa_agent_route_test' },
+        method: 'POST',
+      },
+    )
+    const privatePayment = (await privatePaymentResponse.json()) as Readonly<{
+      privatePayment: Readonly<{ credential: string; l402ProofRef: string }>
+    }>
+    const baseClient = forumHostedMdkClient()
+    const paidClient = {
+      ...baseClient,
+      getCheckoutStatus: (
+        request: Parameters<typeof baseClient.getCheckoutStatus>[0],
+      ) =>
+        Effect.map(baseClient.getCheckoutStatus(request), status => ({
+          ...status,
+          status: 'payment_received' as const,
+        })),
+    }
+    const redeemRequest = (idempotencyKey: string) =>
+      ({
+        body: {
+          challengeId: preview.challenge.challengeId,
+          l402ProofRef: privatePayment.privatePayment.l402ProofRef,
+          method: 'POST',
+          path,
+          requestBodyDigest: 'sha256:orange-check-atomicity-body',
+          routeParams: {},
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': idempotencyKey,
+          'x-openagents-l402': `${privatePayment.privatePayment.credential}:${privatePayment.privatePayment.l402ProofRef}`,
+        },
+        hostedMdkClient: paidClient,
+        method: 'POST' as const,
+      }) as const
+
+    store.failInsertsInto = 'forum_l402_redemptions'
+    const failed = await route(
+      store,
+      '/api/forum/paid-actions/redeem',
+      redeemRequest('orange-check-atomic-redeem-fail'),
+    )
+
+    store.failInsertsInto = null
+    const retried = await route(
+      store,
+      '/api/forum/paid-actions/redeem',
+      redeemRequest('orange-check-atomic-redeem-retry'),
+    )
+    const retriedBody = (await retried.json()) as Readonly<{
+      orangeCheck: Readonly<{ active: boolean }>
+      replayed: boolean
+    }>
+
+    expect(failed.status).toBe(500)
+    expect(retried.status).toBe(201)
+    expect(retriedBody.replayed).toBe(false)
+    expect(retriedBody.orangeCheck).toMatchObject({ active: true })
+    expect(store.redemptions).toHaveLength(1)
+    expect(
+      store.receipts.filter(row => row.action_kind === 'orange_check'),
+    ).toHaveLength(1)
+  })
+
+  test('sells the orange check through preview, private payment, and redeem with entitlement fulfillment', async () => {
+    const store = new ForumRouteStore()
+    const path = '/api/forum/orange-check'
+    const previewResponse = await route(
+      store,
+      '/api/forum/paid-actions/preview',
+      {
+        body: {
+          actionKind: 'orange_check',
+          method: 'POST',
+          path,
+          requestBodyDigest: 'sha256:orange-check-purchase-body',
+          routeParams: {},
+          spendCap: { amount: 500, asset: 'usd' },
+          target: { forumId: null, postId: null, topicId: null },
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'orange-check-preview-1',
+        },
+        method: 'POST',
+      },
+    )
+    const preview = (await previewResponse.json()) as Readonly<{
+      challenge: Readonly<{ challengeId: string }>
+    }>
+    const privatePaymentResponse = await route(
+      store,
+      '/api/forum/paid-actions/private-payment',
+      {
+        body: {
+          challengeId: preview.challenge.challengeId,
+          method: 'POST',
+          path,
+          requestBodyDigest: 'sha256:orange-check-purchase-body',
+          routeParams: {},
+          spendCap: { amount: 500, asset: 'usd' },
+        },
+        headers: { authorization: 'Bearer oa_agent_route_test' },
+        method: 'POST',
+      },
+    )
+    const privatePayment = (await privatePaymentResponse.json()) as Readonly<{
+      privatePayment: Readonly<{ credential: string; l402ProofRef: string }>
+    }>
+    const unpaidRedeem = await route(
+      store,
+      '/api/forum/paid-actions/redeem',
+      {
+        body: {
+          challengeId: preview.challenge.challengeId,
+          l402ProofRef: privatePayment.privatePayment.l402ProofRef,
+          method: 'POST',
+          path,
+          requestBodyDigest: 'sha256:orange-check-purchase-body',
+          routeParams: {},
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'orange-check-redeem-unpaid',
+          'x-openagents-l402': `${privatePayment.privatePayment.credential}:${privatePayment.privatePayment.l402ProofRef}`,
+        },
+        method: 'POST',
+      },
+    )
+    const baseClient = forumHostedMdkClient()
+    const paidClient = {
+      ...baseClient,
+      getCheckoutStatus: (
+        request: Parameters<typeof baseClient.getCheckoutStatus>[0],
+      ) =>
+        Effect.map(baseClient.getCheckoutStatus(request), status => ({
+          ...status,
+          status: 'payment_received' as const,
+        })),
+    }
+    const redeemResponse = await route(
+      store,
+      '/api/forum/paid-actions/redeem',
+      {
+        body: {
+          challengeId: preview.challenge.challengeId,
+          l402ProofRef: privatePayment.privatePayment.l402ProofRef,
+          method: 'POST',
+          path,
+          requestBodyDigest: 'sha256:orange-check-purchase-body',
+          routeParams: {},
+        },
+        headers: {
+          authorization: 'Bearer oa_agent_route_test',
+          'idempotency-key': 'orange-check-redeem-1',
+          'x-openagents-l402': `${privatePayment.privatePayment.credential}:${privatePayment.privatePayment.l402ProofRef}`,
+        },
+        hostedMdkClient: paidClient,
+        method: 'POST',
+      },
+    )
+    const redeem = (await redeemResponse.json()) as Readonly<{
+      orangeCheck: Readonly<{ active: boolean; badgeRef: string | null }>
+    }>
+
+    expect(previewResponse.status).toBe(200)
+    expect(privatePaymentResponse.status).toBe(200)
+    expect(unpaidRedeem.status).toBe(402)
+    await expect(unpaidRedeem.json()).resolves.toMatchObject({
+      error: 'orange_check_payment_not_received',
+    })
+    expect(redeemResponse.status).toBe(201)
+    expect(redeem.orangeCheck).toMatchObject({ active: true })
+    expect(store.orangeCheckEntitlements).toHaveLength(1)
+    expect(store.orangeCheckEntitlements[0]).toMatchObject({
+      actor_ref: expect.stringContaining('agent:'),
+      paid_amount_cents: 500,
+      state: 'active',
+    })
+    expect(JSON.stringify(redeem)).not.toMatch(/verified human|safe account/i)
+    expect(JSON.stringify(redeem)).not.toContain('lntbs')
+  })
+
   test('projects orange-check badges on profiles and posts from active entitlements', async () => {
     const store = new ForumRouteStore()
     const created = await route(
@@ -6702,6 +9578,92 @@ describe('Forum routes', () => {
     expect(profileBody.orangeCheck).toMatchObject({ active: true })
     expect(profileBody.orangeCheck.meaning).toContain('owner-claimed')
     expect(JSON.stringify(afterBody)).not.toMatch(/verified human|safe account/i)
+  })
+
+  test('exports active orange-check entitlements as NIP-58 Nostr badge templates', async () => {
+    const store = new ForumRouteStore()
+    const actorRef = 'agent:orange-export-owner'
+    const issuerPubkey = '11'.repeat(32)
+    const recipientPubkey = '22'.repeat(32)
+    store.orangeCheckEntitlements.push({
+      action_ref: 'forum_money_action.test.orange_export',
+      actor_ref: actorRef,
+      agent_user_id: 'orange-export-owner',
+      created_at: '2026-06-10T10:00:00.000Z',
+      id: 'orange_check_export_1',
+      paid_amount_cents: 500,
+      receipt_ref: 'orange_check_receipt.export_1',
+      state: 'active',
+      updated_at: '2026-06-10T10:00:00.000Z',
+    })
+
+    const response = await route(
+      store,
+      `/api/forum/actors/${encodeURIComponent(actorRef)}/orange-check/nostr-export?recipientPubkey=${recipientPubkey}&issuerPubkey=${issuerPubkey}&relay=wss%3A%2F%2Frelay.openagents.example`,
+    )
+    const body = (await response.json()) as Readonly<{
+      nostrExport: Readonly<{
+        badgeAward: Readonly<{
+          kind: number
+          tags: ReadonlyArray<ReadonlyArray<string>>
+        }>
+        badgeDefinition: Readonly<{ kind: number }>
+        badgeDefinitionAddress: string
+        exportDigestRef: string
+        receiptRef: string
+      }>
+    }>
+
+    expect(response.status).toBe(200)
+    expect(body.nostrExport).toMatchObject({
+      badgeDefinitionAddress: `30009:${issuerPubkey}:openagents-orange-check`,
+      exportDigestRef: expect.stringMatching(/^nostr_export\.orange_check\./),
+      receiptRef: 'orange_check_receipt.export_1',
+    })
+    expect(body.nostrExport.badgeDefinition.kind).toBe(30009)
+    expect(body.nostrExport.badgeAward.kind).toBe(8)
+    expect(body.nostrExport.badgeAward.tags).toContainEqual([
+      'p',
+      recipientPubkey,
+      'wss://relay.openagents.example',
+    ])
+    expect(JSON.stringify(body)).not.toMatch(/verified human|safe account/i)
+    expect(JSON.stringify(body)).not.toMatch(/lnbc|preimage|mnemonic|wallet/i)
+  })
+
+  test('blocks orange-check Nostr export without entitlement or valid pubkeys', async () => {
+    const store = new ForumRouteStore()
+    const actorRef = 'agent:no-orange-export'
+    const missing = await route(
+      store,
+      `/api/forum/actors/${encodeURIComponent(actorRef)}/orange-check/nostr-export?recipientPubkey=${'22'.repeat(32)}&issuerPubkey=${'11'.repeat(32)}`,
+    )
+
+    store.orangeCheckEntitlements.push({
+      action_ref: 'forum_money_action.test.orange_export',
+      actor_ref: actorRef,
+      agent_user_id: 'no-orange-export',
+      created_at: '2026-06-10T10:00:00.000Z',
+      id: 'orange_check_export_2',
+      paid_amount_cents: 500,
+      receipt_ref: 'orange_check_receipt.export_2',
+      state: 'active',
+      updated_at: '2026-06-10T10:00:00.000Z',
+    })
+
+    const malformed = await route(
+      store,
+      `/api/forum/actors/${encodeURIComponent(actorRef)}/orange-check/nostr-export?recipientPubkey=bad&issuerPubkey=${'11'.repeat(32)}`,
+    )
+    const malformedBody = (await malformed.json()) as Readonly<{
+      error: string
+      reason: string
+    }>
+
+    expect(missing.status).toBe(404)
+    expect(malformed.status).toBe(400)
+    expect(malformedBody.error).toBe('bad_request')
+    expect(malformedBody.reason).toContain('recipientPubkey')
   })
 
   test('pins and unpins topics through moderator actions with pinned-first ordering', async () => {
@@ -7101,5 +10063,48 @@ describe('Forum routes', () => {
 
     expect(scoped.status).toBe(403)
     expect(method.status).toBe(405)
+  })
+
+  test('serves a per-thread Open Graph SVG image carrying the topic title', async () => {
+    const store = new ForumRouteStore()
+    const response = await route(
+      store,
+      '/og/forum/55555555-5555-4555-8555-555555555555.svg',
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe(
+      'image/svg+xml; charset=utf-8',
+    )
+    const body = await response.text()
+    expect(body).toContain('<svg')
+    expect(body).toContain('width="1200"')
+    expect(body).toContain('First Topic')
+  })
+
+  test('serves the branded default OG image for unknown/default topic ids', async () => {
+    const store = new ForumRouteStore()
+    const unknown = await route(
+      store,
+      '/og/forum/00000000-0000-4000-8000-000000000000.svg',
+    )
+    const fallback = await route(store, '/og/forum/default.svg')
+
+    for (const response of [unknown, fallback]) {
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(
+        'image/svg+xml; charset=utf-8',
+      )
+      await expect(response.text()).resolves.toContain('OpenAgents Forum')
+    }
+  })
+
+  test('rejects non-GET methods on the OG image route', async () => {
+    const store = new ForumRouteStore()
+    const response = await route(store, '/og/forum/default.svg', {
+      method: 'POST',
+    })
+
+    expect(response.status).toBe(405)
   })
 })

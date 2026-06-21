@@ -10,7 +10,10 @@ import {
   FailedLoadPublicForumLaunchStatus,
   FailedLoadPublicForumTipLeaderboards,
   FailedLoadPublicProductPromises,
+  FailedLoadPublicPromiseTransitions,
   FailedLoadPublicPylonStats,
+  FailedLoadPublicTrainingRuns,
+  FailedLoadSettledFeedSnapshot,
   FailedLoadShareProjection,
   Message,
   SucceededLoadPublicAdjutantActivity,
@@ -19,7 +22,10 @@ import {
   SucceededLoadPublicForumLaunchStatus,
   SucceededLoadPublicForumTipLeaderboards,
   SucceededLoadPublicProductPromises,
+  SucceededLoadPublicPromiseTransitions,
   SucceededLoadPublicPylonStats,
+  SucceededLoadPublicTrainingRuns,
+  SucceededLoadSettledFeedSnapshot,
   SucceededLoadShareProjection,
 } from './message'
 import {
@@ -29,7 +35,9 @@ import {
   FailedPublicForumLaunchStatus,
   FailedPublicForumTipLeaderboards,
   FailedPublicProductPromises,
+  FailedPublicPromiseTransitions,
   FailedPublicPylonStats,
+  FailedPublicTrainingRuns,
   FailedShareProjection,
   LoadedPublicAdjutantActivity,
   LoadedPublicAgent,
@@ -37,7 +45,9 @@ import {
   LoadedPublicForumLaunchStatus,
   LoadedPublicForumTipLeaderboards,
   LoadedPublicProductPromises,
+  LoadedPublicPromiseTransitions,
   LoadedPublicPylonStats,
+  LoadedPublicTrainingRuns,
   LoadedShareProjection,
   Model,
   PublicAdjutantActivity,
@@ -46,9 +56,21 @@ import {
   PublicForumLaunchStatus,
   PublicForumTipLeaderboards,
   PublicProductPromises,
+  PublicPromiseTransitions,
   PublicPylonStats,
+  PublicTrainingRunResponse,
+  PublicTrainingRunsResponse,
   ShareProjectionResponse,
 } from './model'
+import {
+  SETTLED_FEED_SCOPE,
+  applySettledFeedPatch,
+  settledFeedAfterCursorGap,
+  settledFeedAfterSnapshot,
+  settledFeedClosed,
+  settledFeedFailed,
+  settledFeedOpen,
+} from './settled-feed'
 
 type UpdateReturn = readonly [Model, ReadonlyArray<Command.Command<Message>>]
 const withUpdateReturn = M.withReturnType<UpdateReturn>()
@@ -75,6 +97,16 @@ class PublicForumTipLeaderboardsLoadError extends S.TaggedErrorClass<PublicForum
 
 class PublicProductPromisesLoadError extends S.TaggedErrorClass<PublicProductPromisesLoadError>()(
   'PublicProductPromisesLoadError',
+  { error: S.Defect },
+) {}
+
+class PublicPromiseTransitionsLoadError extends S.TaggedErrorClass<PublicPromiseTransitionsLoadError>()(
+  'PublicPromiseTransitionsLoadError',
+  { error: S.Defect },
+) {}
+
+class PublicTrainingRunsLoadError extends S.TaggedErrorClass<PublicTrainingRunsLoadError>()(
+  'PublicTrainingRunsLoadError',
   { error: S.Defect },
 ) {}
 
@@ -268,6 +300,75 @@ export const LoadPublicPylonStats = Command.define(
   ),
 )
 
+class SettledFeedSnapshotLoadError extends S.TaggedErrorClass<SettledFeedSnapshotLoadError>()(
+  'SettledFeedSnapshotLoadError',
+  {
+    error: S.Defect,
+  },
+) {}
+
+const SettledFeedSnapshotPayload = S.Struct({
+  collections: S.Record(S.String, S.Record(S.String, S.Unknown)),
+  cursor: S.Number,
+})
+
+const SettledFeedSnapshotSummary = S.Struct({
+  totalSettledCount: S.Number,
+  totalSettledSats: S.Number,
+})
+
+// Non-realtime cold read of the public settled-feed scope. Seeds the running
+// totals + cursor before the WebSocket attaches, and is the graceful fallback
+// when the socket is unavailable (the homepage still renders these totals).
+export const LoadSettledFeedSnapshot = Command.define(
+  'LoadSettledFeedSnapshot',
+  SucceededLoadSettledFeedSnapshot,
+  FailedLoadSettledFeedSnapshot,
+)(
+  Effect.gen(function* () {
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetch(`/api/sync/${SETTLED_FEED_SCOPE.replace(':', '/')}/snapshot`, {
+          cache: 'no-store',
+          headers: { accept: 'application/json' },
+        }),
+      catch: error => new SettledFeedSnapshotLoadError({ error }),
+    })
+
+    if (!response.ok) {
+      return yield* new SettledFeedSnapshotLoadError({
+        error: `Settled feed snapshot returned HTTP ${response.status}.`,
+      })
+    }
+
+    const payload = yield* Effect.tryPromise({
+      try: () => response.json(),
+      catch: error => new SettledFeedSnapshotLoadError({ error }),
+    })
+    const decoded =
+      yield* S.decodeUnknownEffect(SettledFeedSnapshotPayload)(payload)
+    const rawSummary = decoded.collections['settled_summary']?.['summary']
+    const summary = rawSummary === undefined
+      ? null
+      : yield* S.decodeUnknownEffect(SettledFeedSnapshotSummary)(
+          rawSummary,
+        ).pipe(Effect.orElseSucceed(() => null))
+
+    return SucceededLoadSettledFeedSnapshot({
+      cursor: decoded.cursor,
+      summary,
+    })
+  }).pipe(
+    Effect.catch(error =>
+      Effect.succeed(
+        FailedLoadSettledFeedSnapshot({
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      ),
+    ),
+  ),
+)
+
 export const LoadPublicForumLaunchStatus = Command.define(
   'LoadPublicForumLaunchStatus',
   SucceededLoadPublicForumLaunchStatus,
@@ -391,6 +492,102 @@ export const LoadPublicProductPromises = Command.define(
   ),
 )
 
+export const LoadPublicPromiseTransitions = Command.define(
+  'LoadPublicPromiseTransitions',
+  SucceededLoadPublicPromiseTransitions,
+  FailedLoadPublicPromiseTransitions,
+)(
+  Effect.gen(function* () {
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetch('/api/public/product-promises/transitions', {
+          cache: 'no-store',
+          headers: { accept: 'application/json' },
+        }),
+      catch: error => new PublicPromiseTransitionsLoadError({ error }),
+    })
+
+    if (!response.ok) {
+      return yield* new PublicPromiseTransitionsLoadError({
+        error: `Promise transitions returned HTTP ${response.status}.`,
+      })
+    }
+
+    const payload = yield* Effect.tryPromise({
+      try: () => response.json(),
+      catch: error => new PublicPromiseTransitionsLoadError({ error }),
+    })
+    const decoded =
+      yield* S.decodeUnknownEffect(PublicPromiseTransitions)(payload)
+
+    return SucceededLoadPublicPromiseTransitions({ transitions: decoded })
+  }).pipe(
+    Effect.catch(error =>
+      Effect.succeed(
+        FailedLoadPublicPromiseTransitions({
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      ),
+    ),
+  ),
+)
+
+export const LoadPublicTrainingRuns = Command.define(
+  'LoadPublicTrainingRuns',
+  { runId: S.NullOr(S.String) },
+  SucceededLoadPublicTrainingRuns,
+  FailedLoadPublicTrainingRuns,
+)(({ runId }) =>
+  Effect.gen(function* () {
+    const path =
+      runId === null
+        ? '/api/training/runs'
+        : `/api/training/runs/${encodeURIComponent(runId)}`
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetch(path, {
+          cache: 'no-store',
+          headers: { accept: 'application/json' },
+        }),
+      catch: error => new PublicTrainingRunsLoadError({ error }),
+    })
+
+    if (!response.ok) {
+      return yield* new PublicTrainingRunsLoadError({
+        error: `Public training runs returned HTTP ${response.status}.`,
+      })
+    }
+
+    const payload = yield* Effect.tryPromise({
+      try: () => response.json(),
+      catch: error => new PublicTrainingRunsLoadError({ error }),
+    })
+    const decoded =
+      runId === null
+        ? yield* S.decodeUnknownEffect(PublicTrainingRunsResponse)(payload)
+        : yield* S.decodeUnknownEffect(PublicTrainingRunResponse)(payload).pipe(
+            Effect.map(detail => ({
+              runs: [detail.run],
+              summaries: [detail.summary],
+            })),
+          )
+
+    return SucceededLoadPublicTrainingRuns({
+      response: decoded,
+      selectedRunId: runId,
+    })
+  }).pipe(
+    Effect.catch(error =>
+      Effect.succeed(
+        FailedLoadPublicTrainingRuns({
+          runId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      ),
+    ),
+  ),
+)
+
 export const LoadShareProjection = Command.define(
   'LoadShareProjection',
   { shareId: S.String },
@@ -483,39 +680,46 @@ export const initialCommands = (
 ): ReadonlyArray<Command.Command<Message>> =>
   model.route._tag === 'Share'
     ? [LoadShareProjection({ shareId: model.route.shareId })]
-    : model.route._tag === 'Home'
+    : model.route._tag === 'Home' ||
+        model.route._tag === 'Stats' ||
+        model.route._tag === 'PublicStatsArchive'
       ? [
           LoadPublicPylonStats(),
           LoadPublicForumLaunchStatus(),
           LoadPublicForumTipLeaderboards(),
+          LoadSettledFeedSnapshot(),
         ]
       : model.route._tag === 'ProductPromises'
-        ? [LoadPublicProductPromises()]
-        : model.route._tag === 'PublicAgent'
-          ? model.route.agentRef === 'artanis'
-            ? [
-                LoadPublicAgentGoal({
-                  agentId: publicAgentIdForRef(model.route.agentRef),
-                  agentRef: model.route.agentRef,
-                }),
-                LoadPublicArtanisReport(),
-                LoadPublicPylonStats(),
-              ]
-            : model.route.agentRef === 'adjutant'
-              ? [
-                  LoadPublicAgentGoal({
-                    agentId: publicAgentIdForRef(model.route.agentRef),
-                    agentRef: model.route.agentRef,
-                  }),
-                  LoadPublicAdjutantActivity(),
-                ]
-              : [
-                  LoadPublicAgentGoal({
-                    agentId: publicAgentIdForRef(model.route.agentRef),
-                    agentRef: model.route.agentRef,
-                  }),
-                ]
-          : []
+        ? [LoadPublicProductPromises(), LoadPublicPromiseTransitions()]
+        : model.route._tag === 'PublicTrainingRuns'
+          ? [LoadPublicTrainingRuns({ runId: null })]
+          : model.route._tag === 'PublicTrainingRun'
+            ? [LoadPublicTrainingRuns({ runId: model.route.runId })]
+            : model.route._tag === 'PublicAgent'
+              ? model.route.agentRef === 'artanis'
+                ? [
+                    LoadPublicAgentGoal({
+                      agentId: publicAgentIdForRef(model.route.agentRef),
+                      agentRef: model.route.agentRef,
+                    }),
+                    LoadPublicArtanisReport(),
+                    LoadPublicPylonStats(),
+                  ]
+                : model.route.agentRef === 'adjutant'
+                  ? [
+                      LoadPublicAgentGoal({
+                        agentId: publicAgentIdForRef(model.route.agentRef),
+                        agentRef: model.route.agentRef,
+                      }),
+                      LoadPublicAdjutantActivity(),
+                    ]
+                  : [
+                      LoadPublicAgentGoal({
+                        agentId: publicAgentIdForRef(model.route.agentRef),
+                        agentRef: model.route.agentRef,
+                      }),
+                    ]
+              : []
 
 const fundingAmountFromInput = (value: string): number => {
   const parsed = Number.parseInt(value, 10)
@@ -679,6 +883,33 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         }),
         [],
       ],
+      SucceededLoadPublicPromiseTransitions: ({ transitions }) => [
+        evo(model, {
+          publicPromiseTransitions: () =>
+            LoadedPublicPromiseTransitions({ transitions }),
+        }),
+        [],
+      ],
+      FailedLoadPublicPromiseTransitions: ({ error }) => [
+        evo(model, {
+          publicPromiseTransitions: () =>
+            FailedPublicPromiseTransitions({ error }),
+        }),
+        [],
+      ],
+      SucceededLoadPublicTrainingRuns: ({ response, selectedRunId }) => [
+        evo(model, {
+          publicTrainingRuns: () =>
+            LoadedPublicTrainingRuns({ response, selectedRunId }),
+        }),
+        [],
+      ],
+      FailedLoadPublicTrainingRuns: ({ error, runId }) => [
+        evo(model, {
+          publicTrainingRuns: () => FailedPublicTrainingRuns({ error, runId }),
+        }),
+        [],
+      ],
       SucceededLoadShareProjection: ({ response }) => [
         evo(model, {
           shareProjection: () =>
@@ -694,5 +925,36 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         [],
       ],
       CompletedCopyShareLink: () => [model, []],
+      SucceededLoadSettledFeedSnapshot: ({ cursor, summary }) => [
+        evo(model, {
+          settledFeed: feed => settledFeedAfterSnapshot(feed, { cursor, summary }),
+        }),
+        [],
+      ],
+      FailedLoadSettledFeedSnapshot: () => [model, []],
+      OpenedSettledFeedStream: () => [
+        evo(model, { settledFeed: settledFeedOpen }),
+        [],
+      ],
+      ClosedSettledFeedStream: () => [
+        evo(model, { settledFeed: settledFeedClosed }),
+        [],
+      ],
+      FailedSettledFeedStream: () => [
+        evo(model, { settledFeed: settledFeedFailed }),
+        [],
+      ],
+      ReceivedSettledFeedPatch: ({ patch }) => [
+        evo(model, {
+          settledFeed: feed => applySettledFeedPatch(feed, patch),
+        }),
+        [],
+      ],
+      ReceivedSettledFeedCursorGap: ({ gap }) => [
+        evo(model, {
+          settledFeed: feed => settledFeedAfterCursorGap(feed, gap),
+        }),
+        [],
+      ],
     }),
   )

@@ -1,6 +1,7 @@
 import { Schema as S } from "effect";
-import { ProbeLlmUsage } from "../../llm/usage";
-import { PSIONIC_QWEN_BACKEND_KIND } from "./contract";
+import { ProbeLlmUsage } from "../../llm/usage.js";
+import { redactReceiptUrl } from "../../receipt-redaction.js";
+import { PSIONIC_QWEN_BACKEND_KIND } from "./contract.js";
 
 export const PsionicQwenAvailabilityReceipt = S.Struct({
   kind: S.Literal("probe_backend_availability"),
@@ -74,7 +75,7 @@ export function makePsionicQwenAvailabilityReceipt(input: {
     backendKind: PSIONIC_QWEN_BACKEND_KIND,
     profileId: input.profileId,
     model: input.model,
-    baseUrl: redactUrl(input.baseUrl),
+    baseUrl: redactReceiptUrl(input.baseUrl),
     ready: input.ready,
     status: input.status,
     modelRefs: [...input.modelRefs],
@@ -99,7 +100,7 @@ export function makePsionicQwenFailureReceipt(input: {
     backendKind: PSIONIC_QWEN_BACKEND_KIND,
     profileId: input.profileId,
     model: input.model,
-    baseUrl: redactUrl(input.baseUrl),
+    baseUrl: redactReceiptUrl(input.baseUrl),
     failureClass: input.failureClass,
     message: input.message,
     observedAt: input.observedAt ?? new Date().toISOString(),
@@ -147,15 +148,4 @@ export function makePsionicQwenToolCallReceipt(input: {
   };
 }
 
-export function redactUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    url.username = "";
-    url.password = "";
-    url.search = "";
-    url.hash = "";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return "[redacted-invalid-url]";
-  }
-}
+export { redactReceiptUrl as redactUrl };

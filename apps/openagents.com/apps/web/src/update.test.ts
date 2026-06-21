@@ -25,6 +25,7 @@ import {
 import { ClickedOnboardingStep } from './page/loggedOut/message'
 import {
   ChatRoute,
+  DocsRoute,
   HomeRoute,
   InviteRoute,
   OnboardingRoute,
@@ -134,22 +135,38 @@ describe('app link routing', () => {
     )
   })
 
+  test('renders the public header login link as GitHub OAuth', () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(LoggedOut.init(DocsRoute())),
+      Scene.expect(Scene.selector('[data-login-popover]')).toExist(),
+      Scene.expect(Scene.selector('[data-agent-access-panel]')).toExist(),
+      Scene.expect(
+        Scene.role('link', { name: 'Log in with GitHub' }),
+      ).toHaveAttr('href', '/login/github'),
+      Scene.expect(
+        Scene.role('link', { name: 'Agent instructions' }),
+      ).toHaveAttr('href', '/AGENTS.md'),
+      Scene.expect(Scene.role('link', { name: 'OpenAPI' })).toHaveAttr(
+        'href',
+        '/api/openapi.json',
+      ),
+    )
+  })
+
   test('redirects unknown logged-out URL changes to the homepage', () => {
     const [model, commands] = update(
       LoggedOut.init(HomeRoute()),
       ChangedUrl({ url: appUrl('/f324f23f') }),
     )
 
+    // The homepage route is the pylon scene (root -> Pylon, the launch routing),
+    // so an unknown logged-out URL redirects to Pylon.
     expect(model).toMatchObject({
       _tag: 'LoggedOut',
-      route: { _tag: 'Home' },
+      route: { _tag: 'Pylon' },
     })
-    expect(commands.map(command => command.name)).toEqual([
-      'LoadPublicPylonStats',
-      'LoadPublicForumLaunchStatus',
-      'LoadPublicForumTipLeaderboards',
-      'RedirectToHome',
-    ])
+    expect(commands.map(command => command.name)).toEqual(['RedirectToHome'])
   })
 
   test('keeps team room routes as internal navigation', () => {
@@ -197,6 +214,17 @@ describe('app link routing', () => {
     expect(forumCommands[0]?.name).toBe('LoadExternal')
     expect(forumCommands[0]?.args).toEqual({
       href: 'https://openagents.com/forum/t/1f4e8c11-2330-403f-aa4b-82dd1a673e9f',
+    })
+
+    const [, trainingRunsCommands] = update(
+      LoggedIn.init(ChatRoute(), authWithTeam),
+      internalRequest('/training/runs/run.cs336.a1.demo'),
+    )
+
+    expect(trainingRunsCommands).toHaveLength(1)
+    expect(trainingRunsCommands[0]?.name).toBe('LoadExternal')
+    expect(trainingRunsCommands[0]?.args).toEqual({
+      href: 'https://openagents.com/training/runs/run.cs336.a1.demo',
     })
   })
 
@@ -375,6 +403,7 @@ describe('app link routing', () => {
       'LoadSyncSnapshot',
       'InstallAccountMenuOutsideClick',
       'LoadThreadFiles',
+      'RequestNotificationPermission',
     ])
     expect(commands[2]?.args).toEqual({
       href: '/api/teams/team_openagents_core/files',
@@ -400,6 +429,7 @@ describe('app link routing', () => {
       'LoadSyncSnapshot',
       'InstallAccountMenuOutsideClick',
       'LoadThreadFileDetail',
+      'RequestNotificationPermission',
     ])
     expect(commands[2]?.args).toEqual({
       fileId: 'file_1',
@@ -421,6 +451,7 @@ describe('app link routing', () => {
       'LoadSyncSnapshot',
       'InstallAccountMenuOutsideClick',
       'LoadThreadFileDetail',
+      'RequestNotificationPermission',
     ])
     expect(commands[2]?.args).toEqual({
       fileId: 'file_personal_1',

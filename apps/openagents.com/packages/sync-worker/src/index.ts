@@ -11,7 +11,7 @@ import {
   SyncScope,
   SyncSequence,
   SyncSnapshot,
-} from '@openagents/sync-schema'
+} from '@openagentsinc/sync-schema'
 import { Effect, Layer, Schema as S } from 'effect'
 import * as Context from 'effect/Context'
 
@@ -22,6 +22,8 @@ export type WorkerBindings = Readonly<{
   OPENAGENTS_DB: D1Database
   SYNC_ROOM: DurableObjectNamespace
   MDK_SIDECAR: DurableObjectNamespace
+  MDK_TREASURY?: DurableObjectNamespace
+  MARKET_RELAY_SERVICE?: Fetcher
   ARTIFACTS: R2Bucket
   RUNNER_EVENTS: Queue
   ADJUTANT_ENRICHMENT_QUEUE: Queue
@@ -239,7 +241,7 @@ export type SyncOutboxStoreShape = Readonly<{
 export class SyncOutboxStore extends Context.Service<
   SyncOutboxStore,
   SyncOutboxStoreShape
->()('@openagents/sync-worker/SyncOutboxStore') {
+>()('@openagentsinc/sync-worker/SyncOutboxStore') {
   static layer = (
     db: D1Database,
     runtime: SyncWorkerRuntime = systemSyncWorkerRuntime,
@@ -617,6 +619,16 @@ export const publicGoalScope = (goalId: string): string =>
 
 export const publicAgentRunScope = (runId: string): string =>
   `public-agent-run:${runId}`
+
+// Single public, read-only firehose scope for live settled-feed updates. The id
+// is a stable feed key (not a per-run id) so the homepage and public surfaces
+// can subscribe to one room that streams every public-safe settlement as sats
+// stream in. Public-safe payloads only; never raw payment material.
+export const PUBLIC_SETTLED_FEED_ID = 'tassadar'
+
+export const publicSettledFeedScope = (
+  feedId: string = PUBLIC_SETTLED_FEED_ID,
+): string => `public-settled-feed:${feedId}`
 
 export const makeD1SyncOutboxStore = (
   db: D1Database,

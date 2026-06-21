@@ -1,0 +1,66 @@
+# Game Direction
+
+This folder collects OpenAgents game-world, HUD, MMO, and spatial run-page
+direction.
+
+Current transcript anchor: [`docs/transcripts/240.md`](../transcripts/240.md)
+demos the live-facing shape this folder is aiming at — a walkable Autopilot
+Tassadar run board with Pylon bases, assignment markers, training metrics, refs
+ticker, avatar movement, and an initial multiplayer direction. Treat it as
+visual/product intent; authority for real run state remains with the public
+Worker/D1 and SpacetimeDB projections documented below.
+
+## Reading Order
+
+- `2026-06-16-spatial-hud-agentic-mmo-wow-direction.md` - archive synthesis for
+  Commander, HUD, MMO, Tassadar living-run, and receipt-backed visual language.
+- `2026-06-17-episode-189-agentic-mmorpg-run-page-analysis.md` - focused read of
+  episode 189 and the pivot from gamified HUD to actual game/world.
+- `2026-06-17-spacetimedb-openagents-mmo-database-plan.md` - initial database
+  architecture note using SpacetimeDB, BitCraft, and the Minecraft integration as
+  reference material for an OpenAgents world-state database.
+- `2026-06-17-spacetimedb-gcp-deployment-receipt.md` - live GCP deployment
+  receipt for the first self-hosted SpacetimeDB world database endpoint.
+- `2026-06-17-spacetimedb-admin-runbook.md` - operator runbook for the
+  self-hosted SpacetimeDB VM, domain, TLS, publishing, logs, and recovery.
+- `2026-06-17-spacetimedb-tassadar-integration-next-steps.md` - concrete
+  next-step plan for connecting the live SpacetimeDB world projection to
+  `/tassadar` without moving authority away from the Worker/D1 projection.
+- `2026-06-17-tassadar-wasd-mouselook-controller-plan.md` - implementation plan
+  for adding a reusable `three-effect` WASD + mouselook controller and enabling a
+  2.5D first-person `/tassadar` navigation mode.
+- `2026-06-17-agent-avatar-proximity-chatter-world-plan.md` - brainstorm and
+  implementation direction for making each pylon's agent visible as a world
+  avatar that can move, notice nearby visitors, talk locally, and emit chat
+  bubbles during a run.
+- `2026-06-17-openagents-world-asset-catalog.md` - owned OpenAgents world asset
+  catalog and provenance policy for avatars, stations, props, materials,
+  adornments, and Quick 3D MMORPG reference-asset eligibility.
+- `2026-06-17-proof-replay-theater-system-plan.md` - audit and implementation
+  plan for turning public proof sets into deterministic 3D replays with agent
+  avatars, proof gates, camera tracks, and receipt-backed sats zaps.
+- `2026-06-21-spacetimedb-verse-multiplayer-audit.md` - audit of the existing
+  SpacetimeDB world module, desktop subscription path, local SpacetimeDB game
+  references, and the implementation plan for letting multiple Verse users see
+  each other on the map.
+- `2026-06-21-verse-scene-graph-vs-react-three-fiber-audit.md` - deep audit of
+  how the desktop Verse scene graph is built today (`three-effect` + Foldkit,
+  full teardown+rebuild on every change) versus react-three-fiber's
+  catalogue/reconciler/attach/on-demand-frameloop model, with the concepts to
+  port into `three-effect` and how Effect (`Scope`, `Layer`, `SubscriptionRef`,
+  fiber frame clock) is the better substrate for them.
+
+## Implementation Homes
+
+- `apps/openagents-world-spacetimedb/` owns the Rust/WASM SpacetimeDB module
+  source for the live `openagents-world` database.
+- `/Users/christopherdavid/work/three-effect` owns reusable spatial/visual
+  primitives for the game world and proof replay theater. Add missing replay
+  stages, avatar, zap, camera, particle, terrain, label, and interaction
+  primitives there before consuming them from web or desktop.
+- `packages/proof-replay/` owns replay bundle normalization, deterministic
+  clocks, source gates, and timeline planning only. It is not a visual renderer.
+- `apps/openagents.com/` and `apps/autopilot-desktop/` may adapt public replay
+  data and render Foldkit HUD/inspector/accessibility chrome, but should consume
+  `three-effect` for world visuals rather than adding app-local DOM/canvas
+  replay renderers.

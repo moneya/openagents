@@ -26,6 +26,19 @@ More specific invariant ledgers apply inside imported apps and packages.
   Pylon assignment, or product-promise authority. The current isolated
   exception is `apps/nostr-relay` through `nostr-effect@0.0.12` only.
 
+## No GitHub-Hosted CI / Cloud Actions
+
+- Never add GitHub Actions workflows or any GitHub-hosted CI to this
+  repository. `.github/workflows/` must contain no workflow files
+  (no `on: push`, `on: schedule`, `on: pull_request`, or any other
+  GitHub-runner automation).
+- CI, scheduled jobs, freshness re-runs (e.g. study-packet restudy), and any
+  recurring automation run on OpenAgents-owned infrastructure (our GCE / cloud
+  runners and cron), not on GitHub-hosted compute.
+- Rationale: keep build, test, scheduling, and automation on owned infra —
+  consistent with the no-Expo/EAS-cloud mobile policy — and avoid handing repo
+  automation, secrets, or scheduling to third-party GitHub-hosted runners.
+
 ## Product Surface Ownership
 
 - `apps/openagents.com/` owns the `openagents.com` product surface and retains
@@ -44,9 +57,48 @@ More specific invariant ledgers apply inside imported apps and packages.
   public claim promotion without a separate approved authority path.
 - Pylon payment, assignment, and earning claims must remain receipt-backed and
   explicit about unsettled, rejected, unpaid, credited, and settled states.
+- Pylon local supervised danger modes (Codex `danger-full-access`, Claude
+  `bypassPermissions`) are explicit owner-local opt-ins only: local composer
+  and authenticated local control sessions may honor the local dev overlay;
+  every public command, assignment, labor, and provider path rejects them with
+  a typed blocker, and the assignment-safe config loaders never read a
+  permissive mode.
 - Secrets, wallet material, raw prompts, private repo content, provider
   payloads, and private customer data must not be committed or written into
   docs, tests, fixtures, logs, or public projections.
+
+## SpacetimeDB World Projection
+
+- `apps/openagents-world-spacetimedb/` is a projection and interaction module
+  for the self-hosted `openagents-world` database. It does not own settlement,
+  payout, training truth, product promises, receipt validation, accepted-work
+  authority, wallet state, provider credentials, private prompts, private repo
+  content, or customer-private data.
+- SpacetimeDB public tables may expose only public-safe refs, labels,
+  timestamps, staleness metadata, movement caveats, and dereferenceable proof
+  URLs that are already safe for public OpenAgents surfaces.
+- Reducers that create or mutate run, entity, edge, proof, settlement, event,
+  cursor, or bridge-health projection rows must require a private allowlisted
+  service identity. Browser/user reducers may update only explicitly modeled
+  interaction state and must not create proof, settlement, receipt, pylon, or
+  training truth.
+- `/tassadar` authority remains the Worker/D1 public summary path until a
+  later invariant change explicitly promotes a different authority. A
+  SpacetimeDB subscription may enrich or animate the scene only from rows that
+  preserve public refs or timestamped projection transitions.
+
+## Public Projection Staleness
+
+- Every public projection in this workspace carries `generatedAt` (or an
+  equivalent rebuild timestamp) plus a declared staleness contract, and either
+  rebuilds on the state transitions that matter or composes live at read. A
+  projection that cannot meet its declared staleness must say so in the
+  payload rather than serve stale data as current.
+- The `openagents.com` worker-surface contract vocabulary, the enumerated
+  projection inventory, and the enforcing check tooling live in
+  `apps/openagents.com/INVARIANTS.md` ("Public Projection Staleness
+  Declaration") and `apps/openagents.com/scripts/check-zero-debt-architecture.mjs`
+  (epic #4751).
 
 ## Product Promise Claims
 

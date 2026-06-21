@@ -50,6 +50,7 @@ export class OpenAgentsAutopilotCodingObjective extends S.Class<OpenAgentsAutopi
 )({
   mode: S.Literal('ref_only'),
   objectiveRef: S.String,
+  publicSummary: S.String,
   sourceTaskRef: S.String,
 }) {}
 
@@ -57,9 +58,25 @@ export class OpenAgentsAutopilotCodingRepositoryRef extends S.Class<OpenAgentsAu
   'OpenAgentsAutopilotCodingRepositoryRef',
 )({
   branch: S.String,
+  commitSha: S.optionalKey(S.String),
   fullName: S.String,
   provider: S.Literal('github'),
   visibility: S.Literal('public'),
+}) {}
+
+export class OpenAgentsAutopilotCodingVerificationCommand extends S.Class<OpenAgentsAutopilotCodingVerificationCommand>(
+  'OpenAgentsAutopilotCodingVerificationCommand',
+)({
+  args: S.Array(S.String),
+  commandRef: S.String,
+}) {}
+
+export class OpenAgentsAutopilotCodingGitCheckoutWorkspace extends S.Class<OpenAgentsAutopilotCodingGitCheckoutWorkspace>(
+  'OpenAgentsAutopilotCodingGitCheckoutWorkspace',
+)({
+  kind: S.Literal('git_checkout'),
+  repository: OpenAgentsAutopilotCodingRepositoryRef,
+  verificationCommand: OpenAgentsAutopilotCodingVerificationCommand,
 }) {}
 
 export class OpenAgentsAutopilotCodingAuthorityRefs extends S.Class<OpenAgentsAutopilotCodingAuthorityRefs>(
@@ -108,6 +125,24 @@ export class OpenAgentsAutopilotCodingCloseoutSchema extends S.Class<OpenAgentsA
   testsOrBlockerRequired: S.Boolean,
 }) {}
 
+export class OpenAgentsAutopilotCodingClaudeAgentTask extends S.Class<OpenAgentsAutopilotCodingClaudeAgentTask>(
+  'OpenAgentsAutopilotCodingClaudeAgentTask',
+)({
+  agentKind: S.Literal('claude_agent_sdk'),
+  allowedToolKinds: S.Array(OpenAgentsAutopilotCodingAssignmentToolKind),
+  maxTurns: S.Number,
+  schema: S.Literal('openagents.pylon.claude_agent_task.v0.3'),
+  timeoutSeconds: S.Number,
+}) {}
+
+export class OpenAgentsAutopilotCodingCodexTask extends S.Class<OpenAgentsAutopilotCodingCodexTask>(
+  'OpenAgentsAutopilotCodingCodexTask',
+)({
+  agentKind: S.Literal('codex_sdk'),
+  schema: S.Literal('openagents.pylon.codex_agent_task.v0.3'),
+  timeoutSeconds: S.Number,
+}) {}
+
 export class OpenAgentsAutopilotCodingAssignmentPayload extends S.Class<OpenAgentsAutopilotCodingAssignmentPayload>(
   'OpenAgentsAutopilotCodingAssignmentPayload',
 )({
@@ -118,6 +153,8 @@ export class OpenAgentsAutopilotCodingAssignmentPayload extends S.Class<OpenAgen
   authorities: OpenAgentsAutopilotCodingAuthorityRefs,
   budget: OpenAgentsAutopilotCodingBudget,
   closeoutSchema: OpenAgentsAutopilotCodingCloseoutSchema,
+  claudeAgent: S.optionalKey(OpenAgentsAutopilotCodingClaudeAgentTask),
+  codex: S.optionalKey(OpenAgentsAutopilotCodingCodexTask),
   laneRef: S.String,
   objective: OpenAgentsAutopilotCodingObjective,
   publicSafe: S.Literal(true),
@@ -132,6 +169,7 @@ export class OpenAgentsAutopilotCodingAssignmentPayload extends S.Class<OpenAgen
   taskRef: S.String,
   tracePolicy: OpenAgentsAutopilotCodingTracePolicy,
   workOrderRef: S.String,
+  workspace: S.optionalKey(OpenAgentsAutopilotCodingGitCheckoutWorkspace),
 }) {}
 
 export class OpenAgentsAutopilotCodingAssignmentUnsafe extends S.TaggedErrorClass<OpenAgentsAutopilotCodingAssignmentUnsafe>()(
@@ -156,6 +194,9 @@ type CodingAssignmentSourceWork = Readonly<{
 
 const safeRefPattern = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,260}$/
 const githubFullNamePattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+const gitCommitShaPattern = /^[a-f0-9]{40}$/i
+const placeholderCommitShaPattern = /^(0{40}|1{40})$/i
+const verificationCommandArgPattern = /^[A-Za-z0-9_./:=@+-]{1,120}$/
 const unsafeKeyPattern =
   /(access[_-]?token|bearer|callback[_-]?token|checkout|cookie|customer[_-]?(email|name)|email[_-]?(address|body)|invoice|mdk[_-]?(access[_-]?token|mnemonic|webhook[_-]?secret)|mnemonic|oauth|payment[_-]?(hash|preimage|proof)|payout[_-]?(address|destination|target)|preimage|private[_-]?key|provider[_-]?(account|grant|payload|token)|raw[_-]?(auth|email|invoice|payment|payload|prompt|provider|runner|run[_-]?log|source[_-]?archive|tool[_-]?log|webhook)|secret|source[_-]?archive|token|wallet)/i
 const unsafeValuePattern =
@@ -231,6 +272,42 @@ const assertSafeRepository = (
   }
 
   assertSafeRef('repository branch', repository.branch)
+  if (
+    repository.commitSha !== undefined &&
+    (!gitCommitShaPattern.test(repository.commitSha) ||
+      placeholderCommitShaPattern.test(repository.commitSha))
+  ) {
+    throw new OpenAgentsAutopilotCodingAssignmentUnsafe({
+      reason:
+        'Repository commitSha must be a real pinned 40-character commit SHA, not a placeholder.',
+    })
+  }
+}
+
+const assertSafeVerificationCommand = (
+  command: OpenAgentsAutopilotCodingVerificationCommand,
+): void => {
+  assertSafeRef('verification commandRef', command.commandRef)
+
+  if (command.args.length === 0) {
+    throw new OpenAgentsAutopilotCodingAssignmentUnsafe({
+      reason: 'Verification command must contain at least one argv token.',
+    })
+  }
+
+  command.args.forEach(arg => {
+    if (
+      !verificationCommandArgPattern.test(arg) ||
+      arg.includes('..') ||
+      arg.startsWith('/')
+    ) {
+      throw new OpenAgentsAutopilotCodingAssignmentUnsafe({
+        reason:
+          'Verification command args must be bounded argv tokens without absolute paths, traversal, shell, or secret material.',
+      })
+    }
+    assertSafeRef('verification command arg', arg)
+  })
 }
 
 export const assertOpenAgentsAutopilotCodingAssignmentPayloadSafe = (
@@ -271,6 +348,10 @@ export const assertOpenAgentsAutopilotCodingAssignmentPayloadSafe = (
     'result expectation refs',
     payload.closeoutSchema.resultExpectationRefs,
   )
+  if (payload.workspace !== undefined) {
+    assertSafeRepository(payload.workspace.repository)
+    assertSafeVerificationCommand(payload.workspace.verificationCommand)
+  }
 }
 
 export const decodeOpenAgentsAutopilotCodingAssignmentPayload = (
@@ -306,6 +387,7 @@ const repositoryForTask = (
   task: AutopilotWorkTaskRecordProjection,
 ): OpenAgentsAutopilotCodingRepositoryRef | null => {
   const repository = task.repository ?? null
+  const checkout = task.checkout ?? null
 
   if (repository === null) {
     return null
@@ -320,6 +402,9 @@ const repositoryForTask = (
 
   return new OpenAgentsAutopilotCodingRepositoryRef({
     branch: repository.branch,
+    ...(checkout === null
+      ? {}
+      : { commitSha: checkout.commitSha }),
     fullName: repository.fullName,
     provider: repository.provider,
     visibility: 'public',
@@ -384,9 +469,23 @@ const codingAssignmentForIntent = (
     workOrderRef: string
   }>,
 ): OpenAgentsAutopilotCodingAssignmentPayload => {
+  const repository = repositoryForTask(input.task)
+  const allowedToolKinds = allowedToolKindsForTask(input.task)
+  const checkout = input.task.checkout ?? null
+  const workspace =
+    repository === null || checkout === null
+      ? undefined
+      : new OpenAgentsAutopilotCodingGitCheckoutWorkspace({
+          kind: 'git_checkout',
+          repository,
+          verificationCommand: new OpenAgentsAutopilotCodingVerificationCommand({
+            args: checkout.verificationCommand.args,
+            commandRef: checkout.verificationCommand.commandRef,
+          }),
+        })
   const payload = new OpenAgentsAutopilotCodingAssignmentPayload({
     acceptanceCriteriaRefs: uniqueRefs(input.intent.acceptanceCriteriaRefs),
-    allowedToolKinds: allowedToolKindsForTask(input.task),
+    allowedToolKinds,
     assignmentRef: input.intent.assignmentRef,
     authRefs: authRefsForTask(input.task),
     authorities: authorityRefsForTask(input.task),
@@ -408,14 +507,32 @@ const codingAssignmentForIntent = (
       resultExpectationRefs: uniqueRefs(input.intent.resultExpectationRefs),
       testsOrBlockerRequired: true,
     }),
+    ...(input.intent.jobKind === 'codex_agent_task'
+      ? {
+          codex: new OpenAgentsAutopilotCodingCodexTask({
+            agentKind: 'codex_sdk',
+            schema: 'openagents.pylon.codex_agent_task.v0.3',
+            timeoutSeconds: 15 * 60,
+          }),
+        }
+      : {
+          claudeAgent: new OpenAgentsAutopilotCodingClaudeAgentTask({
+            agentKind: 'claude_agent_sdk',
+            allowedToolKinds,
+            maxTurns: 24,
+            schema: 'openagents.pylon.claude_agent_task.v0.3',
+            timeoutSeconds: 15 * 60,
+          }),
+        }),
     laneRef: input.fallbackLaneRef ?? `lane.${input.runnerKind}`,
     objective: new OpenAgentsAutopilotCodingObjective({
       mode: 'ref_only',
       objectiveRef: `objective.${input.workOrderRef}.${input.task.taskRef}`,
+      publicSummary: input.task.objective,
       sourceTaskRef: input.task.taskRef,
     }),
     publicSafe: true,
-    repository: repositoryForTask(input.task),
+    repository,
     requiredCapabilityRefs: uniqueRefs(input.intent.requiredCapabilityRefs),
     rollbackRefs: uniqueRefs(input.intent.rollbackRefs),
     runnerKind: input.runnerKind,
@@ -438,6 +555,7 @@ const codingAssignmentForIntent = (
       rawSourceArchiveAllowed: false,
     }),
     workOrderRef: input.workOrderRef,
+    ...(workspace === undefined ? {} : { workspace }),
   })
 
   assertOpenAgentsAutopilotCodingAssignmentPayloadSafe(payload)

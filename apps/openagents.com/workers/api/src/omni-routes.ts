@@ -4,79 +4,42 @@ import { type RouteEffect, routeEffectOrResponse } from './http/route-effects'
 import type { Env } from './index'
 
 type OmniEnvironment = Env
+type OmniSessionRouteHandler = (
+  request: Request,
+  env: OmniEnvironment,
+  ctx: ExecutionContext,
+) => RouteEffect
+type OmniSimpleRouteHandler = (
+  request: Request,
+  environment: OmniEnvironment,
+) => RouteEffect
+type OmniDetailRouteHandler = (
+  request: Request,
+  env: OmniEnvironment,
+  ctx: ExecutionContext,
+  id: string,
+) => RouteEffect
 
 type OmniRouteDependencies = Readonly<{
-  handleAutopilotFleetApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-  ) => RouteEffect
-  handleAutopilotTokenLeaderboardsApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-  ) => RouteEffect
-  handleBillingCheckoutApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-  ) => RouteEffect
-  handleBillingCouponRedeemApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-  ) => RouteEffect
-  handleBillingSummaryApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-  ) => RouteEffect
-  handleBillingStripeCheckoutReturnApi: (
-    request: Request,
-    environment: Env,
-  ) => RouteEffect
-  handleBillingStripeWebhookApi: (
-    request: Request,
-    environment: Env,
-  ) => RouteEffect
-  handleEmailResendWebhookApi: (
-    request: Request,
-    environment: OmniEnvironment,
-  ) => RouteEffect
-  handleOmniAgentRunDetailApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-    runId: string,
-  ) => RouteEffect
-  handleOmniAgentRunEventsApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-    runId: string,
-  ) => RouteEffect
-  handleOmniAgentRunsApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-  ) => RouteEffect
-  handleOmniDeploymentDetailApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-    deployId: string,
-  ) => RouteEffect
-  handleOmniDeploymentEventsApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-    deployId: string,
-  ) => RouteEffect
-  handleOmniDeploymentsApi: (
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-  ) => RouteEffect
+  handleAutopilotFleetApi: OmniSessionRouteHandler
+  handleAutopilotTokenLeaderboardsApi: OmniSessionRouteHandler
+  handleBillingCheckoutApi: OmniSessionRouteHandler
+  handleBillingInferenceCreditApi: OmniSessionRouteHandler
+  handleBillingAutoTopUpPolicyApi: OmniSessionRouteHandler
+  handleBillingAutoTopUpRunApi: OmniSessionRouteHandler
+  handleBillingCouponRedeemApi: OmniSessionRouteHandler
+  handleBillingSummaryApi: OmniSessionRouteHandler
+  handleBillingStripeCheckoutReturnApi: OmniSimpleRouteHandler
+  handleBillingStripeSetupIntentApi: OmniSessionRouteHandler
+  handleBillingStripeSetupIntentSaveApi: OmniSessionRouteHandler
+  handleBillingStripeWebhookApi: OmniSimpleRouteHandler
+  handleEmailResendWebhookApi: OmniSimpleRouteHandler
+  handleOmniAgentRunDetailApi: OmniDetailRouteHandler
+  handleOmniAgentRunEventsApi: OmniDetailRouteHandler
+  handleOmniAgentRunsApi: OmniSessionRouteHandler
+  handleOmniDeploymentDetailApi: OmniDetailRouteHandler
+  handleOmniDeploymentEventsApi: OmniDetailRouteHandler
+  handleOmniDeploymentsApi: OmniSessionRouteHandler
   handleOmniOperatorAgentRunDetailApi: (
     request: Request,
     env: Env,
@@ -84,6 +47,10 @@ type OmniRouteDependencies = Readonly<{
   ) => RouteEffect
   handleOmniOperatorAgentRunsApi: (request: Request, env: Env) => RouteEffect
   handleOmniOperatorBillingCreditsApi: (
+    request: Request,
+    env: Env,
+  ) => RouteEffect
+  handleOmniOperatorInferenceCreditApi: (
     request: Request,
     env: Env,
   ) => RouteEffect
@@ -134,6 +101,36 @@ export const makeOmniRoutes = (dependencies: OmniRouteDependencies) => ({
       )
     }
 
+    if (url.pathname === '/api/billing/inference-credit') {
+      return routeEffectOrResponse(
+        dependencies.handleBillingInferenceCreditApi(request, env, ctx),
+      )
+    }
+
+    if (url.pathname === '/api/billing/auto-top-up-policy') {
+      return routeEffectOrResponse(
+        dependencies.handleBillingAutoTopUpPolicyApi(request, env, ctx),
+      )
+    }
+
+    if (url.pathname === '/api/billing/auto-top-up/run') {
+      return routeEffectOrResponse(
+        dependencies.handleBillingAutoTopUpRunApi(request, env, ctx),
+      )
+    }
+
+    if (url.pathname === '/api/billing/stripe/setup-intents') {
+      return routeEffectOrResponse(
+        dependencies.handleBillingStripeSetupIntentApi(request, env, ctx),
+      )
+    }
+
+    if (url.pathname === '/api/billing/stripe/setup-intents/save') {
+      return routeEffectOrResponse(
+        dependencies.handleBillingStripeSetupIntentSaveApi(request, env, ctx),
+      )
+    }
+
     if (url.pathname === '/api/billing/stripe/webhook') {
       return routeEffectOrResponse(
         dependencies.handleBillingStripeWebhookApi(request, env),
@@ -167,6 +164,12 @@ export const makeOmniRoutes = (dependencies: OmniRouteDependencies) => ({
     if (url.pathname === '/api/omni/operator/billing/credits') {
       return routeEffectOrResponse(
         dependencies.handleOmniOperatorBillingCreditsApi(request, env),
+      )
+    }
+
+    if (url.pathname === '/api/omni/operator/billing/inference-credit') {
+      return routeEffectOrResponse(
+        dependencies.handleOmniOperatorInferenceCreditApi(request, env),
       )
     }
 

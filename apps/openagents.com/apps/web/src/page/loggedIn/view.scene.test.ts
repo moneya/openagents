@@ -3,13 +3,13 @@ import {
   ProviderAccountRef,
   ProviderConnectionAttemptId,
   IsoTimestamp as ProviderIsoTimestamp,
-} from '@openagents/provider-account-schema'
+} from '@openagentsinc/provider-account-schema'
 import {
   SyncScope,
   SyncSequence,
   SyncSnapshot,
   TokenUsageAggregateResponse,
-} from '@openagents/sync-schema'
+} from '@openagentsinc/sync-schema'
 import { Schema as S } from 'effect'
 import { Scene } from 'foldkit'
 import { describe, test } from 'vitest'
@@ -26,9 +26,10 @@ import { LoggedIn } from '../../model'
 import {
   AdminRoute,
   ChatRoute,
+  ForgeRoute,
   ImagesRoute,
-  MulletRoute,
   type LoggedInRoute,
+  MulletRoute,
   OnboardingRoute,
   OrderDetailRoute,
   OrderRoute,
@@ -40,11 +41,13 @@ import {
   TeamFilesRoute,
   TeamProjectChatRoute,
   ThreadRoute,
+  WorkspaceRoute,
   teamChatRouter,
   threadRouter,
 } from '../../route'
 import { update } from '../../update'
 import { view } from '../../view'
+import { SubmitCustomerOrder } from './customer-order/transitions'
 import {
   CompletedFocusChatComposer,
   CompletedScrollChatTimelineToEnd,
@@ -58,8 +61,9 @@ import {
   SucceededLoadArtanisOperatorGoal,
   SucceededLoadMulletBootstrap,
   SucceededLoadOnboardingRepositories,
-  SucceededLoadTokenUsageStats,
+  SucceededLoadPrefilledWorkspace,
   SucceededLoadSyncSnapshot,
+  SucceededLoadTokenUsageStats,
   SucceededSubmitCustomerOrder,
   SucceededUploadThreadFile,
 } from './message'
@@ -69,6 +73,11 @@ import {
   AdminAdjutantReviewLoaded,
   type AgentRunLaunchResponse,
   type ArtanisOperatorConsoleResponse,
+  AutopilotWorkListLoaded,
+  type AutopilotWorkSummary,
+  CustomerOneCohortLoaded,
+  type CustomerOneCohortProjection,
+  type CustomerOneCohortProjectionRow,
   type CustomerOrder,
   CustomerOrderLoaded,
   CustomerOrdersLoaded,
@@ -87,6 +96,7 @@ import {
   CustomerSiteFeedbackLoaded,
   CustomerSiteRevisionsLoaded,
   PollingProviderDeviceLogin,
+  ProviderAccountPoolLoaded,
   type ThreadFileApiRecord,
   type ThreadFileDetailApiRecord,
   agentRunExternalRefFromNullable,
@@ -94,6 +104,7 @@ import {
   threadFileDetailFromDto,
   threadFileRecordFromDto,
 } from './model'
+import { InstallSitePreviewElementTargetBridge } from './site-preview-bridge'
 import {
   FocusChatComposer,
   LaunchAutopilotRun,
@@ -102,8 +113,6 @@ import {
   SetAutopilotThreadUrl,
   UploadThreadFile,
 } from './update'
-import { SubmitCustomerOrder } from './customer-order/transitions'
-import { InstallSitePreviewElementTargetBridge } from './site-preview-bridge'
 
 const auth: AuthBootstrap = {
   session: {
@@ -222,6 +231,146 @@ const authWithSavedRepository: AuthBootstrap = {
     updatedAt: '2026-06-04T00:00:00.000Z',
   },
 }
+
+const forgeWorkOrderFixture = (
+  overrides: Partial<AutopilotWorkSummary> = {},
+): AutopilotWorkSummary => ({
+  createdAt: '2026-06-10T00:00:00.000Z',
+  promiseRef: {
+    blockerRefs: [],
+    promiseId: 'forge.metrics.test',
+    registryVersion: '2026-06-16.5',
+  },
+  routing: {
+    availabilityState: 'selected',
+    buyerDebitRequired: false,
+    fallbackLeaseIntentCount: 0,
+    fallbackRunnerKind: 'openagents_shc',
+    laneRef: 'lane.autopilot_work.requester_pylon_own_job',
+    meterKind: 'none',
+    pylonAssignmentIntentCount: 0,
+    selectedRunnerKind: 'requester_pylon',
+    source: 'requester_pylon',
+  },
+  state: 'scheduled',
+  updatedAt: '2026-06-10T01:00:00.000Z',
+  workOrderRef: 'wo_forge_metrics_1',
+  ...overrides,
+})
+
+const providerPoolLoadedFixture = () =>
+  ProviderAccountPoolLoaded({
+    response: {
+      accounts: [],
+      activeLeases: [],
+      generatedAt: '2026-06-16T12:00:00.000Z',
+      nextSelection: {
+        accountLabel: null,
+        activeLeaseCount: null,
+        leaseLimit: null,
+        provider: null,
+        providerAccountRef: null,
+        selectionReason: 'No live selection needed for scene fixture.',
+        status: 'none',
+      },
+      policyVersion: 'provider-pool.policy.test',
+      provider: 'google-gemini',
+      summary: {
+        activeLeaseCount: 0,
+        cooldown: 0,
+        eligible: 3,
+        lowCredit: 0,
+        requiresReauth: 0,
+        total: 3,
+        unhealthy: 0,
+      },
+    },
+  })
+
+const customerOneCohortProjectionFixture = (
+  overrides: Partial<CustomerOneCohortProjection> = {},
+): CustomerOneCohortProjection => ({
+  authority: 'evidence_only',
+  blockerRefs: ['reason.customer_one.cohort_completion_bundles_missing'],
+  caveatRefs: [],
+  cohortProjectionVersion: 'customer-one-cohort-projection:v1',
+  counts: {
+    blocked: 0,
+    candidate: 0,
+    deferred: 0,
+    delivery_reviewed: 0,
+    first_run_started: 0,
+    invited: 0,
+    loop_completed: 0,
+    workspace_seeded: 0,
+  },
+  gate: {
+    reasonRefs: ['reason.customer_one.cohort_completion_bundles_missing'],
+    state: 'blocked',
+  },
+  generatedAt: '2026-06-17T20:00:00.000Z',
+  rows: [],
+  staleness: {
+    composition: 'live_at_read',
+    contractVersion: 'projection_staleness.v1',
+    maxStalenessSeconds: 0,
+    rebuildsOn: ['cohort_row_written', 'privacy_review_recorded'],
+  },
+  target: {
+    maximumTargetTeams: 5,
+    minimumCompletedTeams: 3,
+  },
+  ...overrides,
+})
+
+const completedCohortProjectionRow = (
+  index: number,
+): CustomerOneCohortProjectionRow => ({
+  artifactRef: `artifact.customer-one.team-${index}.delivery.v1`,
+  blockerRefs: [],
+  caveatRefs: [],
+  completionBundleRef: `completion.customer-one.team-${index}.bundle.v1`,
+  countsTowardD3Completion: true,
+  displayLabel: `Team ${index}`,
+  privacyReviewRef: `privacy.customer-one.team-${index}.review.v1`,
+  reviewRef: `review.customer-one.team-${index}.human.v1`,
+  routingRef: `routing.customer-one.team-${index}.owned-node.v1`,
+  runRef: `run.customer-one.team-${index}.primary.v1`,
+  state: 'loop_completed',
+  teamCohortRef: `cohort.team.private-customer-${index}.v1`,
+  templateRef: 'forge.template.ecommerce.inventory_campaign.v1',
+  verificationRef: `verification.customer-one.team-${index}.smoke.v1`,
+  verticalRef: 'vertical.private-customer-ecommerce.v1',
+  workspaceRef: `workspace.customer-one.private-customer-${index}.v1`,
+})
+
+const readyCustomerOneCohortProjectionFixture =
+  (): CustomerOneCohortProjection => {
+    const rows = [
+      completedCohortProjectionRow(1),
+      completedCohortProjectionRow(2),
+      completedCohortProjectionRow(3),
+    ]
+
+    return customerOneCohortProjectionFixture({
+      blockerRefs: [],
+      counts: {
+        blocked: 0,
+        candidate: 0,
+        deferred: 0,
+        delivery_reviewed: 0,
+        first_run_started: 0,
+        invited: 0,
+        loop_completed: 3,
+        workspace_seeded: 0,
+      },
+      gate: {
+        reasonRefs: [],
+        state: 'ready',
+      },
+      rows,
+    })
+  }
 
 const workspaceScope = 'workspace:github:14167547'
 const syncedMissionModel = (route: LoggedInRoute = ChatRoute()) => {
@@ -449,10 +598,7 @@ const artanisConsoleResponse = {
     goalCommands: [],
     privateEvidencePackRefs: ['evidence.private.artanis.scene'],
     rawWorkroomStateRefs: ['workroom.private.artanis.scene'],
-    supportedApprovalActions: [
-      'approve_risky_action',
-      'reject_risky_action',
-    ],
+    supportedApprovalActions: ['approve_risky_action', 'reject_risky_action'],
     supportedGoalActions: [
       'create_goal',
       'pause_goal',
@@ -775,6 +921,206 @@ describe('logged-in workroom sidebar', () => {
     )
   })
 
+  test('renders Forge triage counts without double-counting scheduled backlog', () => {
+    Scene.scene(
+      { update, view },
+      Scene.with({
+        ...LoggedIn.init(ForgeRoute(), auth),
+        autopilotWorkList: AutopilotWorkListLoaded({
+          response: {
+            generatedAt: '2026-06-16T12:00:00.000Z',
+            promiseId: 'forge.metrics.test',
+            workOrders: [forgeWorkOrderFixture()],
+          },
+        }),
+        providerAccountPool: providerPoolLoadedFixture(),
+        customerOneCohort: CustomerOneCohortLoaded({
+          response: customerOneCohortProjectionFixture(),
+        }),
+      }),
+      Scene.expect(
+        Scene.selector('[data-component="forge-factory-dashboard"]'),
+      ).toExist(),
+      Scene.expect(
+        Scene.selector('[data-forge-detail-panel-value-key="runs-triaged"]'),
+      ).toHaveAttr('data-forge-detail-panel-value-text', '1'),
+      Scene.expect(Scene.selector('[data-forge-automation-total]')).toHaveAttr(
+        'data-forge-automation-total',
+        '8',
+      ),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-key="triage"]'),
+      ).toHaveAttr('data-forge-stage-automation-count', '1'),
+      Scene.expect(
+        Scene.selector('[data-forge-dogfood-panel="true"]'),
+      ).toHaveAttr('data-forge-dogfood-status', 'live'),
+      Scene.expect(
+        Scene.selector('[data-forge-dogfood-metric="open-work"]'),
+      ).toHaveAttr('data-forge-dogfood-value', '1'),
+      Scene.expect(
+        Scene.selector('[data-forge-dogfood-metric="eligible-nodes"]'),
+      ).toHaveAttr('data-forge-dogfood-value', '3'),
+      Scene.expect(
+        Scene.selector('[data-forge-routing-metric="requester-pylon"]'),
+      ).toHaveAttr('data-forge-routing-value', '1'),
+      Scene.expect(
+        Scene.selector('[data-forge-routing-metric="fallback-lanes"]'),
+      ).toHaveAttr('data-forge-routing-value', '0'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-readiness="true"]'),
+      ).toHaveAttr('data-forge-cohort-gate', 'blocked'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-readiness="true"]'),
+      ).toHaveAttr('data-forge-cohort-completed', '0'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-metric="target-teams"]'),
+      ).toHaveAttr('data-forge-cohort-value', '3-5'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-metric="completion-bundles"]'),
+      ).toHaveAttr('data-forge-cohort-value', '0'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-metric="privacy-reviews"]'),
+      ).toHaveAttr('data-forge-cohort-value', '0'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-metric="gate-status"]'),
+      ).toHaveAttr('data-forge-cohort-value', 'Blocked'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-empty="true"]'),
+      ).toExist(),
+      Scene.expect(
+        Scene.role('button', { name: 'Run Scope triage' }),
+      ).toExist(),
+      Scene.expect(
+        Scene.selector('[data-forge-automation-tuning="true"]'),
+      ).toExist(),
+    )
+  })
+
+  test('renders Forge cohort readiness as ready from public-safe rows only', () => {
+    Scene.scene(
+      { update, view },
+      Scene.with({
+        ...LoggedIn.init(ForgeRoute(), auth),
+        customerOneCohort: CustomerOneCohortLoaded({
+          response: readyCustomerOneCohortProjectionFixture(),
+        }),
+        providerAccountPool: providerPoolLoadedFixture(),
+      }),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-readiness="true"]'),
+      ).toHaveAttr('data-forge-cohort-gate', 'ready'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-readiness="true"]'),
+      ).toHaveAttr('data-forge-cohort-completed', '3'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-metric="completion-bundles"]'),
+      ).toHaveAttr('data-forge-cohort-value', '3'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-metric="privacy-reviews"]'),
+      ).toHaveAttr('data-forge-cohort-value', '3'),
+      Scene.expect(
+        Scene.selector('[data-forge-cohort-metric="gate-status"]'),
+      ).toHaveAttr('data-forge-cohort-value', 'Ready'),
+      Scene.expect(Scene.text('Team 1')).toExist(),
+      Scene.expect(Scene.text('Team 2')).toExist(),
+      Scene.expect(Scene.text('Team 3')).toExist(),
+      Scene.expect(Scene.text('private-customer')).not.toExist(),
+      Scene.expect(Scene.text('workspace.customer-one')).not.toExist(),
+      Scene.expect(Scene.text('cohort.team')).not.toExist(),
+    )
+  })
+
+  test('renders Forge stage progress summaries from loaded Runs', () => {
+    Scene.scene(
+      { update, view },
+      Scene.with({
+        ...LoggedIn.init(ForgeRoute(), auth),
+        autopilotWorkList: AutopilotWorkListLoaded({
+          response: {
+            generatedAt: '2026-06-16T12:00:00.000Z',
+            promiseId: 'forge.metrics.test',
+            workOrders: [
+              forgeWorkOrderFixture({
+                state: 'scheduled',
+                workOrderRef: 'wo_forge_scheduled',
+              }),
+              forgeWorkOrderFixture({
+                state: 'queued_or_running',
+                workOrderRef: 'wo_forge_running',
+              }),
+              forgeWorkOrderFixture({
+                state: 'delivered',
+                workOrderRef: 'wo_forge_delivered',
+              }),
+              forgeWorkOrderFixture({
+                state: 'accepted',
+                workOrderRef: 'wo_forge_accepted',
+              }),
+              forgeWorkOrderFixture({
+                state: 'blocked',
+                workOrderRef: 'wo_forge_blocked',
+              }),
+              forgeWorkOrderFixture({
+                state: 'rejected',
+                workOrderRef: 'wo_forge_rejected',
+              }),
+              forgeWorkOrderFixture({
+                state: 'invalid',
+                workOrderRef: 'wo_forge_invalid',
+              }),
+              forgeWorkOrderFixture({
+                state: 'invalid',
+                workOrderRef: '/Users/christopher/private-work',
+              }),
+            ],
+          },
+        }),
+        providerAccountPool: providerPoolLoadedFixture(),
+      }),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress="triage"]'),
+      ).toHaveAttr('data-forge-stage-progress-pending', '1'),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress="triage"]'),
+      ).toHaveAttr('data-forge-stage-progress-completed', '0'),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress="codegen"]'),
+      ).toHaveAttr('data-forge-stage-progress-active', '1'),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress="codegen"]'),
+      ).toHaveAttr('data-forge-stage-progress-completed', '0'),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress="codegen"]'),
+      ).toHaveAttr('data-forge-stage-progress-provenance', 'live'),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress="validate"]'),
+      ).toHaveAttr('data-forge-stage-progress-completed', '1'),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress="release"]'),
+      ).toHaveAttr('data-forge-stage-progress-completed', '1'),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress="monitor"]'),
+      ).toHaveAttr('data-forge-stage-progress-blocked', '1'),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress="monitor"]'),
+      ).toHaveAttr('data-forge-stage-progress-failed', '3'),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress="monitor"]'),
+      ).toHaveAttr('data-forge-stage-progress-completed', '0'),
+      Scene.expect(Scene.text('1 unsafe Run ref(s) omitted')).toExist(),
+      Scene.expect(Scene.text('/Users/christopher/private-work')).not.toExist(),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress-run="wo_forge_running"]'),
+      ).toExist(),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress-run="wo_forge_delivered"]'),
+      ).toExist(),
+      Scene.expect(
+        Scene.selector('[data-forge-stage-progress-run="wo_forge_accepted"]'),
+      ).toExist(),
+    )
+  })
+
   test('shows the customer email promise on submitted orders', () => {
     const customerAuth: AuthBootstrap = {
       ...auth,
@@ -995,9 +1341,7 @@ describe('logged-in workroom sidebar', () => {
       Scene.expect(
         Scene.text('Please rebuild the hero so it looks credible.'),
       ).toExist(),
-      Scene.expect(
-        Scene.text('Initial typed repo Site request.'),
-      ).toExist(),
+      Scene.expect(Scene.text('Initial typed repo Site request.')).toExist(),
       Scene.expect(
         Scene.selector(
           'a[href="https://sites.openagents.com/typed-repo/versions/site_version_typed_repo_previous"]',
@@ -1237,9 +1581,7 @@ describe('logged-in workroom sidebar', () => {
         }),
       }),
       Scene.expect(Scene.text('review ready')).toExist(),
-      Scene.expect(
-        Scene.text('A review-ready result is available.'),
-      ).toExist(),
+      Scene.expect(Scene.text('A review-ready result is available.')).toExist(),
       Scene.expect(
         Scene.text('https://sites.openagents.com/previews/otec'),
       ).toExist(),
@@ -1373,9 +1715,13 @@ describe('logged-in workroom sidebar', () => {
           orders: [siteOrder, codeOrder],
         }),
       }),
-      Scene.expect(Scene.role('heading', { name: 'Software requests' })).toExist(),
+      Scene.expect(
+        Scene.role('heading', { name: 'Software requests' }),
+      ).toExist(),
       Scene.expect(Scene.text('Build an OTEC public Site.')).toExist(),
-      Scene.expect(Scene.text('Open a pull request for README cleanup.')).toExist(),
+      Scene.expect(
+        Scene.text('Open a pull request for README cleanup.'),
+      ).toExist(),
       Scene.expect(Scene.text('Site request')).toExist(),
       Scene.expect(Scene.text('Software request')).toExist(),
       Scene.expect(
@@ -1774,7 +2120,9 @@ describe('logged-in workroom sidebar', () => {
       Scene.expect(Scene.text('google_gemini / gemini-2.5-flash')).toExist(),
       Scene.expect(Scene.text('omega / omega_provider_broker')).toExist(),
       Scene.expect(Scene.text('run / probe-run:scene')).toExist(),
-      Scene.expect(Scene.text('repository / OpenAgentsInc/autopilot-omega')).toExist(),
+      Scene.expect(
+        Scene.text('repository / OpenAgentsInc/autopilot-omega'),
+      ).toExist(),
       Scene.expect(Scene.text('Anonymous/anonymized source')).toExist(),
       Scene.expect(Scene.text('Privacy opt-out')).toExist(),
       Scene.expect(
@@ -1785,6 +2133,62 @@ describe('logged-in workroom sidebar', () => {
       Scene.expect(Scene.text('should never render')).not.toExist(),
       Scene.expect(Scene.text('/Users/chris/private/repo')).not.toExist(),
       Scene.expect(Scene.text('rawPrompt')).not.toExist(),
+    )
+  })
+
+  test('renders prefilled workspace memory, starters, and intro receipt', () => {
+    const [model] = LoggedIn.update(
+      LoggedIn.init(WorkspaceRoute({ workspaceId: 'workspace_seed' }), auth),
+      SucceededLoadPrefilledWorkspace({
+        response: {
+          generatedAt: '2026-06-16T12:00:00.000Z',
+          viewer: 'holder',
+          workspace: {
+            id: 'workspace_seed',
+            projectName: 'Seeded Storefront Sprint',
+            status: 'invited',
+            seededMemory: [
+              {
+                label: 'Website',
+                value: 'Public catalog is live.',
+                publicSourceRef: 'https://example.com',
+              },
+            ],
+            starterWorkflows: [
+              {
+                title: 'Draft product page update',
+                description: 'Create the first accepted-outcome draft.',
+                outcomeKind: 'draft',
+                status: 'ready',
+              },
+            ],
+            introReceipt: {
+              summary: 'Workspace prepared from public sources.',
+              publicSourceRefs: ['https://example.com'],
+            },
+          },
+        },
+      }),
+    )
+
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(
+        Scene.selector('[data-route="prefilled-workspace"]'),
+      ).toExist(),
+      Scene.expect(
+        Scene.role('heading', { name: 'Seeded Storefront Sprint' }),
+      ).toExist(),
+      Scene.expect(
+        Scene.text('Workspace prepared from public sources.'),
+      ).toExist(),
+      Scene.expect(Scene.text('1. Draft product page update')).toExist(),
+      Scene.expect(Scene.text('Public catalog is live.')).toExist(),
+      Scene.expect(Scene.role('link', { name: 'Open Work' })).toHaveAttr(
+        'href',
+        '/autopilot/work',
+      ),
     )
   })
 
@@ -2624,7 +3028,9 @@ describe('logged-in workroom sidebar', () => {
       Scene.expect(Scene.role('button', { name: 'Approve' })).toExist(),
       Scene.expect(Scene.role('button', { name: 'Reject' })).toExist(),
       Scene.expect(Scene.text('Work routing')).toExist(),
-      Scene.expect(Scene.text('pylon marketplace / pylon job intake')).toExist(),
+      Scene.expect(
+        Scene.text('pylon marketplace / pylon job intake'),
+      ).toExist(),
       Scene.expect(Scene.text('Publication queue')).toExist(),
       Scene.expect(Scene.text('1 ready / 1 total')).toExist(),
       Scene.expect(Scene.text('2026-06-07T05:20:00.000Z')).not.toExist(),

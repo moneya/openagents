@@ -32,6 +32,10 @@ type ProviderAccountRouteDependencies<Bindings = OpenAgentsEnv> = Readonly<{
     request: Request,
     env: Bindings,
   ) => RouteEffect
+  handleGoogleGeminiBuiltinGrantApi: (
+    request: Request,
+    env: Bindings,
+  ) => RouteEffect
   handleGoogleGeminiGenerateContentApi: (
     request: Request,
     env: Bindings,
@@ -42,6 +46,22 @@ type ProviderAccountRouteDependencies<Bindings = OpenAgentsEnv> = Readonly<{
     request: Request,
     env: Bindings,
     providerAccountRef: string,
+  ) => RouteEffect
+  handleProviderApiKeyConnectApi: (
+    request: Request,
+    env: Bindings,
+    ctx: ExecutionContext,
+    providerRouteSegment: string,
+  ) => RouteEffect
+  handleProviderAccountPoolApi: (
+    request: Request,
+    env: Bindings,
+    ctx: ExecutionContext,
+  ) => RouteEffect
+  handleProviderAccountUsageApi: (
+    request: Request,
+    env: Bindings,
+    ctx: ExecutionContext,
   ) => RouteEffect
   handleProviderAccountsListApi: (
     request: Request,
@@ -87,6 +107,18 @@ export const makeProviderAccountRoutes = <Bindings = OpenAgentsEnv>(
       )
     }
 
+    if (url.pathname === '/api/provider-accounts/pool') {
+      return routeEffectOrResponse(
+        dependencies.handleProviderAccountPoolApi(request, env, ctx),
+      )
+    }
+
+    if (url.pathname === '/api/admin/provider-accounts/usage') {
+      return routeEffectOrResponse(
+        dependencies.handleProviderAccountUsageApi(request, env, ctx),
+      )
+    }
+
     if (
       url.pathname === '/api/provider-accounts/chatgpt-codex/device-login/start'
     ) {
@@ -109,6 +141,34 @@ export const makeProviderAccountRoutes = <Bindings = OpenAgentsEnv>(
       return routeEffectOrResponse(
         dependencies.handleGoogleGeminiGrantResolveApi(request, env),
       )
+    }
+
+    if (
+      url.pathname === '/api/provider-accounts/google-gemini/grants/builtin'
+    ) {
+      return routeEffectOrResponse(
+        dependencies.handleGoogleGeminiBuiltinGrantApi(request, env),
+      )
+    }
+
+    const providerApiKeyConnectMatch =
+      /^\/api\/provider-accounts\/(anthropic|google-gemini)\/connect$/.exec(
+        url.pathname,
+      )
+
+    if (providerApiKeyConnectMatch !== null) {
+      const providerRouteSegment = providerApiKeyConnectMatch[1]
+
+      if (providerRouteSegment !== undefined) {
+        return routeEffectOrResponse(
+          dependencies.handleProviderApiKeyConnectApi(
+            request,
+            env,
+            ctx,
+            providerRouteSegment,
+          ),
+        )
+      }
     }
 
     const googleGeminiGenerateMatch =

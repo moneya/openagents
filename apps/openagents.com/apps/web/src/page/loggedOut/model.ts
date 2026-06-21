@@ -1,4 +1,4 @@
-import { ShareProjectionV1 } from '@openagents/sync-schema'
+import { ShareProjectionV1 } from '@openagentsinc/sync-schema'
 import { Schema as S } from 'effect'
 import { ts } from 'foldkit/schema'
 
@@ -121,6 +121,8 @@ export const ShareProjectionResponse = S.Struct({
 export type ShareProjectionResponse = typeof ShareProjectionResponse.Type
 
 export const PublicRecentPylon = S.Struct({
+  pylonRef: S.optionalKey(S.NullOr(S.String)),
+  ownerAgentRef: S.optionalKey(S.NullOr(S.String)),
   nodeLabel: S.NullOr(S.String),
   nostrPubkeyShort: S.String,
   clientVersion: S.NullOr(S.String),
@@ -128,6 +130,12 @@ export const PublicRecentPylon = S.Struct({
   runtimeState: S.NullOr(S.String),
   lastSeenAtUnixMs: S.NullOr(S.Int),
   lastSeenAtLabel: S.NullOr(S.String),
+  lastHeartbeatAgeSeconds: S.optionalKey(S.NullOr(S.Int)),
+  onlineNow: S.optionalKey(S.NullOr(S.Boolean)),
+  walletReadyNow: S.optionalKey(S.NullOr(S.Boolean)),
+  assignmentReadyNow: S.optionalKey(S.NullOr(S.Boolean)),
+  tippingAvailable: S.optionalKey(S.NullOr(S.Boolean)),
+  tipEndpoint: S.optionalKey(S.NullOr(S.String)),
   eligibleProductCount: S.Int,
   relayUrls: S.Array(S.String),
   products: S.Array(S.String),
@@ -187,6 +195,12 @@ export const PublicPylonStats = S.Struct({
   nexusAcceptedWorkPayoutSatsPaid24h: S.NullOr(S.Int),
   nexusAcceptedWorkPayoutReceiptRefs: S.Array(S.String),
   nexusAcceptedWorkSettlementGate: PublicPylonAcceptedWorkSettlementGate,
+  treasuryPayoutSatsPaidTotal: S.optionalKey(S.NullOr(S.Int)),
+  treasuryPayoutSatsPaid24h: S.optionalKey(S.NullOr(S.Int)),
+  treasuryPayoutCountTotal: S.optionalKey(S.NullOr(S.Int)),
+  treasuryPayoutCount24h: S.optionalKey(S.NullOr(S.Int)),
+  publicRealSatsSettledTotal: S.optionalKey(S.NullOr(S.Int)),
+  publicRealSatsSettled24h: S.optionalKey(S.NullOr(S.Int)),
   trainingAssignedContributors: S.Int,
   trainingAcceptedContributors: S.Int,
   trainingModelProgressContributors: S.Int,
@@ -238,6 +252,7 @@ export type PublicForumTipPayerWalletReadiness =
 
 export const PublicForumLaunchStatus = S.Struct({
   gates: S.Array(PublicForumLaunchGate),
+  orangeChecksSold: S.optionalKey(S.NullOr(S.Number)),
   publicPosting: S.Struct({
     listedForums: PublicForumLaunchGateState,
     voidLane: PublicForumLaunchGateState,
@@ -376,6 +391,141 @@ export const PublicProductPromises = S.Struct({
   version: S.String,
 })
 export type PublicProductPromises = typeof PublicProductPromises.Type
+
+export const PublicTrainingRunMetric = S.Struct({
+  provenanceLabel: S.String,
+  sourceRefs: S.Array(S.String),
+  value: S.Number,
+})
+export type PublicTrainingRunMetric = typeof PublicTrainingRunMetric.Type
+
+export const PublicTrainingRunLossPoint = S.Struct({
+  provenanceLabel: S.String,
+  sourceRefs: S.Array(S.String),
+  step: S.Number,
+  validationLoss: S.Number,
+})
+export type PublicTrainingRunLossPoint = typeof PublicTrainingRunLossPoint.Type
+
+export const PublicTrainingRunLeaderboardRow = S.Struct({
+  bestValidationLoss: S.NullOr(S.Number),
+  provenanceLabel: S.String,
+  pylonRef: S.String,
+  rank: S.Number,
+  settledPayoutSats: S.Number,
+  sourceRefs: S.Array(S.String),
+  trainingRunRef: S.String,
+  verifiedWindowCount: S.Number,
+})
+export type PublicTrainingRunLeaderboardRow =
+  typeof PublicTrainingRunLeaderboardRow.Type
+
+export const PublicTrainingRunRealGradientStatus = S.Struct({
+  closeoutRequirement: S.Struct({
+    evalRef: S.NullOr(S.String),
+    freivaldsCommitmentRefs: S.Array(S.String),
+    gradientCloseoutRefs: S.Array(S.String),
+    mergeRef: S.NullOr(S.String),
+    provenanceLabel: S.String,
+    satisfied: S.Boolean,
+  }),
+  deviceRequirement: S.Struct({
+    observedDistinctContributorDevices: S.Number,
+    provenanceLabel: S.String,
+    requiredDistinctContributorDevices: S.Number,
+    satisfied: S.Boolean,
+    sourceRefs: S.Array(S.String),
+  }),
+  externalAsk: S.Struct({
+    blockerRefs: S.Array(S.String),
+    psionicLaneRef: S.String,
+    requirementRefs: S.Array(S.String),
+    status: S.Literals(['blocked_external', 'ready', 'observed']),
+  }),
+  leaderboardRows: S.Array(PublicTrainingRunLeaderboardRow),
+  lossCurve: S.Array(PublicTrainingRunLossPoint),
+  lossUnderBudget: S.Struct({
+    budgetLabel: S.String,
+    budgetRef: S.NullOr(S.String),
+    finalValidationLoss: S.NullOr(S.Number),
+    maxValidationLoss: S.NullOr(S.Number),
+    provenanceLabel: S.String,
+    satisfied: S.Boolean,
+    sourceRefs: S.Array(S.String),
+  }),
+  scopeBoundaryRefs: S.Array(S.String),
+})
+export type PublicTrainingRunRealGradientStatus =
+  typeof PublicTrainingRunRealGradientStatus.Type
+
+export const PublicTrainingRunProjection = S.Struct({
+  createdAtDisplay: S.String,
+  promiseRef: S.String,
+  receiptRefs: S.Array(S.String),
+  sourceRefs: S.Array(S.String),
+  state: S.Literals(['planned', 'active', 'sealed', 'reconciled']),
+  trainingRunRef: S.String,
+  updatedAtDisplay: S.String,
+})
+export type PublicTrainingRunProjection =
+  typeof PublicTrainingRunProjection.Type
+
+export const PublicTrainingWindowProjection = S.Struct({
+  datasetRefs: S.Array(S.String),
+  homeworkKind: S.Literals([
+    'admin_dispatched_homework',
+    'operator_planned_homework',
+    'auto_starter',
+  ]),
+  plannedAtDisplay: S.String,
+  priority: S.Number,
+  receiptRefs: S.Array(S.String),
+  sourceRefs: S.Array(S.String),
+  state: S.Literals(['planned', 'active', 'sealed', 'reconciled']),
+  trainingRunRef: S.String,
+  updatedAtDisplay: S.String,
+  windowRef: S.String,
+})
+export type PublicTrainingWindowProjection =
+  typeof PublicTrainingWindowProjection.Type
+
+export const PublicTrainingRunSummary = S.Struct({
+  copyBoundaryRefs: S.Array(S.String),
+  emptyState: S.Struct({
+    idle: S.Boolean,
+    reason: S.String,
+  }),
+  metrics: S.Struct({
+    activeWindowCount: PublicTrainingRunMetric,
+    assignedContributorCount: PublicTrainingRunMetric,
+    pendingPayoutCount: PublicTrainingRunMetric,
+    plannedWindowCount: PublicTrainingRunMetric,
+    providerConfirmedSettledPayoutSats: PublicTrainingRunMetric,
+    receiptRefCount: PublicTrainingRunMetric,
+    reconciledWindowCount: PublicTrainingRunMetric,
+    rejectedWorkCount: PublicTrainingRunMetric,
+    sealedWindowCount: PublicTrainingRunMetric,
+    verifiedWorkCount: PublicTrainingRunMetric,
+  }),
+  realGradient: PublicTrainingRunRealGradientStatus,
+  receiptRefs: S.Array(S.String),
+  run: PublicTrainingRunProjection,
+  sourceRefs: S.Array(S.String),
+  windows: S.Array(PublicTrainingWindowProjection),
+})
+export type PublicTrainingRunSummary = typeof PublicTrainingRunSummary.Type
+
+export const PublicTrainingRunsResponse = S.Struct({
+  runs: S.Array(PublicTrainingRunProjection),
+  summaries: S.Array(PublicTrainingRunSummary),
+})
+export type PublicTrainingRunsResponse = typeof PublicTrainingRunsResponse.Type
+
+export const PublicTrainingRunResponse = S.Struct({
+  run: PublicTrainingRunProjection,
+  summary: PublicTrainingRunSummary,
+})
+export type PublicTrainingRunResponse = typeof PublicTrainingRunResponse.Type
 
 export const PublicArtanisReportLoopState = S.Literals([
   'blocked',
@@ -851,6 +1001,96 @@ export const PublicProductPromisesModel = S.Union([
 ])
 export type PublicProductPromisesModel = typeof PublicProductPromisesModel.Type
 
+// Claim-upgrade audit panel: promise-transition receipts from
+// /api/public/product-promises/transitions. Each receipt is the
+// dereferenceable, registry-versioned proof for one proposed state flip.
+export const PublicPromiseTransitionCheck = S.Struct({
+  kind: S.String,
+  result: S.String,
+})
+export type PublicPromiseTransitionCheck =
+  typeof PublicPromiseTransitionCheck.Type
+
+export const PublicPromiseTransitionException = S.Struct({
+  approvedByRef: S.String,
+  expiresAt: S.String,
+  reasonRef: S.String,
+})
+export type PublicPromiseTransitionException =
+  typeof PublicPromiseTransitionException.Type
+
+export const PublicPromiseTransitionReceipt = S.Struct({
+  checkedAt: S.String,
+  checks: S.Array(PublicPromiseTransitionCheck),
+  evidenceRefs: S.Array(S.String),
+  exception: S.NullOr(PublicPromiseTransitionException),
+  fromState: S.String,
+  promiseId: S.String,
+  receiptId: S.String,
+  registryVersion: S.String,
+  result: S.String,
+  toState: S.String,
+})
+export type PublicPromiseTransitionReceipt =
+  typeof PublicPromiseTransitionReceipt.Type
+
+export const PublicPromiseTransitions = S.Struct({
+  kind: S.String,
+  publicSafe: S.Boolean,
+  receipts: S.Array(PublicPromiseTransitionReceipt),
+  rule: S.String,
+})
+export type PublicPromiseTransitions = typeof PublicPromiseTransitions.Type
+
+export const IdlePublicPromiseTransitions = ts(
+  'PublicPromiseTransitionsIdle',
+  {},
+)
+export const LoadingPublicPromiseTransitions = ts(
+  'PublicPromiseTransitionsLoading',
+  {},
+)
+export const LoadedPublicPromiseTransitions = ts(
+  'PublicPromiseTransitionsLoaded',
+  {
+    transitions: PublicPromiseTransitions,
+  },
+)
+export const FailedPublicPromiseTransitions = ts(
+  'PublicPromiseTransitionsFailed',
+  {
+    error: S.String,
+  },
+)
+export const PublicPromiseTransitionsModel = S.Union([
+  IdlePublicPromiseTransitions,
+  LoadingPublicPromiseTransitions,
+  LoadedPublicPromiseTransitions,
+  FailedPublicPromiseTransitions,
+])
+export type PublicPromiseTransitionsModel =
+  typeof PublicPromiseTransitionsModel.Type
+
+export const IdlePublicTrainingRuns = ts('PublicTrainingRunsIdle', {})
+export const LoadingPublicTrainingRuns = ts('PublicTrainingRunsLoading', {
+  runId: S.NullOr(S.String),
+})
+export const LoadedPublicTrainingRuns = ts('PublicTrainingRunsLoaded', {
+  response: PublicTrainingRunsResponse,
+  selectedRunId: S.NullOr(S.String),
+})
+export const FailedPublicTrainingRuns = ts('PublicTrainingRunsFailed', {
+  error: S.String,
+  runId: S.NullOr(S.String),
+})
+export const PublicTrainingRunsModel = S.Union([
+  IdlePublicTrainingRuns,
+  LoadingPublicTrainingRuns,
+  LoadedPublicTrainingRuns,
+  FailedPublicTrainingRuns,
+])
+export type PublicTrainingRunsModel = typeof PublicTrainingRunsModel.Type
+
 export const IdlePublicArtanisReport = ts('PublicArtanisReportIdle', {})
 export const LoadingPublicArtanisReport = ts('PublicArtanisReportLoading', {})
 export const LoadedPublicArtanisReport = ts('PublicArtanisReportLoaded', {
@@ -907,6 +1147,55 @@ export const ShareProjectionModel = S.Union([
 ])
 export type ShareProjectionModel = typeof ShareProjectionModel.Type
 
+// Live settled feed (openagents #5311): public-safe settlement events streamed
+// over the OpenAgents sync engine so the homepage updates in real-time as real
+// Bitcoin settlements stream. Public-safe fields only — refs + integer amounts.
+export const PublicSettledFeedEvent = S.Struct({
+  amountSats: S.Number,
+  challengeRef: S.String,
+  contributorRef: S.String,
+  eventRef: S.String,
+  party: S.Literals(['worker', 'validator']),
+  runRef: S.String,
+  settledAt: S.String,
+  totalSettledCount: S.Number,
+  totalSettledSats: S.Number,
+  windowRef: S.NullOr(S.String),
+})
+export type PublicSettledFeedEvent = typeof PublicSettledFeedEvent.Type
+
+export const SettledFeedConnection = S.Literals([
+  'idle',
+  'connecting',
+  'open',
+  'closed',
+  'failed',
+])
+export type SettledFeedConnection = typeof SettledFeedConnection.Type
+
+// The settled feed renders live from the streamed events: a running settled
+// total, a settled count, and the latest event. `cursor` tracks the last seq
+// applied so reconnects can replay missed changes. When the socket is
+// unavailable the homepage still renders the non-realtime totals it already
+// fetches; this slice is purely additive live data.
+export const SettledFeedModel = ts('LoggedOutSettledFeed', {
+  connection: SettledFeedConnection,
+  cursor: S.Number,
+  events: S.Array(PublicSettledFeedEvent),
+  totalSettledCount: S.Number,
+  totalSettledSats: S.Number,
+})
+export type SettledFeedModel = typeof SettledFeedModel.Type
+
+export const initSettledFeedModel = (): SettledFeedModel =>
+  SettledFeedModel({
+    connection: 'idle',
+    cursor: 0,
+    events: [],
+    totalSettledCount: 0,
+    totalSettledSats: 0,
+  })
+
 export const Model = ts('LoggedOut', {
   route: LoggedOutRoute,
   onboarding: OnboardingModel,
@@ -917,6 +1206,9 @@ export const Model = ts('LoggedOut', {
   publicForumLaunchStatus: PublicForumLaunchStatusModel,
   publicForumTipLeaderboards: PublicForumTipLeaderboardsModel,
   publicProductPromises: PublicProductPromisesModel,
+  publicPromiseTransitions: PublicPromiseTransitionsModel,
+  publicTrainingRuns: PublicTrainingRunsModel,
+  settledFeed: SettledFeedModel,
   shareProjection: ShareProjectionModel,
 })
 
@@ -941,21 +1233,39 @@ export const init = (route: LoggedOutRoute): Model =>
         ? LoadingPublicAdjutantActivity()
         : IdlePublicAdjutantActivity(),
     publicPylonStats:
-      route._tag === 'Home' || route._tag === 'PublicAgent'
+      route._tag === 'Home' ||
+      route._tag === 'Stats' ||
+      route._tag === 'PublicStatsArchive' ||
+      route._tag === 'PublicAgent'
         ? LoadingPublicPylonStats()
         : IdlePublicPylonStats(),
     publicForumLaunchStatus:
-      route._tag === 'Home'
+      route._tag === 'Home' ||
+      route._tag === 'Stats' ||
+      route._tag === 'PublicStatsArchive'
         ? LoadingPublicForumLaunchStatus()
         : IdlePublicForumLaunchStatus(),
     publicForumTipLeaderboards:
-      route._tag === 'Home'
+      route._tag === 'Home' ||
+      route._tag === 'Stats' ||
+      route._tag === 'PublicStatsArchive'
         ? LoadingPublicForumTipLeaderboards()
         : IdlePublicForumTipLeaderboards(),
     publicProductPromises:
       route._tag === 'ProductPromises'
         ? LoadingPublicProductPromises()
         : IdlePublicProductPromises(),
+    publicPromiseTransitions:
+      route._tag === 'ProductPromises'
+        ? LoadingPublicPromiseTransitions()
+        : IdlePublicPromiseTransitions(),
+    publicTrainingRuns:
+      route._tag === 'PublicTrainingRuns'
+        ? LoadingPublicTrainingRuns({ runId: null })
+        : route._tag === 'PublicTrainingRun'
+          ? LoadingPublicTrainingRuns({ runId: route.runId })
+          : IdlePublicTrainingRuns(),
+    settledFeed: initSettledFeedModel(),
     shareProjection:
       route._tag === 'Share'
         ? LoadingShareProjection({ shareId: route.shareId })

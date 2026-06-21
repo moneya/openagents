@@ -15,6 +15,11 @@ import {
 import { Demo, LoggedIn, LoggedOut, Model } from './model'
 import { ThreadRouteIdle } from './page/loggedIn/thread-route'
 import {
+  OverviewTab as WorkroomOverviewTab,
+  init as initWorkroom,
+  tabFromRef as workroomTabFromRef,
+} from './page/loggedIn/page/workroom'
+import {
   defaultLoggedInHrefForAuth,
   loggedInWorkroomAllowed,
 } from './product-policy'
@@ -98,6 +103,7 @@ const redirectCommands = (
   })
 
 const publicDocumentPaths = new Set([
+  '/AGENTS-CORE.md',
   '/AGENTS.md',
   '/HEARTBEAT.md',
   '/RULES.md',
@@ -115,7 +121,9 @@ const shouldLoadDocument = (pathname: string): boolean =>
   pathname === '/blog' ||
   pathname.startsWith('/blog/') ||
   pathname === '/forum' ||
-  pathname.startsWith('/forum/')
+  pathname.startsWith('/forum/') ||
+  pathname === '/training/runs' ||
+  pathname.startsWith('/training/runs/')
 
 type UpdateReturn = readonly [Model, ReadonlyArray<Command.Command<Message>>]
 const withUpdateReturn = M.withReturnType<UpdateReturn>()
@@ -126,10 +134,30 @@ const updateLoggedInRoute = (
 ): UpdateReturn => {
   const routedModel = evo(loggedInModel, { route: () => route })
 
+  if (route._tag === 'Workroom' || route._tag === 'WorkroomTab') {
+    const activeTab =
+      route._tag === 'WorkroomTab'
+        ? workroomTabFromRef(route.tab)
+        : WorkroomOverviewTab
+    const enteredModel = evo(routedModel, {
+      threadRoute: () => ThreadRouteIdle(),
+      workroom: () => initWorkroom(route.workroomId, activeTab),
+    })
+
+    return [
+      enteredModel,
+      Command.mapMessages(LoggedIn.initialCommands(enteredModel), message =>
+        GotLoggedInMessage({ message }),
+      ),
+    ]
+  }
+
   if (
     route._tag === 'Onboarding' ||
     route._tag === 'Order' ||
-    route._tag === 'OrderDetail'
+    route._tag === 'OrderDetail' ||
+    route._tag === 'AutopilotWork' ||
+    route._tag === 'AutopilotWorkDetail'
   ) {
     return [
       evo(routedModel, { threadRoute: () => ThreadRouteIdle() }),
@@ -199,32 +227,29 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       ChangedUrl: ({ url }) => {
         const route = urlToAppRoute(url)
 
-        if (
-          route._tag === 'Demo' ||
-          route._tag === 'DemoOrder' ||
-          route._tag === 'DemoThread' ||
-          route._tag === 'DemoTeamProjectChat' ||
-          route._tag === 'DemoTeamFiles' ||
-          route._tag === 'DemoTeamFile'
-        ) {
+        if (Demo.isDemoAppRoute(route)) {
           return M.value(model).pipe(
             withUpdateReturn,
             M.tagsExhaustive({
-              Demo: demoModel =>
-                route._tag === 'DemoOrder' && demoModel.mode !== 'order'
-                  ? [Demo.init(route), []]
-                  : route._tag !== 'DemoOrder' && demoModel.mode !== 'workroom'
-                    ? [Demo.init(route), []]
-                    : [
-                        evo(demoModel, {
-                          loggedIn: loggedIn =>
-                            evo(loggedIn, {
-                              route: () =>
-                                Demo.loggedInRouteForDemoRoute(route),
-                            }),
-                        }),
-                        [],
-                      ],
+              Demo: demoModel => {
+                if (Demo.demoModeForRoute(route) !== demoModel.mode) {
+                  return [Demo.init(route), []]
+                }
+
+                if (demoModel.mode === 'training') {
+                  return [demoModel, []]
+                }
+
+                return [
+                  evo(demoModel, {
+                    loggedIn: loggedIn =>
+                      evo(loggedIn, {
+                        route: () => Demo.loggedInRouteForDemoRoute(route),
+                      }),
+                  }),
+                  [],
+                ]
+              },
               LoggedIn: () => [Demo.init(route), []],
               LoggedOut: () => [Demo.init(route), []],
             }),

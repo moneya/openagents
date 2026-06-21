@@ -180,6 +180,13 @@ export const BLUEPRINT_CONTRACT_EXPORT_SEED: BlueprintContractExportSeed = {
     jsonSchema('BlueprintProgramSignature', 'public_refs_only'),
     jsonSchema('BlueprintModuleVersion', 'operator_refs_only'),
     jsonSchema('BlueprintProgramRunRecord', 'operator_refs_only'),
+    jsonSchema('BlueprintReplayModuleEvidence', 'operator_refs_only'),
+    jsonSchema('BlueprintTassadarModuleStepEvidence', 'operator_refs_only'),
+    jsonSchema(
+      'BlueprintTassadarModuleRegistryProjection',
+      'operator_refs_only',
+    ),
+    jsonSchema('BlueprintChatProgramTurnResult', 'operator_refs_only'),
     jsonSchema('ProbeBlueprintProgramRunEvidence', 'operator_refs_only'),
     jsonSchema(
       'BlueprintProgramRunEvidenceIntakeResponse',
@@ -224,6 +231,18 @@ export const BLUEPRINT_CONTRACT_EXPORT_SEED: BlueprintContractExportSeed = {
       privacyPolicy: 'operator_refs_only',
       requestSchemaRef: null,
       responseSchemaRef: 'schema.blueprint.BlueprintContractExportSeed.v1',
+      stability: 'seed',
+    },
+    {
+      consumers: operatorConsumers(),
+      id: 'blueprint_openapi.tassadar_modules.get.v1',
+      method: 'GET',
+      operationRef: 'operation.blueprint.tassadar_modules.get',
+      path: '/api/blueprint/tassadar-modules',
+      privacyPolicy: 'operator_refs_only',
+      requestSchemaRef: null,
+      responseSchemaRef:
+        'schema.blueprint.BlueprintTassadarModuleRegistryProjection.v1',
       stability: 'seed',
     },
     {
@@ -312,6 +331,25 @@ export const BLUEPRINT_CONTRACT_EXPORT_SEED: BlueprintContractExportSeed = {
       id: 'blueprint_receipt.release_gate.v1',
       privacyPolicy: 'public_refs_only',
       receiptRef: 'receipt.release_gate',
+      retentionPolicyRef: 'retention.blueprint.public_receipt_refs',
+      stability: 'seed',
+    },
+    {
+      consumers: operatorConsumers(),
+      evidenceSchemaRef:
+        'schema.blueprint.BlueprintTassadarModuleStepEvidence.v1',
+      id: 'blueprint_receipt.tassadar_module_step.v1',
+      privacyPolicy: 'operator_refs_only',
+      receiptRef: 'receipt.openagents.blueprint_tassadar_step',
+      retentionPolicyRef: 'retention.blueprint.operator_receipt_refs',
+      stability: 'seed',
+    },
+    {
+      consumers: allConsumers(),
+      evidenceSchemaRef: 'schema.blueprint.BlueprintReplayModuleEvidence.v1',
+      id: 'blueprint_receipt.public_proof_replay_bundle.v1',
+      privacyPolicy: 'public_refs_only',
+      receiptRef: 'receipt.public_proof_replay_bundle',
       retentionPolicyRef: 'retention.blueprint.public_receipt_refs',
       stability: 'seed',
     },

@@ -1,4 +1,4 @@
-import { Match as M, Option } from 'effect'
+import { Option } from 'effect'
 import { type Document, type Html, html } from 'foldkit/html'
 
 import {
@@ -9,13 +9,19 @@ import {
 } from './message'
 import type { Model } from './model'
 import { Demo, LoggedIn, LoggedOut } from './model'
+import * as Activity from './page/activity'
+import * as Animations from './page/animations'
 import * as Blog from './page/blog'
+import * as Business from './page/business'
+import * as Components from './page/components'
+import * as DemoLegal from './page/demoLegal'
 import * as Docs from './page/docs'
 import * as Forum from './page/forum'
 import type {
   PublicPylonStats,
   PublicPylonStatsModel,
 } from './page/loggedOut/model'
+import * as Run from './page/run'
 import * as SiteCheckoutDemo from './page/siteCheckoutDemo'
 import * as Ui from './ui'
 
@@ -338,24 +344,57 @@ const blogTitle = (slug: string): string =>
     onSome: postTitle => postTitle,
   })
 
-const title = (model: Model): string =>
-  model._tag === 'Demo'
-    ? 'OpenAgents Demo'
-    : M.value(model.route).pipe(
-        M.tag('Docs', () => 'Docs - OpenAgents'),
-        M.tag('DocsPage', ({ slug }) => `${docTitle(slug)} - OpenAgents`),
-        M.tag('Forum', () => 'Forum - OpenAgents'),
-        M.tag('ForumForum', route => Forum.title(route)),
-        M.tag('ForumTopic', route => Forum.title(route)),
-        M.tag('ForumReceipt', route => Forum.title(route)),
-        M.tag('SiteCheckoutDemo', () => 'Demo checkout - OpenAgents'),
-        M.tag('SiteCheckoutDemoReturn', route => SiteCheckoutDemo.title(route)),
-        M.tag('Blog', () => 'Blog - OpenAgents'),
-        M.tag('BlogPost', ({ slug }) => `${blogTitle(slug)} - OpenAgents`),
-        M.tag('PublicAgent', ({ agentRef }) => `${agentRef} - OpenAgents`),
-        M.tag('Share', () => 'Shared Workroom - OpenAgents'),
-        M.orElse(() => 'OpenAgents'),
-      )
+const title = (model: Model): string => {
+  if (model._tag === 'Demo') {
+    return 'OpenAgents Demo'
+  }
+
+  switch (model.route._tag) {
+    case 'Docs':
+      return 'Docs - OpenAgents'
+    case 'DocsPage':
+      return `${docTitle(model.route.slug)} - OpenAgents`
+    case 'Forum':
+      return 'Forum - OpenAgents'
+    case 'ForumForum':
+    case 'ForumTopic':
+    case 'ForumReceipt':
+      return Forum.title(model.route)
+    case 'SiteCheckoutDemo':
+      return 'Demo checkout - OpenAgents'
+    case 'SiteCheckoutDemoReturn':
+      return SiteCheckoutDemo.title(model.route)
+    case 'Blog':
+      return 'Blog - OpenAgents'
+    case 'BlogPost':
+      return `${blogTitle(model.route.slug)} - OpenAgents`
+    case 'Components':
+    case 'ComponentsFamily':
+      return 'Components - OpenAgents'
+    case 'Business':
+      return 'For your business - OpenAgents'
+    case 'Animations':
+      return 'Animations - OpenAgents'
+    case 'Activity':
+      return 'Activity - OpenAgents'
+    case 'DemoLegal':
+      return 'Legal demo - OpenAgents'
+    case 'Run':
+      return 'Live Tassadar run - OpenAgents'
+    case 'Tassadar':
+      return 'Tassadar run - OpenAgents'
+    case 'TassadarReplay':
+      return 'Tassadar proof replay - OpenAgents'
+    case 'Login':
+      return 'Log in - OpenAgents'
+    case 'PublicAgent':
+      return `${model.route.agentRef} - OpenAgents`
+    case 'Share':
+      return 'Shared Workroom - OpenAgents'
+    default:
+      return 'OpenAgents'
+  }
+}
 
 const publicRouteBody = (model: Model): Document['body'] | undefined => {
   if (model._tag === 'Demo') {
@@ -384,9 +423,56 @@ const publicRouteBody = (model: Model): Document['body'] | undefined => {
     })
   }
 
+  if (model._tag === 'LoggedOut' && model.route._tag === 'Moksha') {
+    const h = html<Message>()
+
+    return h.submodel({
+      slotId: 'logged-out-moksha',
+      model,
+      view: LoggedOut.view,
+      toParentMessage: message => GotLoggedOutMessage({ message }),
+    })
+  }
+
+  if (model._tag === 'LoggedOut' && model.route._tag === 'Moksha2') {
+    const h = html<Message>()
+
+    return h.submodel({
+      slotId: 'logged-out-moksha2',
+      model,
+      view: LoggedOut.view,
+      toParentMessage: message => GotLoggedOutMessage({ message }),
+    })
+  }
+
+  if (model._tag === 'LoggedOut' && model.route._tag === 'Pylon') {
+    const h = html<Message>()
+
+    return h.submodel({
+      slotId: 'logged-out-pylon',
+      model,
+      view: LoggedOut.view,
+      toParentMessage: message => GotLoggedOutMessage({ message }),
+    })
+  }
+
+  if (model._tag === 'LoggedOut' && model.route._tag === 'Workspace') {
+    const h = html<Message>()
+
+    return h.submodel({
+      slotId: 'logged-out-workspace',
+      model,
+      view: LoggedOut.view,
+      toParentMessage: message => GotLoggedOutMessage({ message }),
+    })
+  }
+
   if (
     model._tag === 'LoggedOut' &&
-    (model.route._tag === 'Home' || model.route._tag === 'ProductPromises')
+    (model.route._tag === 'Home' ||
+      model.route._tag === 'Stats' ||
+      model.route._tag === 'PublicStatsArchive' ||
+      model.route._tag === 'ProductPromises')
   ) {
     const h = html<Message>()
 
@@ -410,7 +496,16 @@ const publicRouteBody = (model: Model): Document['body'] | undefined => {
       model.route._tag !== 'SiteCheckoutDemo' &&
       model.route._tag !== 'SiteCheckoutDemoReturn' &&
       model.route._tag !== 'Blog' &&
-      model.route._tag !== 'BlogPost'
+      model.route._tag !== 'BlogPost' &&
+      model.route._tag !== 'Components' &&
+      model.route._tag !== 'ComponentsFamily' &&
+      model.route._tag !== 'Business' &&
+      model.route._tag !== 'Animations' &&
+      model.route._tag !== 'Activity' &&
+      model.route._tag !== 'DemoLegal' &&
+      model.route._tag !== 'Run' &&
+      model.route._tag !== 'Tassadar' &&
+      model.route._tag !== 'TassadarReplay'
     ) {
       return undefined
     }
@@ -426,6 +521,38 @@ const publicRouteBody = (model: Model): Document['body'] | undefined => {
 
   if (model.route._tag === 'Docs' || model.route._tag === 'DocsPage') {
     return Docs.view<Message>(model.route, authState)
+  }
+
+  if (model.route._tag === 'Business') {
+    return Business.view<Message>(authState)
+  }
+
+  if (model.route._tag === 'Animations') {
+    return Animations.view<Message>(authState)
+  }
+
+  if (model.route._tag === 'Activity') {
+    return Activity.view<Message>(authState)
+  }
+
+  if (model.route._tag === 'DemoLegal') {
+    return DemoLegal.view<Message>(authState)
+  }
+
+  if (model.route._tag === 'Run' || model.route._tag === 'Tassadar') {
+    return Run.view<Message>(authState)
+  }
+
+  if (model.route._tag === 'TassadarReplay') {
+    return Run.view<Message>(authState, model.route.replaySlug)
+  }
+
+  if (model.route._tag === 'Components') {
+    return Components.view<Message>(authState)
+  }
+
+  if (model.route._tag === 'ComponentsFamily') {
+    return Components.view<Message>(authState, model.route.family)
   }
 
   if (

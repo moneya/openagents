@@ -3,8 +3,11 @@ import { describe, expect, test } from 'vitest'
 
 import { EmailAddress, ResendEmailSender, WorkerSecret } from './config'
 import {
+  AutopilotDecisionEmailInput,
+  type CloudflareEmailBinding,
   ORDER_SITES_TRANSACTIONAL_EMAIL_KINDS,
   OrderSitesTransactionalEmailInput,
+  PrivateWorkspaceInviteEmailInput,
   SiteReferralOnboardingEmailInput,
   TargetedRemakeOutreachEmailInput,
   adjutantCustomerNotificationEmailHtml,
@@ -17,6 +20,8 @@ import {
   outOfCreditsEmailText,
   runOperatorEmailLedgerSmoke,
   sendOutOfCreditsEmail,
+  sendRenderedEmailViaCloudflareBinding,
+  sendRenderedEmailViaCloudflareBindingWithLedger,
   siteReferralOnboardingEmailHtml,
   siteReferralOnboardingEmailText,
   targetedRemakeOutreachEmailHtml,
@@ -105,6 +110,19 @@ const targetedRemakeOutreachInput = new TargetedRemakeOutreachEmailInput({
   unsubscribeUrl: 'https://openagents.com/email/unsubscribe/targeted',
   valueProposition:
     'The preview focuses on clearer positioning, stronger calls to action, and a cleaner technical story.',
+})
+
+const privateWorkspaceInviteInput = new PrivateWorkspaceInviteEmailInput({
+  acceptUrl:
+    'https://openagents.com/api/team-workspace-invites/accept?token=invite_token',
+  displayName: 'Alex <Customer>',
+  expiresAt: '2026-06-19T12:00:00.000Z',
+  idempotencyKey: 'team_workspace_invite:invite_1:1',
+  inviteId: 'team_workspace_invite_1',
+  projectId: 'team_project_1',
+  teamId: 'team_1',
+  to: 'alex.customer@example.com',
+  workspaceLabel: 'Private <Workspace>',
 })
 
 const resendConfig = () => ({
@@ -413,6 +431,67 @@ describe('emails', () => {
     })
   })
 
+  test('sends rendered email through the Cloudflare Email binding adapter', async () => {
+    const sentMessages: Array<Parameters<CloudflareEmailBinding['send']>[0]> =
+      []
+    const binding: CloudflareEmailBinding = {
+      send: message => {
+        sentMessages.push(message)
+
+        return Promise.resolve({ messageId: 'cf_email_test' })
+      },
+    }
+    const rendered = await Effect.runPromise(
+      makeEmailService().renderOutOfCreditsEmail(resendConfig(), emailInput),
+    )
+
+    const result = await Effect.runPromise(
+      sendRenderedEmailViaCloudflareBinding(binding, rendered),
+    )
+
+    expect(result).toMatchObject({
+      _tag: 'EmailProviderAccepted',
+      provider: 'cloudflare_email',
+      providerMessageId: 'cf_email_test',
+    })
+    expect(sentMessages).toEqual([
+      expect.objectContaining({
+        from: 'OpenAgents <billing@openagents.com>',
+        html: expect.stringContaining('Autopilot credits are exhausted'),
+        replyTo: 'support@openagents.com',
+        subject: 'OpenAgents Autopilot credits exhausted',
+        text: expect.stringContaining('Your OpenAgents Autopilot credits'),
+        to: 'chris@openagents.com',
+      }),
+    ])
+    expect(sentMessages[0]!.headers).toEqual({
+      'X-OpenAgents-Idempotency-Key': emailInput.idempotencyKey,
+    })
+  })
+
+  test('maps Cloudflare Email binding errors to bounded provider failures', async () => {
+    const error = Object.assign(new Error('recipient is not allowed'), {
+      code: 'E_RECIPIENT_NOT_ALLOWED',
+    })
+    const binding: CloudflareEmailBinding = {
+      send: () => Promise.reject(error),
+    }
+    const rendered = await Effect.runPromise(
+      makeEmailService().renderOutOfCreditsEmail(resendConfig(), emailInput),
+    )
+
+    const result = await Effect.runPromise(
+      sendRenderedEmailViaCloudflareBinding(binding, rendered),
+    )
+
+    expect(result).toMatchObject({
+      _tag: 'EmailProviderRejected',
+      errorMessage: 'recipient is not allowed',
+      errorName: 'E_RECIPIENT_NOT_ALLOWED',
+      provider: 'cloudflare_email',
+    })
+  })
+
   test('renders out-of-credits email through the Effect service', async () => {
     const rendered = await Effect.runPromise(
       makeEmailService().renderOutOfCreditsEmail(resendConfig(), emailInput),
@@ -501,6 +580,101 @@ describe('emails', () => {
       ),
     ).rejects.toMatchObject({
       operation: 'EmailService.renderTargetedRemakeOutreachEmail',
+    })
+  })
+
+  test('renders and ledgers the Autopilot decision-required email', async () => {
+    const { db, deliveries, messagesByIdempotencyKey } = makeEmailLedgerD1()
+    const decisionInput = new AutopilotDecisionEmailInput({
+      appOrigin: 'https://openagents.com',
+      displayName: 'Alex <Customer>',
+      idempotencyKey:
+        'autopilot:decision_required:autopilot_work_order.decision_test_1',
+      kind: 'decision_required',
+      to: 'alex.customer@example.com',
+      workOrderRef: 'autopilot_work_order.decision_test_1',
+    })
+    const requests: Array<Request> = []
+    const fetcher: typeof fetch = async (input, init) => {
+      requests.push(input instanceof Request ? input : new Request(input, init))
+
+      return new Response(JSON.stringify({ id: 'email_decision_test' }), {
+        headers: { 'content-type': 'application/json' },
+        status: 200,
+      })
+    }
+    const runtime = {
+      nowIso: () => '2026-06-11T12:00:00.000Z',
+      randomId: (prefix: string) => `${prefix}_fixed`,
+    }
+
+    const rendered = await Effect.runPromise(
+      makeEmailService().renderAutopilotDecisionNotificationEmail(
+        resendConfig(),
+        decisionInput,
+      ),
+    )
+
+    expect(rendered.kind).toBe('crm_transactional')
+    expect(rendered.templateSlug).toBe('autopilot_decisions.decision_required.v1')
+    expect(rendered.text).toContain('https://openagents.com/decisions')
+    expect(rendered.text).toContain(
+      'Work order: autopilot_work_order.decision_test_1',
+    )
+
+    const result = await Effect.runPromise(
+      makeEmailService().sendAutopilotDecisionEmailWithLedger(
+        db,
+        resendConfig(),
+        decisionInput,
+        {
+          sourceAuthorityRef: 'system.autopilot_decision_notification.v1',
+          targetUserId: 'github:autopilot-owner',
+        },
+        fetcher,
+        runtime,
+      ),
+    )
+
+    expect(result).toMatchObject({
+      ok: true,
+      providerMessageId: 'email_decision_test',
+    })
+    expect(requests[0]?.headers.get('Idempotency-Key')).toBe(
+      decisionInput.idempotencyKey,
+    )
+    expect(messagesByIdempotencyKey.get(decisionInput.idempotencyKey)).toMatchObject({
+      kind: 'crm_transactional',
+      source_authority_ref: 'system.autopilot_decision_notification.v1',
+      status: 'accepted',
+      target_user_id: 'github:autopilot-owner',
+    })
+    expect(deliveries).toEqual([
+      expect.objectContaining({
+        provider_idempotency_key: decisionInput.idempotencyKey,
+        provider_message_id: 'email_decision_test',
+        status: 'accepted',
+      }),
+    ])
+  })
+
+  test('rejects Autopilot decision email input containing secret-shaped material', async () => {
+    await expect(
+      Effect.runPromise(
+        makeEmailService().renderAutopilotDecisionNotificationEmail(
+          resendConfig(),
+          new AutopilotDecisionEmailInput({
+            appOrigin: 'https://openagents.com',
+            displayName: 'Alex Customer',
+            idempotencyKey: 'autopilot:decision_required:unsafe',
+            kind: 'decision_required',
+            to: 'alex.customer@example.com',
+            workOrderRef: 'autopilot_work_order.access_token.leak',
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      operation: 'EmailService.renderAutopilotDecisionEmail',
     })
   })
 
@@ -617,6 +791,65 @@ describe('emails', () => {
         provider: 'resend',
         provider_idempotency_key: targetedRemakeOutreachInput.idempotencyKey,
         provider_message_id: 'email_targeted_remake_test',
+        status: 'accepted',
+      }),
+    ])
+  })
+
+  test('records Cloudflare Email binding sends through the existing email ledger', async () => {
+    const { db, deliveries, messagesByIdempotencyKey } = makeEmailLedgerD1()
+    const sentMessages: Array<Parameters<CloudflareEmailBinding['send']>[0]> =
+      []
+    const binding: CloudflareEmailBinding = {
+      send: message => {
+        sentMessages.push(message)
+
+        return Promise.resolve({ messageId: 'cf_email_ledger_test' })
+      },
+    }
+    const runtime = {
+      nowIso: () => '2026-06-16T15:00:00.000Z',
+      randomId: (prefix: string) => `${prefix}_cloudflare_fixed`,
+    }
+    const rendered = await Effect.runPromise(
+      makeEmailService().renderOutOfCreditsEmail(resendConfig(), emailInput),
+    )
+
+    const result = await Effect.runPromise(
+      sendRenderedEmailViaCloudflareBindingWithLedger(
+        db,
+        binding,
+        rendered,
+        {
+          metadata: { smoke: 'cloudflare_email_provider_adapter' },
+          sourceAuthorityRef: 'system.cloudflare_email_provider_adapter.v1',
+        },
+        runtime,
+      ),
+    )
+
+    expect(result).toEqual({
+      emailMessageId: 'email_msg_cloudflare_fixed',
+      ok: true,
+      providerMessageId: 'cf_email_ledger_test',
+    })
+    expect(sentMessages).toHaveLength(1)
+    expect(
+      messagesByIdempotencyKey.get(emailInput.idempotencyKey),
+    ).toMatchObject({
+      idempotency_key: emailInput.idempotencyKey,
+      kind: 'billing_out_of_credits',
+      provider: 'cloudflare_email',
+      provider_message_id: 'cf_email_ledger_test',
+      source_authority_ref: 'system.cloudflare_email_provider_adapter.v1',
+      status: 'accepted',
+    })
+    expect(deliveries).toEqual([
+      expect.objectContaining({
+        message_id: 'email_msg_cloudflare_fixed',
+        provider: 'cloudflare_email',
+        provider_idempotency_key: emailInput.idempotencyKey,
+        provider_message_id: 'cf_email_ledger_test',
         status: 'accepted',
       }),
     ])
@@ -969,6 +1202,145 @@ describe('emails', () => {
       }),
     )
     expect(deliveries).toHaveLength(1)
+  })
+
+  test('renders private workspace invite email with escaped labels', async () => {
+    const service = makeEmailService()
+    const rendered = await Effect.runPromise(
+      service.renderPrivateWorkspaceInviteEmail(
+        resendConfig(),
+        privateWorkspaceInviteInput,
+      ),
+    )
+
+    expect(rendered.kind).toBe('operator_notification')
+    expect(rendered.templateSlug).toBe('team_workspace_invite.v1')
+    expect(rendered.text).toContain(privateWorkspaceInviteInput.acceptUrl)
+    expect(rendered.html).toContain('Alex &lt;Customer&gt;')
+    expect(rendered.html).toContain('Private &lt;Workspace&gt;')
+    expect(rendered.html).not.toContain('Alex <Customer>')
+    expect(rendered.html).not.toContain('Private <Workspace>')
+  })
+
+  test('sends private workspace invite email idempotently through the ledger', async () => {
+    const { db, deliveries, messagesByIdempotencyKey } = makeEmailLedgerD1()
+    const runtime = {
+      nowIso: () => '2026-06-16T12:00:00.000Z',
+      randomId: (prefix: string) => `${prefix}_workspace_invite`,
+    }
+    let fetchCount = 0
+    const fetcher: typeof fetch = async () => {
+      fetchCount += 1
+
+      return new Response(JSON.stringify({ id: 'email_workspace_invite' }), {
+        headers: { 'content-type': 'application/json' },
+        status: 200,
+      })
+    }
+    const service = makeEmailService()
+
+    const first = await Effect.runPromise(
+      service.sendPrivateWorkspaceInviteEmailWithLedger(
+        db,
+        resendConfig(),
+        privateWorkspaceInviteInput,
+        {
+          sourceAuthorityRef: 'system.private_workspace_invite_email.test',
+        },
+        fetcher,
+        runtime,
+      ),
+    )
+    const second = await Effect.runPromise(
+      service.sendPrivateWorkspaceInviteEmailWithLedger(
+        db,
+        resendConfig(),
+        privateWorkspaceInviteInput,
+        {
+          sourceAuthorityRef: 'system.private_workspace_invite_email.test',
+        },
+        fetcher,
+        runtime,
+      ),
+    )
+
+    expect(first).toEqual({
+      emailMessageId: 'email_msg_workspace_invite',
+      ok: true,
+      providerMessageId: 'email_workspace_invite',
+    })
+    expect(second).toEqual(first)
+    expect(fetchCount).toBe(1)
+    expect(
+      messagesByIdempotencyKey.get(privateWorkspaceInviteInput.idempotencyKey),
+    ).toMatchObject({
+      kind: 'operator_notification',
+      provider: 'resend',
+      provider_message_id: 'email_workspace_invite',
+      source_authority_ref: 'system.private_workspace_invite_email.test',
+      status: 'accepted',
+    })
+    expect(deliveries).toHaveLength(1)
+  })
+
+  test('records private workspace invite provider rejection without raw provider payloads', async () => {
+    const { db, deliveries, messagesByIdempotencyKey } = makeEmailLedgerD1()
+    const runtime = {
+      nowIso: () => '2026-06-16T12:00:00.000Z',
+      randomId: (prefix: string) => `${prefix}_workspace_invite_failed`,
+    }
+    const service = makeEmailService()
+
+    const result = await Effect.runPromise(
+      service.sendPrivateWorkspaceInviteEmailWithLedger(
+        db,
+        resendConfig(),
+        new PrivateWorkspaceInviteEmailInput({
+          ...privateWorkspaceInviteInput,
+          idempotencyKey: 'team_workspace_invite:invite_1:failed',
+        }),
+        undefined,
+        async () =>
+          new Response(
+            JSON.stringify({
+              message:
+                'Domain is not verified. Bearer secret-token-value-123456 should not appear.',
+              name: 'validation_error',
+            }),
+            {
+              headers: { 'content-type': 'application/json' },
+              status: 422,
+            },
+          ),
+        runtime,
+      ),
+    )
+
+    expect(result).toMatchObject({
+      errorMessage:
+        'Domain is not verified. Bearer [REDACTED] should not appear.',
+      errorName: 'validation_error',
+      ok: false,
+    })
+    expect(messagesByIdempotencyKey.get(result.emailMessageId)).toBeUndefined()
+    expect(
+      messagesByIdempotencyKey.get('team_workspace_invite:invite_1:failed'),
+    ).toMatchObject({
+      error_message:
+        'Domain is not verified. Bearer [REDACTED] should not appear.',
+      error_name: 'validation_error',
+      status: 'failed',
+    })
+    expect(deliveries).toEqual([
+      expect.objectContaining({
+        error_message:
+          'Domain is not verified. Bearer [REDACTED] should not appear.',
+        error_name: 'validation_error',
+        status: 'failed',
+      }),
+    ])
+    expect(JSON.stringify(result)).not.toContain('secret-token-value')
+    expect(JSON.stringify(deliveries)).not.toContain('secret-token-value')
   })
 
   test('operator smoke records an email_config_missing skip as a ledger failure', async () => {

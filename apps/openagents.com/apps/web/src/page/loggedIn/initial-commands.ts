@@ -4,6 +4,14 @@ import { loggedInPermissionGate } from '../../product-policy'
 import { LoadAdminOverview } from './admin/transitions'
 import { artanisOperatorInitialCommands } from './artanis-console/transitions'
 import {
+  LoadAutopilotMorningReport,
+  LoadAutopilotWorkBriefing,
+  LoadAutopilotWorkDetail,
+  LoadAutopilotWorkEvents,
+  LoadAutopilotWorkList,
+  LoadCustomerOneCohort,
+} from './autopilot-work/transitions'
+import {
   teamChatMessagesRequestForRoute,
   threadFileDetailRequestForRoute,
   threadFilesRequestForRoute,
@@ -16,17 +24,25 @@ import {
   LoadCustomerOrder,
   LoadCustomerOrders,
 } from './customer-order/transitions'
+import { LoadAutopilotDecisions } from './decisions/transitions'
 import { LoadAgentGoal } from './goals/commands'
 import { agentGoalScopeForRoute } from './goals/scope'
 import { Message } from './message'
 import { Model } from './model'
 import { LoadMulletBootstrap } from './mullet/transitions'
+import { notificationInitialCommands } from './notifications/transitions'
 import { LoadOnboardingRepositories } from './onboarding/transitions'
+import { LoadProviderAccountPool } from './providers/commands'
 import { LoadTokenUsageStats } from './stats/transitions'
 import { LoadSyncSnapshot } from './sync/commands'
 import { syncSnapshotHref } from './sync/projection'
 import { LoadTeamChatMessages } from './team-chat/commands'
 import { LoadThreadFileDetail, LoadThreadFiles } from './thread-files/commands'
+import {
+  LoadWorkroomLifecycle,
+  LoadWorkroomSurface,
+} from './workroom/transitions'
+import { LoadPrefilledWorkspace } from './workspace/transitions'
 
 export const initialCommands = (
   model: Model,
@@ -55,6 +71,52 @@ export const initialCommands = (
       LoadCustomerOrder({
         orderId: model.route.orderId,
       }),
+    ]
+  }
+
+  if (model.route._tag === 'AutopilotWork') {
+    return [
+      InstallAccountMenuOutsideClick(),
+      LoadAutopilotWorkList({}),
+      LoadAutopilotMorningReport({}),
+    ]
+  }
+
+  if (model.route._tag === 'Forge') {
+    return [
+      InstallAccountMenuOutsideClick(),
+      LoadAutopilotWorkList({}),
+      LoadAutopilotMorningReport({}),
+      LoadCustomerOneCohort({}),
+      LoadProviderAccountPool({}),
+    ]
+  }
+
+  if (model.route._tag === 'Decisions') {
+    return [InstallAccountMenuOutsideClick(), LoadAutopilotDecisions({})]
+  }
+
+  if (model.route._tag === 'Workspace') {
+    return [
+      InstallAccountMenuOutsideClick(),
+      LoadPrefilledWorkspace({ workspaceId: model.route.workspaceId }),
+    ]
+  }
+
+  if (model.route._tag === 'Workroom' || model.route._tag === 'WorkroomTab') {
+    return [
+      InstallAccountMenuOutsideClick(),
+      LoadWorkroomSurface({ workroomId: model.route.workroomId }),
+      LoadWorkroomLifecycle({ workroomId: model.route.workroomId }),
+    ]
+  }
+
+  if (model.route._tag === 'AutopilotWorkDetail') {
+    return [
+      InstallAccountMenuOutsideClick(),
+      LoadAutopilotWorkDetail({ workOrderRef: model.route.workOrderRef }),
+      LoadAutopilotWorkEvents({ workOrderRef: model.route.workOrderRef }),
+      LoadAutopilotWorkBriefing({ workOrderRef: model.route.workOrderRef }),
     ]
   }
 
@@ -101,6 +163,11 @@ export const initialCommands = (
     model.route._tag === 'Thread'
       ? [FocusChatComposer()]
       : []
+  const providerAccountPoolCommands =
+    model.route._tag === 'SettingsSection' &&
+    model.route.section === 'connections'
+      ? [LoadProviderAccountPool({})]
+      : []
 
   return [
     ...baseCommands,
@@ -111,5 +178,7 @@ export const initialCommands = (
     ...fileCommands,
     ...fileDetailCommands,
     ...chatCommands,
+    ...providerAccountPoolCommands,
+    ...notificationInitialCommands(model),
   ]
 }

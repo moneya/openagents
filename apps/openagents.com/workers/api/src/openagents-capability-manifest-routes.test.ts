@@ -1,8 +1,9 @@
-import { containsProviderSecretMaterial } from '@openagents/provider-account-schema'
+import { containsProviderSecretMaterial } from '@openagentsinc/provider-account-schema'
 import { Effect } from 'effect'
 import { describe, expect, test } from 'vitest'
 
 import {
+  OpenAgentsAgentCoreSha256,
   OpenAgentsAgentOnboardingSha256,
   OpenAgentsAgentOnboardingVersion,
 } from './openagents-agent-onboarding'
@@ -45,6 +46,9 @@ describe('OpenAgents capability manifest route', () => {
     expect(body.docs.productPromisesApi).toBe(
       'https://openagents.com/api/public/product-promises',
     )
+    expect(body.docs.activityEvidence).toBe(
+      'https://github.com/OpenAgentsInc/openagents/blob/main/docs/launch/2026-06-18-agent-activity-endpoint-guide.md',
+    )
     expect(body.docs.sourceCode).toBe(
       'https://github.com/OpenAgentsInc/openagents',
     )
@@ -66,16 +70,32 @@ describe('OpenAgents capability manifest route', () => {
     expect(body.docs.probeSource).toBe(
       'https://github.com/OpenAgentsInc/openagents/tree/main/packages/probe',
     )
-    expect(body.docs.agent).toBe('https://openagents.com/AGENTS.md')
-    expect(body.docs.instruction).toBe('https://openagents.com/AGENTS.md')
+    expect(body.docs.agent).toBe('https://openagents.com/AGENTS-CORE.md')
+    expect(body.docs.instruction).toBe(
+      'https://openagents.com/AGENTS-CORE.md',
+    )
+    expect(body.docs.agentFullReference).toBe(
+      'https://openagents.com/AGENTS.md',
+    )
+    expect(body.docs.instructionFullReference).toBe(
+      'https://openagents.com/AGENTS.md',
+    )
     expect(body.docs.heartbeat).toBe('https://openagents.com/HEARTBEAT.md')
     expect(body.docs.rules).toBe('https://openagents.com/RULES.md')
     expect(body.docs.packageMetadata).toBe('https://openagents.com/skill.json')
-    expect(body.docs.instructionSha256).toBe(OpenAgentsAgentOnboardingSha256)
+    expect(body.docs.instructionCoreSha256).toBe(OpenAgentsAgentCoreSha256)
+    expect(body.docs.instructionSha256).toBe(OpenAgentsAgentCoreSha256)
+    expect(body.docs.instructionCoreSourceRef).toBe(
+      'https://github.com/OpenAgentsInc/openagents/blob/main/apps/openagents.com/docs/live/AGENTS-CORE.md',
+    )
     expect(body.docs.instructionVersion).toBe(OpenAgentsAgentOnboardingVersion)
-    expect(body.docs.skill).toBe('https://openagents.com/AGENTS.md')
-    expect(body.docs.skillSha256).toBe(OpenAgentsAgentOnboardingSha256)
+    expect(body.docs.skill).toBe('https://openagents.com/AGENTS-CORE.md')
+    expect(body.docs.skillSha256).toBe(OpenAgentsAgentCoreSha256)
     expect(body.docs.skillVersion).toBe(OpenAgentsAgentOnboardingVersion)
+    expect(body.docs.instructionFullReference).toBe(
+      'https://openagents.com/AGENTS.md',
+    )
+    expect(OpenAgentsAgentOnboardingSha256).toMatch(/^[a-f0-9]{64}$/u)
     expect(body.authModes).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: 'public', status: 'available' }),
@@ -102,8 +122,13 @@ describe('OpenAgents capability manifest route', () => {
       expect.arrayContaining([
         expect.objectContaining({
           auth: 'public',
-          href: 'https://openagents.com/AGENTS.md',
+          href: 'https://openagents.com/AGENTS-CORE.md',
           id: 'agent_instructions',
+        }),
+        expect.objectContaining({
+          auth: 'public',
+          href: 'https://openagents.com/AGENTS.md',
+          id: 'agent_full_reference',
         }),
         expect.objectContaining({
           auth: 'public',
@@ -133,9 +158,51 @@ describe('OpenAgents capability manifest route', () => {
         }),
         expect.objectContaining({
           auth: 'public',
+          href: 'https://github.com/OpenAgentsInc/openagents/blob/main/docs/launch/2026-06-18-agent-activity-endpoint-guide.md',
+          id: 'public_activity_evidence_spine',
+          description: expect.stringContaining('activity timeline'),
+        }),
+        expect.objectContaining({
+          auth: 'public',
           href: 'https://openagents.com/api/public/product-promises',
           id: 'product_promises',
           description: expect.stringContaining('version'),
+        }),
+        expect.objectContaining({
+          auth: 'public',
+          href: 'https://openagents.com/api/public/tassadar-run-summary',
+          id: 'public_tassadar_run_summary',
+          description: expect.stringContaining('real-vs-simulation'),
+        }),
+        expect.objectContaining({
+          auth: 'public',
+          href: 'https://openagents.com/api/public/activity-timeline?since={cursor}&limit={limit}',
+          id: 'public_activity_timeline',
+          description: expect.stringContaining('projection_gap'),
+        }),
+        expect.objectContaining({
+          auth: 'public',
+          href: 'https://openagents.com/api/public/activity-timeline/stream?since={cursor}&limit={limit}',
+          id: 'public_activity_timeline_stream',
+          description: expect.stringContaining('Last-Event-ID'),
+        }),
+        expect.objectContaining({
+          auth: 'public',
+          href: 'https://openagents.com/api/public/training/runs/{trainingRunRef}/settlements',
+          id: 'public_training_run_settlements',
+          description: expect.stringContaining('realBitcoinMoved'),
+        }),
+        expect.objectContaining({
+          auth: 'public',
+          href: 'https://openagents.com/api/public/training/verification-challenges/{challengeRef}',
+          id: 'public_training_verification_challenge',
+          description: expect.stringContaining('single training verification challenge'),
+        }),
+        expect.objectContaining({
+          auth: 'public',
+          href: 'https://openagents.com/api/public/proof-replays?ref={replayRef}&mode=activity-timeline&from={fromIso}&to={toIso}',
+          id: 'public_proof_replays',
+          description: expect.stringContaining('bounded generated public-activity timeline replays'),
         }),
         expect.objectContaining({
           auth: 'public',
@@ -244,6 +311,11 @@ describe('OpenAgents capability manifest route', () => {
           auth: 'registered_agent_token_with_customer_orders.read',
           href: 'https://openagents.com/api/autopilot/work/{workOrderRef}/events',
           id: 'autopilot_work_events',
+        }),
+        expect.objectContaining({
+          auth: 'browser_session_or_registered_agent_token_with_customer_orders.read',
+          href: 'https://openagents.com/api/autopilot/decisions',
+          id: 'autopilot_decisions_queue',
         }),
         expect.objectContaining({
           auth: 'browser_session',
@@ -405,6 +477,12 @@ describe('OpenAgents capability manifest route', () => {
           auth: 'registered_agent_token_with_customer_orders.write_and_idempotency_key',
           href: 'https://openagents.com/api/autopilot/work',
           id: 'submit_autopilot_work',
+          status: 'available',
+        }),
+        expect.objectContaining({
+          auth: 'browser_session_or_registered_agent_token_with_customer_orders.write_and_idempotency_key',
+          href: 'https://openagents.com/api/autopilot/decisions/{decisionRef}/actions',
+          id: 'act_on_autopilot_decision',
           status: 'available',
         }),
         expect.objectContaining({

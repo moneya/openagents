@@ -69,6 +69,14 @@ export {
   type BlueprintProgramSignature as BlueprintProgramSignatureType,
   BlueprintProgramStatus,
   type BlueprintProgramStatus as BlueprintProgramStatusType,
+  BlueprintReplayModuleBinding,
+  type BlueprintReplayModuleBinding as BlueprintReplayModuleBindingType,
+  BlueprintTassadarModuleStepBinding,
+  type BlueprintTassadarModuleStepBinding as BlueprintTassadarModuleStepBindingType,
+  BlueprintTassadarModuleStepExecutionMode,
+  type BlueprintTassadarModuleStepExecutionMode as BlueprintTassadarModuleStepExecutionModeType,
+  BlueprintTassadarModuleStepKind,
+  type BlueprintTassadarModuleStepKind as BlueprintTassadarModuleStepKindType,
   BlueprintProgramToolScope,
   type BlueprintProgramToolScope as BlueprintProgramToolScopeType,
   BlueprintProgramType,
@@ -84,6 +92,7 @@ export {
   BlueprintValidationMode,
   type BlueprintValidationMode as BlueprintValidationModeType,
   blueprintProgramSignatureSupportsFamily,
+  blueprintProgramToolScopeIsTassadarModuleStep,
   blueprintProgramTypeRequiredReceiptRefs,
   blueprintProgramTypeRequiresApproval,
 } from './schemas/program'
@@ -226,6 +235,26 @@ export {
 } from './repositories/program-runs'
 
 export {
+  BLUEPRINT_TASSADAR_DENSE_MODULE_CLAIM_CLASS,
+  BLUEPRINT_TASSADAR_MODULE_REGISTRY_SCHEMA_VERSION,
+  BLUEPRINT_TASSADAR_MODULE_REGISTRY_VERSION_REF,
+  BLUEPRINT_TASSADAR_MODULE_REQUIRED_TRUST_POSTURE,
+  BlueprintTassadarModuleRegistryEntry,
+  type BlueprintTassadarModuleRegistryEntry as BlueprintTassadarModuleRegistryEntryType,
+  type BlueprintTassadarModuleRegistryModuleKind as BlueprintTassadarModuleRegistryModuleKindType,
+  BlueprintTassadarModuleRegistryProjection,
+  type BlueprintTassadarModuleRegistryProjection as BlueprintTassadarModuleRegistryProjectionType,
+  BlueprintTassadarModuleRegistryResolveError,
+  BlueprintTassadarModuleRegistryResolveInput,
+  type BlueprintTassadarModuleRegistryResolveInput as BlueprintTassadarModuleRegistryResolveInputType,
+  type BlueprintTassadarModuleRegistryResolver,
+  blueprintTassadarModuleRegistryProjectionIsSafe,
+  listBlueprintTassadarModuleRegistry,
+  resolveBlueprintTassadarModuleRegistryEntry,
+  seedBlueprintTassadarModuleRegistryEntries,
+} from './repositories/tassadar-module-registry'
+
+export {
   assertProgramRunEvidenceOnly,
   BlueprintProgramRunDirectEffectDenied,
   BlueprintProgramRunDirectEffectKind,
@@ -233,6 +262,74 @@ export {
   denyProgramRunDirectEffect,
   type BlueprintProgramRunAuthorityError,
 } from './services/program-run-authority'
+
+export {
+  BlueprintChatProgramResponse,
+  type BlueprintChatProgramResponse as BlueprintChatProgramResponseType,
+  BlueprintChatProgramRuntimeError,
+  type BlueprintChatProgramRuntimePrimitives,
+  BlueprintChatProgramRuntimeStage,
+  type BlueprintChatProgramRuntimeStage as BlueprintChatProgramRuntimeStageType,
+  BlueprintChatProgramSessionAdapter,
+  type BlueprintChatProgramSessionAdapter as BlueprintChatProgramSessionAdapterType,
+  BlueprintChatProgramSessionEvent,
+  type BlueprintChatProgramSessionEvent as BlueprintChatProgramSessionEventType,
+  BlueprintChatProgramSessionLane,
+  type BlueprintChatProgramSessionLane as BlueprintChatProgramSessionLaneType,
+  BlueprintChatProgramSessionResult,
+  type BlueprintChatProgramSessionResult as BlueprintChatProgramSessionResultType,
+  type BlueprintChatProgramSessionRuntime,
+  BlueprintChatProgramSessionSpawnInput,
+  type BlueprintChatProgramSessionSpawnInput as BlueprintChatProgramSessionSpawnInputType,
+  BlueprintChatProgramSignatureSelection,
+  type BlueprintChatProgramSignatureSelection as BlueprintChatProgramSignatureSelectionType,
+  BlueprintChatProgramToolDefinition,
+  type BlueprintChatProgramToolDefinition as BlueprintChatProgramToolDefinitionType,
+  BlueprintChatProgramToolMenu,
+  type BlueprintChatProgramToolMenu as BlueprintChatProgramToolMenuType,
+  BlueprintChatProgramToolPolicy,
+  type BlueprintChatProgramToolPolicy as BlueprintChatProgramToolPolicyType,
+  BlueprintChatProgramTurnInput,
+  type BlueprintChatProgramTurnInput as BlueprintChatProgramTurnInputType,
+  BlueprintChatProgramTurnResult,
+  type BlueprintChatProgramTurnResult as BlueprintChatProgramTurnResultType,
+  type BlueprintChatProgramTurnError,
+  BlueprintChatProgramUsage,
+  type BlueprintChatProgramUsage as BlueprintChatProgramUsageType,
+  blueprintChatProgramTurnResultIsSafe,
+  buildBlueprintChatProgramToolMenu,
+  executeBlueprintChatProgramTurn,
+  selectBlueprintChatProgramSignature,
+  systemBlueprintChatProgramRuntimePrimitives,
+  type ExecuteBlueprintChatProgramTurnInput,
+} from './services/chat-program-runtime'
+
+export {
+  BLUEPRINT_TASSADAR_DENSE_FIXTURE_MODULE_REF,
+  BLUEPRINT_TASSADAR_LINKED_FIXTURE_MODULE_REF,
+  BLUEPRINT_TASSADAR_MODULE_FIXTURE_REGISTRY_REF,
+  BlueprintTassadarModuleStepEvidence,
+  type BlueprintTassadarModuleStepEvidence as BlueprintTassadarModuleStepEvidenceType,
+  BlueprintTassadarModuleStepRefused,
+  BlueprintTassadarModuleStepUnsafe,
+  BlueprintTassadarModuleStepVerdict,
+  type BlueprintTassadarModuleStepVerdict as BlueprintTassadarModuleStepVerdictType,
+  executeBlueprintTassadarModuleStep,
+  type BlueprintTassadarModuleStepError,
+} from './services/tassadar-module-step'
+
+export {
+  BlueprintReplayModuleError,
+  BlueprintReplayModuleEvidence,
+  type BlueprintReplayModuleEvidence as BlueprintReplayModuleEvidenceType,
+  type BlueprintReplayModuleRuntime,
+  type BlueprintReplayModuleRuntimeInput,
+  BlueprintReplayModuleViewSpec,
+  type BlueprintReplayModuleViewSpec as BlueprintReplayModuleViewSpecType,
+  DEFAULT_BLUEPRINT_REPLAY_SLUG,
+  executeBlueprintReplayModule,
+  makePublicProofReplayModuleRuntime,
+} from './services/replay-module'
 
 export {
   assertBlueprintContinuationDecisionEvidenceOnly,
@@ -473,3 +570,22 @@ export {
   blueprintContractExportSeedHasCatalogs,
   blueprintContractExportSeedIsPrivateDataSafe,
 } from './exports/contract-export'
+
+export {
+  getVerticalPack,
+  servicesBusinessVerticalPack,
+  VerticalPack,
+  type VerticalPack as VerticalPackType,
+  VerticalPackEthicalMarketingPolicy,
+  type VerticalPackEthicalMarketingPolicy as VerticalPackEthicalMarketingPolicyType,
+  verticalPackRegistry,
+} from './vertical-pack'
+
+export {
+  DELIVERY_PIPELINE_PROGRAMS,
+  DELIVERY_PIPELINE_PROGRAM_TYPES,
+  DELIVERY_PIPELINE_STAGES,
+  DELIVERY_PIPELINE_STAGE_ORDER,
+  deliveryPipelineProgramForStage,
+  deliveryPipelineProgramTypeId,
+} from './delivery-pipeline-programs'

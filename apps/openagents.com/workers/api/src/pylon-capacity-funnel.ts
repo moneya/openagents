@@ -235,13 +235,25 @@ const stageAtLeast = (
   threshold: PylonCapacityFunnelStage,
 ): boolean => stageRank[stage] >= stageRank[threshold]
 
+// Platform-issued dark-capacity and device-admission taxonomy
+// constants are closed enums; the substring heuristic must not reject
+// its own taxonomy (the live funnel 500 of 2026-06-11:
+// dark_capacity.public.wallet_not_ready contains 'wallet' and fired
+// for the first time when the first capability-eligible, wallet-unready
+// Pylon came online). device_admission.public.* reason codes are the
+// reasoned hardware admission gates of issue #4852 (Pluralis roadmap
+// P1.4) surfacing through the same funnel reason-ref channel.
+const platformIssuedDarkReasonPattern =
+  /^(dark_capacity|device_admission)\.public\.[a-z0-9_]+$/
+
 const assertSafeRefs = (
   label: string,
   refs: ReadonlyArray<string>,
 ): void => {
   const unsafe = uniqueRefs(refs).find(ref =>
     !safeRefPattern.test(ref) ||
-    universallyUnsafeRefPattern.test(ref) ||
+    (!platformIssuedDarkReasonPattern.test(ref) &&
+      universallyUnsafeRefPattern.test(ref)) ||
     isoTimestampPattern.test(ref)
   )
 
@@ -401,7 +413,19 @@ const projectionText = (
 export const pylonCapacityProjectionHasPrivateMaterial = (
   projection: PylonCapacityFunnelProjection,
 ): boolean => {
+  // Strip platform-issued dark-reason and device-admission taxonomy
+  // constants before the substring scan - the closed enums must not
+  // trip their own scanner (dark_capacity.public.wallet_not_ready
+  // contains 'wallet').
   const text = projectionText(projection)
+    .replaceAll(
+      /dark_capacity\.public\.[a-z0-9_]+/g,
+      'dark_capacity.public.reason',
+    )
+    .replaceAll(
+      /device_admission\.public\.[a-z0-9_]+/g,
+      'device_admission.public.reason',
+    )
   const pattern = audienceUnsafePattern(projection.audience)
 
   return universallyUnsafeRefPattern.test(text) ||

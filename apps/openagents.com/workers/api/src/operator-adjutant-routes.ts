@@ -1,4 +1,4 @@
-import { containsProviderSecretMaterial } from '@openagents/provider-account-schema'
+import { containsProviderSecretMaterial } from '@openagentsinc/provider-account-schema'
 import { Effect, Match as M, Schema as S } from 'effect'
 
 import {
@@ -1137,6 +1137,24 @@ const decodeJsonBody = <Schema extends S.Top>(
     ),
   )
 
+type AdjutantAssignmentServiceShape = ReturnType<
+  typeof makeAdjutantAssignmentService
+>
+
+const readRequiredAdjutantAssignment = (
+  assignments: AdjutantAssignmentServiceShape,
+  assignmentId: string,
+) =>
+  Effect.gen(function* () {
+    const assignment = yield* assignments.readAssignmentById(assignmentId)
+
+    if (assignment === null) {
+      return yield* new AdjutantAssignmentNotFound({ assignmentId })
+    }
+
+    return assignment
+  })
+
 const requireAdminSession = <
   Session extends OperatorAdjutantSession,
   Bindings extends OperatorAdjutantEnv,
@@ -1198,18 +1216,33 @@ const readOperatorGitHubIdentityToken = async (
   }
 }
 
+const rejectUnlessMethod = (
+  request: Request,
+  allowedMethods: readonly string[],
+): HttpResponse | null =>
+  allowedMethods.includes(request.method)
+    ? null
+    : methodNotAllowed([...allowedMethods])
+
 const runRoute = (
   env: OperatorAdjutantEnv,
+  request: Request,
+  allowedMethods: readonly string[],
   effect: Effect.Effect<
     HttpResponse,
     OperatorAdjutantRouteError,
     AdjutantAssignmentService
   >,
-): Effect.Effect<HttpResponse> =>
-  effect.pipe(
-    Effect.provide(AdjutantAssignmentService.layer(env)),
-    Effect.catch(error => Effect.succeed(routeErrorResponse(error))),
-  )
+): Effect.Effect<HttpResponse> => {
+  const methodRejection = rejectUnlessMethod(request, allowedMethods)
+
+  return methodRejection === null
+    ? effect.pipe(
+        Effect.provide(AdjutantAssignmentService.layer(env)),
+        Effect.catch(error => Effect.succeed(routeErrorResponse(error))),
+      )
+    : Effect.succeed(methodRejection)
+}
 
 const preflightD1Effect = <A>(
   operation: string,
@@ -4470,11 +4503,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -4509,11 +4540,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -4543,11 +4572,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['GET'],
       Effect.gen(function* () {
-        if (request.method !== 'GET') {
-          return methodNotAllowed(['GET'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -4572,11 +4599,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['GET'],
       Effect.gen(function* () {
-        if (request.method !== 'GET') {
-          return methodNotAllowed(['GET'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -4584,11 +4609,7 @@ export const makeOperatorAdjutantRoutes = <
           ctx,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const review = yield* readAssignmentReview(
           openAgentsDatabase(env),
@@ -4611,11 +4632,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['GET'],
       Effect.gen(function* () {
-        if (request.method !== 'GET') {
-          return methodNotAllowed(['GET'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -4623,11 +4642,7 @@ export const makeOperatorAdjutantRoutes = <
           ctx,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const enrichment = yield* readEnrichmentReview(
           openAgentsDatabase(env),
@@ -4650,11 +4665,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -4666,11 +4679,7 @@ export const makeOperatorAdjutantRoutes = <
           EnqueueOperatorAdjutantEnrichmentRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const db = openAgentsDatabase(env)
         const jobs = makeAdjutantEnrichmentJobService(db)
@@ -4746,11 +4755,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['GET', 'POST'],
       Effect.gen(function* () {
-        if (request.method !== 'GET' && request.method !== 'POST') {
-          return methodNotAllowed(['GET', 'POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -4758,11 +4765,7 @@ export const makeOperatorAdjutantRoutes = <
           ctx,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const db = openAgentsDatabase(env)
         const service = makeAdjutantResearchPolicyService(db)
@@ -4821,11 +4824,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -4837,11 +4838,7 @@ export const makeOperatorAdjutantRoutes = <
           PlanOperatorAdjutantEnrichmentRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const config = getOpenAgentsWorkerConfig(env)
         const plan = yield* buildEnrichmentPlan(
@@ -4869,11 +4866,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -4885,11 +4880,7 @@ export const makeOperatorAdjutantRoutes = <
           RunOperatorAdjutantEnrichmentRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const config = getOpenAgentsWorkerConfig(env)
 
@@ -5072,11 +5063,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -5088,11 +5077,7 @@ export const makeOperatorAdjutantRoutes = <
           CreateOperatorAdjutantPublicSourceRefRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const db = openAgentsDatabase(env)
         const order =
@@ -5133,11 +5118,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -5149,11 +5132,7 @@ export const makeOperatorAdjutantRoutes = <
           ReviewOperatorAdjutantPublicSourceRefRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const db = openAgentsDatabase(env)
 
@@ -5191,11 +5170,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -5207,11 +5184,7 @@ export const makeOperatorAdjutantRoutes = <
           ReviewOperatorAdjutantSourceCardRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const db = openAgentsDatabase(env)
         const ledger = makeAdjutantEnrichmentLedger(db)
@@ -5283,11 +5256,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -5299,11 +5270,7 @@ export const makeOperatorAdjutantRoutes = <
           ReviewOperatorAdjutantResearchBriefRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const db = openAgentsDatabase(env)
         const briefService = makeAdjutantResearchBriefService(db)
@@ -5410,11 +5377,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -5426,11 +5391,7 @@ export const makeOperatorAdjutantRoutes = <
           PreflightOperatorAdjutantAssignmentRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const targetUser: OperatorAdjutantTargetUser = {
           displayName: session.user.email,
@@ -5527,11 +5488,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -5543,11 +5502,7 @@ export const makeOperatorAdjutantRoutes = <
           GenerateOperatorAdjutantTaskPacketRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const site =
           assignment.siteId === null
@@ -5654,11 +5609,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -5670,11 +5623,7 @@ export const makeOperatorAdjutantRoutes = <
           KeepCurrentOperatorAdjutantTaskPacketRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const db = openAgentsDatabase(env)
         const latestApprovedBrief = yield* latestApprovedResearchBrief(
@@ -5718,11 +5667,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -5749,11 +5696,7 @@ export const makeOperatorAdjutantRoutes = <
         }
 
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         if (
           assignment.status === 'complete' ||
@@ -5836,11 +5779,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -5852,11 +5793,7 @@ export const makeOperatorAdjutantRoutes = <
           LaunchOperatorAdjutantAssignmentRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         const targetUser: OperatorAdjutantTargetUser = {
           displayName: session.user.email,
@@ -6135,11 +6072,9 @@ export const makeOperatorAdjutantRoutes = <
   ) =>
     runRoute(
       env,
+      request,
+      ['POST'],
       Effect.gen(function* () {
-        if (request.method !== 'POST') {
-          return methodNotAllowed(['POST'])
-        }
-
         const session = yield* requireAdminSession(
           dependencies,
           request,
@@ -6151,11 +6086,7 @@ export const makeOperatorAdjutantRoutes = <
           CreateOperatorAdjutantAdjustmentRequest,
         )
         const assignments = yield* AdjutantAssignmentService
-        const assignment = yield* assignments.readAssignmentById(assignmentId)
-
-        if (assignment === null) {
-          return yield* new AdjutantAssignmentNotFound({ assignmentId })
-        }
+        const assignment = yield* readRequiredAdjutantAssignment(assignments, assignmentId)
 
         if (assignment.siteId === null) {
           return yield* new OperatorAdjutantBadRequest({

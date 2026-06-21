@@ -1,7 +1,7 @@
 import {
   PublicProviderAccount,
   PublicProviderConnectionAttempt,
-} from '@openagents/provider-account-schema'
+} from '@openagentsinc/provider-account-schema'
 import { Schema as S } from 'effect'
 
 export const Session = S.Struct({
@@ -141,6 +141,7 @@ export const BillingLedgerSource = S.Literals([
   'coupon',
   'credit_card_placeholder',
   'stripe_checkout',
+  'stripe_auto_top_up',
   'container_usage',
   'codex_usage',
   'manual_adjustment',
@@ -170,6 +171,68 @@ export const BillingActiveRun = S.Struct({
 })
 export type BillingActiveRun = typeof BillingActiveRun.Type
 
+export const BillingSavedPaymentMethod = S.Struct({
+  brand: S.NullOr(S.String),
+  expMonth: S.NullOr(S.Number),
+  expYear: S.NullOr(S.Number),
+  last4: S.NullOr(S.String),
+  status: S.Literals(['active', 'detached', 'failed', 'requires_action']),
+  stripePaymentMethodId: S.String,
+  updatedAt: S.String,
+})
+export type BillingSavedPaymentMethod = typeof BillingSavedPaymentMethod.Type
+
+export const BillingAutoTopUpPolicy = S.Struct({
+  amountCents: S.Number,
+  amountFormatted: S.String,
+  enabled: S.Boolean,
+  monthlyCapCents: S.Number,
+  monthlyCapFormatted: S.String,
+  pauseReason: S.NullOr(S.String),
+  spentThisMonthCents: S.Number,
+  spentThisMonthFormatted: S.String,
+  status: S.Literals(['active', 'disabled', 'paused']),
+  thresholdCents: S.Number,
+  thresholdFormatted: S.String,
+  updatedAt: S.String,
+})
+export type BillingAutoTopUpPolicy = typeof BillingAutoTopUpPolicy.Type
+
+export const BillingAutoTopUpEvent = S.Struct({
+  amountCents: S.Number,
+  amountFormatted: S.String,
+  createdAt: S.String,
+  id: S.String,
+  reason: S.NullOr(S.String),
+  status: S.Literals([
+    'cap_reached',
+    'declined',
+    'requires_payment_method',
+    'skipped',
+    'succeeded',
+  ]),
+})
+export type BillingAutoTopUpEvent = typeof BillingAutoTopUpEvent.Type
+
+export const BillingAutoTopUpState = S.Struct({
+  events: S.Array(BillingAutoTopUpEvent),
+  policy: BillingAutoTopUpPolicy,
+  savedPaymentMethod: S.NullOr(BillingSavedPaymentMethod),
+})
+export type BillingAutoTopUpState = typeof BillingAutoTopUpState.Type
+
+// One purchasable credit package, projected from the server-configured Stripe
+// catalog. `id` is the real catalog id the billing page POSTs to
+// `/api/billing/checkout`, so the UI never sends an id the server cannot honor.
+export const BillingCreditPackage = S.Struct({
+  id: S.String,
+  label: S.String,
+  amountCents: S.Number,
+  amountFormatted: S.String,
+  currency: S.Literal('USD'),
+})
+export type BillingCreditPackage = typeof BillingCreditPackage.Type
+
 export const BillingSummary = S.Struct({
   currency: S.Literal('USD'),
   status: S.Literals(['active', 'suspended']),
@@ -181,8 +244,13 @@ export const BillingSummary = S.Struct({
     containerCentsPerMinute: S.Number,
     codexCentsPerThousandTokens: S.Number,
   }),
+  // The purchasable catalog the billing page renders buy buttons from. Every
+  // server producer of a summary attaches this (empty when card checkout is
+  // not configured), so it is a required field rather than an optional.
+  packages: S.Array(BillingCreditPackage),
   recentEntries: S.Array(BillingLedgerEntry),
   activeRuns: S.Array(BillingActiveRun),
+  autoTopUp: BillingAutoTopUpState,
 })
 export type BillingSummary = typeof BillingSummary.Type
 
@@ -197,8 +265,27 @@ export const emptyBillingSummary = (): BillingSummary => ({
     containerCentsPerMinute: 5,
     codexCentsPerThousandTokens: 2,
   },
+  packages: [],
   recentEntries: [],
   activeRuns: [],
+  autoTopUp: {
+    events: [],
+    policy: {
+      amountCents: 2500,
+      amountFormatted: '$25.00',
+      enabled: false,
+      monthlyCapCents: 10000,
+      monthlyCapFormatted: '$100.00',
+      pauseReason: null,
+      spentThisMonthCents: 0,
+      spentThisMonthFormatted: '$0.00',
+      status: 'disabled',
+      thresholdCents: 500,
+      thresholdFormatted: '$5.00',
+      updatedAt: '',
+    },
+    savedPaymentMethod: null,
+  },
 })
 
 export const BillingSummaryResponse = S.Struct({
@@ -215,6 +302,13 @@ export const BillingCheckoutResponse = S.Struct({
   status: S.Literal('checkout_created'),
 })
 export type BillingCheckoutResponse = typeof BillingCheckoutResponse.Type
+
+export const BillingSetupIntentResponse = S.Struct({
+  clientSecret: S.String,
+  setupIntentId: S.String,
+  status: S.String,
+})
+export type BillingSetupIntentResponse = typeof BillingSetupIntentResponse.Type
 
 export const ProviderAccountBundle = S.Struct({
   accounts: S.Array(PublicProviderAccount),

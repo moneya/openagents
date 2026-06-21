@@ -1,4 +1,4 @@
-import { notFound } from '@openagents/sync-worker'
+import { notFound } from '@openagentsinc/sync-worker'
 import { Effect, Match as M } from 'effect'
 
 import {
@@ -8,6 +8,7 @@ import {
 import { methodNotAllowed, noStoreJsonResponse } from './http/responses'
 
 export type OpenAgentsCompanionFilePath =
+  | '/AGENTS-CORE.md'
   | '/HEARTBEAT.md'
   | '/RULES.md'
   | '/skill.json'

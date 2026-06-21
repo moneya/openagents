@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 
 const forumCli = await import('./forum.mjs')
@@ -91,6 +94,45 @@ describe('forum CLI helpers', () => {
     expect(summary.headers.authorization).toBe('Bearer <redacted>')
   })
 
+  test('reads an agent apiKey from a local credential file for replies', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openagents-forum-cli-'))
+    const credentialFile = join(dir, 'agent.json')
+
+    try {
+      await writeFile(
+        credentialFile,
+        JSON.stringify({
+          apiKey: 'test_agent_token_from_file',
+          displayName: 'Local Agent',
+        }),
+      )
+      const parsed = forumCli.parseForumArgs([
+        'reply',
+        '--credential-file',
+        credentialFile,
+        '--topic',
+        'topic_1',
+        '--body',
+        'Public-safe reply from file auth.',
+      ])
+      const request = await forumCli.buildForumRequest(parsed, {})
+      const summary = forumCli.safeRequestSummary(request)
+
+      expect(request.method).toBe('POST')
+      expect(request.path).toBe('/api/forum/topics/topic_1/posts')
+      expect(request.headers.authorization).toBe(
+        'Bearer test_agent_token_from_file',
+      )
+      expect(request.headers['idempotency-key']).toMatch(
+        /^forum-reply-[a-f0-9]{32}$/,
+      )
+      expect(JSON.stringify(summary)).not.toContain('test_agent_token_from_file')
+      expect(summary.headers.authorization).toBe('Bearer <redacted>')
+    } finally {
+      await rm(dir, { force: true, recursive: true })
+    }
+  })
+
   test('builds a self-claim tip wallet request with repeated public readiness refs', async () => {
     const parsed = forumCli.parseForumArgs([
       'claim-tip-wallet',
@@ -125,8 +167,7 @@ describe('forum CLI helpers', () => {
       /^forum-tip-wallet-claim-[a-f0-9]{32}$/,
     )
     expect(request.body).toMatchObject({
-      bolt12Offer:
-        'lno1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3j',
+      bolt12Offer: 'lno1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3j',
       caveatRefs: ['caveat.public.forum_tip_recipient.claim_doc_pending'],
       claimPolicyRefs: ['policy.public.forum_tip_recipient.claimed_by_cli'],
       custodyPolicyRefs: ['policy.public.forum_tip_recipient.self_custody'],
@@ -149,6 +190,48 @@ describe('forum CLI helpers', () => {
     expect(JSON.stringify(summary)).not.toContain(
       'receive_capability.public.mdk_agent_wallet.route_test',
     )
+  })
+
+  test('builds a Spark self-claim tip wallet request without a BOLT 12 offer', async () => {
+    const sparkAddress =
+      'spark1pgssyuuuhnrrdjswal5c3s3rafw9w3y5dd4cjy3duxlf7hjzkp0rqx6dj6mrhu'
+    const parsed = forumCli.parseForumArgs([
+      'claim-tip-wallet',
+      '--wallet-ref',
+      'wallet.public.spark.route_test',
+      '--receive-capability-ref',
+      'receive_capability.public.spark.route_test',
+      '--spark-address',
+      sparkAddress,
+      '--readiness-ref',
+      'readiness.public.spark_address.offline_receive_ready',
+      '--readiness-ref',
+      'readiness.public.spark_primary.agent_balance',
+      '--custody-policy-ref',
+      'policy.public.forum_tip_recipient.spark_self_custody',
+    ])
+    const request = await forumCli.buildForumRequest(parsed, {
+      OPENAGENTS_AGENT_TOKEN: 'oa_agent_secret_123',
+    })
+    const summary = forumCli.safeRequestSummary(request)
+
+    expect(request.method).toBe('POST')
+    expect(request.path).toBe('/api/forum/tip-recipient-wallets/claims')
+    expect(request.body).toMatchObject({
+      bolt12Offer: null,
+      sparkAddress,
+      custodyPolicyRefs: [
+        'policy.public.forum_tip_recipient.spark_self_custody',
+      ],
+      providerClass: 'mdk_agent_wallet',
+      readinessRefs: [
+        'readiness.public.spark_address.offline_receive_ready',
+        'readiness.public.spark_primary.agent_balance',
+      ],
+      receiveCapabilityRef: 'receive_capability.public.spark.route_test',
+      walletRef: 'wallet.public.spark.route_test',
+    })
+    expect(JSON.stringify(summary)).not.toContain(sparkAddress)
   })
 
   test('builds a recipient settlement claim request with repeated evidence refs', async () => {
@@ -199,7 +282,7 @@ describe('forum CLI helpers', () => {
     ])
 
     await expect(forumCli.buildForumRequest(parsed, {})).rejects.toThrow(
-      'OPENAGENTS_AGENT_TOKEN is required for reply.',
+      'OPENAGENTS_AGENT_TOKEN or --credential-file is required for reply.',
     )
   })
 
@@ -1140,7 +1223,10 @@ describe('forum CLI helpers', () => {
       }
 
       if (request.path === '/api/forum/posts/post_1/direct-tips') {
-        expect(request.body.amount).toStrictEqual({ amount: 15, asset: 'sats' })
+        expect(request.body.amount).toStrictEqual({
+          amount: 15,
+          asset: 'sats',
+        })
         expect(request.body.paymentEvidence).toMatchObject({
           paymentMode: 'live',
           providerRef: 'provider.public.mdk_agent_wallet',
@@ -1488,6 +1574,353 @@ describe('forum CLI helpers', () => {
     })
   })
 
+  test('tip-post recovers a completed wallet payment after send timeout and records confirmed evidence', async () => {
+    const walletExecutor = readyWalletExecutor()
+    const paymentsSeen: string[] = []
+    const requestJson = vi.fn(async request => {
+      if (request.path === '/api/forum/posts/post_1') {
+        return {
+          post: {
+            permalink: 'https://openagents.com/forum/t/topic_1#post-post_1',
+            postId: 'post_1',
+            tipRecipientReadiness: {
+              actorRef: 'actor.recipient',
+              directPayment: {
+                bolt12Offer:
+                  'lno1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3j',
+                kind: 'bolt12_offer',
+                settlementAuthority: 'recipient_wallet_direct',
+              },
+              state: 'ready',
+              tippingAvailable: true,
+            },
+          },
+        }
+      }
+
+      if (request.path === '/api/forum/posts/post_1/direct-tips') {
+        expect(request.idempotencyKey).toMatch(
+          /^forum-direct-tip-recovered-payment-[a-f0-9]{32}$/,
+        )
+        expect(request.idempotencyKey).not.toContain('wallet_payment_1')
+        expect(request.body.paymentEvidence).toMatchObject({
+          paymentMode: 'live',
+          providerRef: 'provider.public.mdk_agent_wallet',
+          status: 'confirmed',
+        })
+        expect(JSON.stringify(request)).not.toContain('lno1qpzry9')
+        expect(JSON.stringify(request)).not.toContain('wallet_payment_1')
+
+        return {
+          amount: { amount: 15, asset: 'sats' },
+          attemptId: '77777777-7777-4777-8777-777777777777',
+          idempotent: true,
+          payerActorRef: 'agent:payer',
+          paymentEvidence: request.body.paymentEvidence,
+          postId: 'post_1',
+          receipt: {
+            receiptRef: 'receipt.forum.direct.recovered',
+            tipSettlement: {
+              creatorReceivedSpendableValue: true,
+              state: 'settled',
+            },
+          },
+          recipientActorRef: 'actor.recipient',
+          status: 'settled',
+          targetPostPermalink:
+            'https://openagents.com/forum/t/topic_1#post-post_1',
+        }
+      }
+
+      throw new Error(`Unexpected request: ${request.path}`)
+    })
+    walletExecutor.mockImplementation(async commandSpec => {
+      if (commandSpec.command === 'send') {
+        return {
+          exitCode: 124,
+          stdout: '{"paymentId":"wallet_payment_1"}',
+          timedOut: true,
+        }
+      }
+
+      if (commandSpec.command === 'payments') {
+        paymentsSeen.push('payments')
+
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            payments: [
+              {
+                amountSats: 16,
+                direction: 'outbound',
+                paymentId: 'wallet_payment_1',
+                status: 'completed',
+                timestamp: 100,
+              },
+              {
+                amountSats: 15,
+                direction: 'outbound',
+                paymentId: 'wallet_payment_1',
+                status: paymentsSeen.length === 1 ? 'pending' : 'settled',
+                timestamp: paymentsSeen.length,
+              },
+            ],
+          }),
+        }
+      }
+
+      return readyWalletExecutor()(commandSpec)
+    })
+
+    const output = await forumCli.runForumCli(
+      [
+        'tip-post',
+        '--post',
+        'post_1',
+        '--tip-amount',
+        '15',
+        '--approve-live-spend',
+        '--recovery-wait-ms',
+        '2',
+      ],
+      {
+        OPENAGENTS_AGENT_TOKEN: 'oa_agent_secret_123',
+      },
+      {
+        recoveryPollMs: 0,
+        requestJson,
+        sleep: async () => {},
+        walletExecutor,
+      },
+    )
+    const body = JSON.parse(output)
+
+    expect(body).toMatchObject({
+      kind: 'forum_direct_bolt12_tip',
+      livePaymentAttempted: true,
+      payment: {
+        commandRef: 'mdk_agent_wallet.send',
+        recoveredAfterTimeout: true,
+        recoveryPolls: 2,
+        status: 'paid',
+      },
+      receipt: {
+        receiptRef: 'receipt.forum.direct.recovered',
+        tipSettlement: {
+          creatorReceivedSpendableValue: true,
+          state: 'settled',
+        },
+      },
+      status: 'settled',
+    })
+    expect(output).not.toContain('lno1qpzry9')
+    expect(output).not.toContain('wallet_payment_1')
+  })
+
+  test('tip-post reports payment_failed when timeout recovery finds a failed payment', async () => {
+    const walletExecutor = readyWalletExecutor()
+    const requestJson = vi.fn(async request => {
+      if (request.path === '/api/forum/posts/post_1') {
+        return {
+          post: {
+            permalink: 'https://openagents.com/forum/t/topic_1#post-post_1',
+            postId: 'post_1',
+            tipRecipientReadiness: {
+              actorRef: 'actor.recipient',
+              directPayment: {
+                bolt12Offer:
+                  'lno1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3j',
+                kind: 'bolt12_offer',
+                settlementAuthority: 'recipient_wallet_direct',
+              },
+              state: 'ready',
+              tippingAvailable: true,
+            },
+          },
+        }
+      }
+
+      throw new Error(`Unexpected request: ${request.path}`)
+    })
+    walletExecutor.mockImplementation(async commandSpec => {
+      if (commandSpec.command === 'send') {
+        return {
+          exitCode: 124,
+          stdout: '{"paymentId":"wallet_payment_failed"}',
+          timedOut: true,
+        }
+      }
+
+      if (commandSpec.command === 'payments') {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            payments: [
+              {
+                amountSats: 15,
+                direction: 'outbound',
+                paymentId: 'wallet_payment_failed',
+                status: 'failed',
+                timestamp: 1,
+              },
+            ],
+          }),
+        }
+      }
+
+      return readyWalletExecutor()(commandSpec)
+    })
+
+    const output = await forumCli.runForumCli(
+      [
+        'tip-post',
+        '--post',
+        'post_1',
+        '--tip-amount',
+        '15',
+        '--approve-live-spend',
+        '--recovery-wait-ms',
+        '1',
+      ],
+      {
+        OPENAGENTS_AGENT_TOKEN: 'oa_agent_secret_123',
+      },
+      {
+        recoveryPollMs: 0,
+        requestJson,
+        sleep: async () => {},
+        walletExecutor,
+      },
+    )
+    const body = JSON.parse(output)
+
+    expect(body).toMatchObject({
+      payment: {
+        commandRef: 'mdk_agent_wallet.send',
+        reasonRef: 'reason.public.agent_wallet_send_failed',
+        recoveredAfterTimeout: true,
+        status: 'failed',
+      },
+      reasonRef: 'reason.public.agent_wallet_send_failed',
+      receipt: null,
+      status: 'payment_failed',
+    })
+    expect(requestJson).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/api/forum/posts/post_1/direct-tips',
+      }),
+    )
+  })
+
+  test('tip-post keeps recovery_pending when timeout recovery reaches its deadline', async () => {
+    const walletExecutor = readyWalletExecutor()
+    const requestJson = vi.fn(async request => {
+      if (request.path === '/api/forum/posts/post_1') {
+        return {
+          post: {
+            permalink: 'https://openagents.com/forum/t/topic_1#post-post_1',
+            postId: 'post_1',
+            tipRecipientReadiness: {
+              actorRef: 'actor.recipient',
+              directPayment: {
+                bolt12Offer:
+                  'lno1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3j',
+                kind: 'bolt12_offer',
+                settlementAuthority: 'recipient_wallet_direct',
+              },
+              state: 'ready',
+              tippingAvailable: true,
+            },
+          },
+        }
+      }
+
+      if (request.path === '/api/forum/posts/post_1/direct-tips') {
+        expect(request.body.paymentEvidence.status).toBe('observed')
+
+        return {
+          amount: { amount: 15, asset: 'sats' },
+          attemptId: '77777777-7777-4777-8777-777777777777',
+          idempotent: false,
+          payerActorRef: 'agent:payer',
+          paymentEvidence: request.body.paymentEvidence,
+          postId: 'post_1',
+          receipt: null,
+          recipientActorRef: 'actor.recipient',
+          status: 'recovery_pending',
+          targetPostPermalink:
+            'https://openagents.com/forum/t/topic_1#post-post_1',
+        }
+      }
+
+      throw new Error(`Unexpected request: ${request.path}`)
+    })
+    walletExecutor.mockImplementation(async commandSpec => {
+      if (commandSpec.command === 'send') {
+        return {
+          exitCode: 124,
+          stdout: '{"paymentId":"wallet_payment_pending"}',
+          timedOut: true,
+        }
+      }
+
+      if (commandSpec.command === 'payments') {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            payments: [
+              {
+                amountSats: 15,
+                direction: 'outbound',
+                paymentId: 'wallet_payment_pending',
+                status: 'pending',
+                timestamp: 1,
+              },
+            ],
+          }),
+        }
+      }
+
+      return readyWalletExecutor()(commandSpec)
+    })
+
+    const output = await forumCli.runForumCli(
+      [
+        'tip-post',
+        '--post',
+        'post_1',
+        '--tip-amount',
+        '15',
+        '--approve-live-spend',
+        '--recovery-wait-ms',
+        '1',
+      ],
+      {
+        OPENAGENTS_AGENT_TOKEN: 'oa_agent_secret_123',
+      },
+      {
+        recoveryPollMs: 0,
+        requestJson,
+        sleep: async () => {},
+        walletExecutor,
+      },
+    )
+    const body = JSON.parse(output)
+
+    expect(body).toMatchObject({
+      attemptId: '77777777-7777-4777-8777-777777777777',
+      payment: {
+        commandRef: 'mdk_agent_wallet.send',
+        recoveryDeadlineHit: true,
+        recoveryWaitMs: 1,
+        status: 'recovery_pending',
+      },
+      status: 'recovery_pending',
+    })
+    expect(output).not.toContain('lno1qpzry9')
+    expect(output).not.toContain('wallet_payment_pending')
+  })
+
   test('tip-post-smoke strict mode fails when timeout recovery is needed', async () => {
     const walletExecutor = readyWalletExecutor()
     const requestJson = vi.fn(async request => {
@@ -1556,13 +1989,17 @@ describe('forum CLI helpers', () => {
         '--tip-amount',
         '15',
         '--approve-live-spend',
+        '--recovery-wait-ms',
+        '1',
         '--strict-smooth',
       ],
       {
         OPENAGENTS_AGENT_TOKEN: 'oa_agent_secret_123',
       },
       {
+        recoveryPollMs: 0,
         requestJson,
+        sleep: async () => {},
         walletExecutor,
       },
     )
@@ -1602,7 +2039,9 @@ describe('forum CLI helpers', () => {
 describe('forum tip failure classification and self-pay preflight', () => {
   const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
 
-  const syntheticOffer = (records: Array<{ type: number; value: number[] }>) => {
+  const syntheticOffer = (
+    records: Array<{ type: number; value: number[] }>,
+  ) => {
     const bytes: number[] = []
 
     for (const record of records) {
@@ -1642,6 +2081,17 @@ describe('forum tip failure classification and self-pay preflight', () => {
     value: [
       0,
       ...Array.from({ length: 8 }, () => scidByte),
+      2,
+      ...Array.from({ length: 32 }, () => 9),
+      0,
+    ],
+  })
+
+  const lspPubkeyPathRecord = (pubkeyByte: number) => ({
+    type: 16,
+    value: [
+      2,
+      ...Array.from({ length: 32 }, () => pubkeyByte),
       2,
       ...Array.from({ length: 32 }, () => 9),
       0,
@@ -1719,9 +2169,17 @@ describe('forum tip failure classification and self-pay preflight', () => {
     expect(
       forumCli.offersShareSelfPayIdentity(sharedIssuerA, sharedIssuerB),
     ).toBe(true)
-    expect(forumCli.offersShareSelfPayIdentity('not-an-offer', sharedPathA)).toBe(
-      null,
-    )
+    expect(
+      forumCli.offersShareSelfPayIdentity('not-an-offer', sharedPathA),
+    ).toBe(null)
+  })
+
+  test('does not treat a shared LSP introduction pubkey as self-pay identity', () => {
+    const walletA = syntheticOffer([lspPubkeyPathRecord(0x33)])
+    const walletB = syntheticOffer([lspPubkeyPathRecord(0x33)])
+
+    expect(forumCli.bolt12OfferIdentityRefs(walletA)).toBeNull()
+    expect(forumCli.offersShareSelfPayIdentity(walletA, walletB)).toBeNull()
   })
 
   test('blocks self-pay before any live spend is attempted', async () => {
@@ -1765,7 +2223,14 @@ describe('forum tip failure classification and self-pay preflight', () => {
     })
 
     const output = await forumCli.runForumCli(
-      ['tip-post', '--post', 'post_self', '--tip-amount', '15', '--approve-live-spend'],
+      [
+        'tip-post',
+        '--post',
+        'post_self',
+        '--tip-amount',
+        '15',
+        '--approve-live-spend',
+      ],
       { OPENAGENTS_AGENT_TOKEN: 'oa_agent_secret_123' },
       { requestJson, walletExecutor },
     )
@@ -1859,10 +2324,12 @@ describe('forum tip failure classification and self-pay preflight', () => {
         '--tip-amount',
         '15',
         '--approve-live-spend',
+        '--recovery-wait-ms',
+        '1',
         '--strict-smooth',
       ],
       { OPENAGENTS_AGENT_TOKEN: 'oa_agent_secret_123' },
-      { requestJson, walletExecutor },
+      { recoveryPollMs: 0, requestJson, sleep: async () => {}, walletExecutor },
     )
     const body = JSON.parse(output)
 

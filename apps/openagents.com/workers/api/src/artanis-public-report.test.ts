@@ -5,14 +5,22 @@ import {
   type ArtanisForumPublicationQueueRecord,
   exampleArtanisForumPublicationQueue,
 } from './artanis-forum-publication'
+import { ArtanisLoopTickRecord } from './artanis-loop'
 import {
   artanisPublicReportHasPrivateMaterial,
   artanisPublicReportSnapshot,
+  publicNexusPylonReceiptRouteRefsFromRefs,
 } from './artanis-public-report'
 import { handlePublicArtanisReportApi } from './artanis-public-report-routes'
 import { publicPylonStatsFromNexusPayload } from './public-pylon-stats'
+import { publicScannerSafeRef } from './public-ref-scanner-safety'
 
 const nowIso = '2026-06-07T02:00:00.000Z'
+const scannerShapedBridgeRef = 'artanis-mdk-bridge-8b378373002501f3e896dcd3'
+const scannerSafeBridgeRef = publicScannerSafeRef(
+  'evidence.public.pylon_v0_2.omega_gate',
+  scannerShapedBridgeRef,
+)
 
 const deliveredForumQueue = (): ArtanisForumPublicationQueueRecord => {
   const queue = exampleArtanisForumPublicationQueue()
@@ -34,6 +42,19 @@ const deliveredForumQueue = (): ArtanisForumPublicationQueueRecord => {
 describe('Artanis public report', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  test('links Artanis admin closeout refs through the public receipt route', () => {
+    expect(
+      publicNexusPylonReceiptRouteRefsFromRefs([
+        'assignment.artanis_admin.20260611011429',
+        'receipt.nexus_pylon.artanis_admin_closeout.assignment.artanis_admin.20260611011429',
+        'receipt.public.artanis.tick_closeout',
+      ]),
+    ).toEqual([
+      'route:/api/public/nexus-pylon/receipts/assignment.artanis_admin.20260611011429',
+      'route:/api/public/nexus-pylon/receipts/receipt.nexus_pylon.artanis_admin_closeout.assignment.artanis_admin.20260611011429',
+    ])
   })
 
   test('aggregates public-safe Artanis, Pylon, R10, Model Lab, Forum, and blocker state', () => {
@@ -421,12 +442,13 @@ describe('Artanis public report', () => {
         'assignment.public.issue_438.issue_438_artanis_1780822221',
         'pylon.public.issue_438_edge_wallet',
         'receipt.nexus.issue_438.settlement.issue_438_artanis_1780822221',
-        'artanis-mdk-bridge-8b378373002501f3e896dcd3',
+        scannerSafeBridgeRef,
         'pylon.public.artanis.bridge.8b378373',
         'receipt.nexus_pylon.settlement.artanis_mdk_bridge_8b378373002501f3e896dcd3',
       ]),
     )
     expect(artanisPublicReportHasPrivateMaterial(report)).toBe(false)
+    expect(serialized).not.toContain(scannerShapedBridgeRef)
     expect(serialized).not.toContain('https://openagents.com/autopilot')
     expect(serialized).toContain('route:/autopilot')
     expect(serialized).not.toContain('authGrantRef')
@@ -499,5 +521,144 @@ describe('Artanis public report', () => {
       ]),
     )
     expect(artanisPublicReportHasPrivateMaterial(report)).toBe(false)
+  })
+
+  // Epic #4751 (instance 6, #4745): the report declares its staleness
+  // contract, carries generatedAt, and flags a loop summary it cannot
+  // back with a fresh persisted tick instead of asserting June-7
+  // example state as current.
+  describe('projection staleness declaration', () => {
+    const persistedTick = (
+      overrides: Partial<{
+        nextTickAtIso: string | null
+        updatedAtIso: string
+      }> = {},
+    ): ArtanisLoopTickRecord =>
+      new ArtanisLoopTickRecord({
+        actionProposals: [],
+        approvalRequirements: [],
+        artifactRefs: ['artifact.public.artanis.status_packet'],
+        blockerRefs: [],
+        caveatRefs: ['caveat.public.tick_evidence_only'],
+        closeoutReceiptRefs: ['receipt.public.artanis.tick_closeout'],
+        createdAtIso: '2026-06-11T00:00:00.000Z',
+        forumPublicationIntentRefs: ['forum.public.artanis.status_intent'],
+        goalRef: 'goal.public.artanis.pylon_model_lab',
+        idempotencyKey: 'tick.public.artanis.staleness_probe',
+        loopRef: 'loop.public.artanis.primary',
+        nextTickAtIso: '2026-06-11T02:00:00.000Z',
+        receiptRefs: ['receipt.public.artanis.context_loaded'],
+        selectedContextRefs: ['context.public.artanis.pylon_readiness'],
+        state: 'completed',
+        tickRef: 'tick.public.artanis.staleness_probe',
+        updatedAtIso: '2026-06-11T00:30:00.000Z',
+        ...overrides,
+      })
+
+    test('declares the report contract and generation time', () => {
+      const report = artanisPublicReportSnapshot({
+        nowIso,
+        pylonStats: publicPylonStatsFromNexusPayload({}),
+      })
+
+      expect(report.generatedAtUnixMs).toBe(Date.parse(nowIso))
+      expect(report.staleness).toMatchObject({
+        composition: 'live_at_read',
+        maxStalenessSeconds: 0,
+        rebuildsOn: expect.arrayContaining(['artanis_loop_tick_closeout']),
+      })
+      expect(report.autonomousLoop.staleness).toMatchObject({
+        composition: 'rebuilt_on_transition',
+        maxStalenessSeconds: 86_400,
+        rebuildsOn: ['artanis_loop_tick_closeout'],
+      })
+      expect(artanisPublicReportHasPrivateMaterial(report)).toBe(false)
+    })
+
+    test('labels the typed-example fallback stale instead of serving it as live state', () => {
+      const report = artanisPublicReportSnapshot({
+        nowIso,
+        pylonStats: publicPylonStatsFromNexusPayload({}),
+      })
+
+      expect(report.autonomousLoop.source).toBe('typed_example_fallback')
+      expect(report.autonomousLoop.projectionStale).toBe(true)
+      expect(report.autonomousLoop.latestTickAgeSeconds).toBe(null)
+      expect(report.autonomousLoop.caveatRefs).toEqual(
+        expect.arrayContaining([
+          'caveat.public.artanis.loop_projection_example_fallback_not_live_state',
+          'caveat.public.artanis.loop_tick_projection_exceeds_declared_staleness',
+        ]),
+      )
+      expect(report.publicCaveatRefs).toEqual(
+        expect.arrayContaining([
+          'caveat.public.artanis.loop_projection_example_fallback_not_live_state',
+        ]),
+      )
+    })
+
+    test('a fresh persisted tick projects without stale flags', () => {
+      const freshNowIso = '2026-06-11T01:00:00.000Z'
+      const report = artanisPublicReportSnapshot({
+        loopTicks: [persistedTick()],
+        nowIso: freshNowIso,
+        pylonStats: publicPylonStatsFromNexusPayload({
+          as_of_unix_ms: Date.parse(freshNowIso),
+        }),
+      })
+
+      expect(report.autonomousLoop.source).toBe('persisted_loop_ticks')
+      expect(report.autonomousLoop.latestTickAgeSeconds).toBe(1_800)
+      expect(report.autonomousLoop.nextTickOverdue).toBe(false)
+      expect(report.autonomousLoop.projectionStale).toBe(false)
+      expect(report.autonomousLoop.caveatRefs).not.toContain(
+        'caveat.public.artanis.loop_tick_projection_exceeds_declared_staleness',
+      )
+      expect(artanisPublicReportHasPrivateMaterial(report)).toBe(false)
+    })
+
+    test('a tick older than the declared bound flags the projection stale', () => {
+      const staleNowIso = '2026-06-11T01:00:00.000Z'
+      const report = artanisPublicReportSnapshot({
+        loopTicks: [
+          persistedTick({
+            nextTickAtIso: '2026-06-07T01:10:00.000Z',
+            updatedAtIso: '2026-06-07T00:56:00.000Z',
+          }),
+        ],
+        nowIso: staleNowIso,
+        pylonStats: publicPylonStatsFromNexusPayload({
+          as_of_unix_ms: Date.parse(staleNowIso),
+        }),
+      })
+
+      expect(report.autonomousLoop.source).toBe('persisted_loop_ticks')
+      expect(report.autonomousLoop.latestTickAgeSeconds).toBeGreaterThan(
+        86_400,
+      )
+      expect(report.autonomousLoop.nextTickOverdue).toBe(true)
+      expect(report.autonomousLoop.projectionStale).toBe(true)
+      expect(report.autonomousLoop.caveatRefs).toContain(
+        'caveat.public.artanis.loop_tick_projection_exceeds_declared_staleness',
+      )
+      expect(report.publicCaveatRefs).toContain(
+        'caveat.public.artanis.loop_tick_projection_exceeds_declared_staleness',
+      )
+    })
+
+    test('a tick that misses only its own next-tick promise is overdue and stale', () => {
+      const overdueNowIso = '2026-06-11T03:00:00.000Z'
+      const report = artanisPublicReportSnapshot({
+        loopTicks: [persistedTick()],
+        nowIso: overdueNowIso,
+        pylonStats: publicPylonStatsFromNexusPayload({
+          as_of_unix_ms: Date.parse(overdueNowIso),
+        }),
+      })
+
+      expect(report.autonomousLoop.latestTickAgeSeconds).toBeLessThan(86_400)
+      expect(report.autonomousLoop.nextTickOverdue).toBe(true)
+      expect(report.autonomousLoop.projectionStale).toBe(true)
+    })
   })
 })

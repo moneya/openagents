@@ -3,26 +3,45 @@ import { describe, expect, test } from 'vitest'
 
 import {
   AdminRoute,
+  AutopilotWorkDetailRoute,
+  AutopilotWorkRoute,
   ChatRoute,
+  Demo2OrderRoute,
+  Demo2Route,
+  Demo2TeamFileRoute,
+  Demo2TeamFilesRoute,
+  Demo2TeamProjectChatRoute,
+  Demo2ThreadRoute,
   DemoOrderRoute,
   DemoRoute,
   DemoTeamFileRoute,
   DemoTeamFilesRoute,
   DemoTeamProjectChatRoute,
   DemoThreadRoute,
+  ForgeRoute,
   ForumForumRoute,
   ForumReceiptRoute,
   ForumRoute,
   ForumTopicRoute,
   ImagesRoute,
+  Moksha2Route,
   MulletRoute,
   NotFoundRoute,
   OrderDetailRoute,
   OrderRoute,
   PublicAgentRoute,
+  PublicStatsArchiveRoute,
+  PublicTrainingRunRoute,
+  PublicTrainingRunsRoute,
+  PylonRoute,
+  RunRoute,
   ShareRoute,
   SiteCheckoutDemoReturnRoute,
   SiteCheckoutDemoRoute,
+  StatsRoute,
+  TassadarRoute,
+  TassadarReplayRoute,
+  WorkspaceRoute,
   urlToAppRoute,
 } from './route'
 
@@ -44,6 +63,29 @@ describe('app route parser', () => {
 
   test('accepts the operator Autopilot shell route', () => {
     expect(urlToAppRoute(appUrl('/autopilot'))).toEqual(ChatRoute())
+  })
+
+  test('accepts Autopilot work visibility routes', () => {
+    expect(urlToAppRoute(appUrl('/autopilot/work'))).toEqual(
+      AutopilotWorkRoute(),
+    )
+    expect(
+      urlToAppRoute(appUrl('/autopilot/work/autopilot_work_order.visible_1')),
+    ).toEqual(
+      AutopilotWorkDetailRoute({
+        workOrderRef: 'autopilot_work_order.visible_1',
+      }),
+    )
+  })
+
+  test('accepts the Forge factory dashboard route', () => {
+    expect(urlToAppRoute(appUrl('/forge'))).toEqual(ForgeRoute())
+  })
+
+  test('accepts prefilled workspace invite routes', () => {
+    expect(urlToAppRoute(appUrl('/workspaces/workspace_seed'))).toEqual(
+      WorkspaceRoute({ workspaceId: 'workspace_seed' }),
+    )
   })
 
   test('does not accept the deleted login page route', () => {
@@ -75,6 +117,50 @@ describe('app route parser', () => {
     expect(
       urlToAppRoute(appUrl('/share/123e4567-e89b-42d3-a456-426614174000')),
     ).toEqual(ShareRoute({ shareId: '123e4567-e89b-42d3-a456-426614174000' }))
+  })
+
+  test('accepts public training run routes', () => {
+    expect(urlToAppRoute(appUrl('/training/runs'))).toEqual(
+      PublicTrainingRunsRoute(),
+    )
+    expect(urlToAppRoute(appUrl('/training/runs/run.cs336.a1.demo'))).toEqual(
+      PublicTrainingRunRoute({ runId: 'run.cs336.a1.demo' }),
+    )
+  })
+
+  test('accepts the OpenAgents Moksha narrative route', () => {
+    expect(urlToAppRoute(appUrl('/moksha2'))).toEqual(Moksha2Route())
+  })
+
+  test('accepts the public live Tassadar run route', () => {
+    expect(urlToAppRoute(appUrl('/run'))).toEqual(RunRoute())
+    expect(urlToAppRoute(appUrl('/tassadar'))).toEqual(TassadarRoute())
+    expect(
+      urlToAppRoute(appUrl('/tassadar/replay/first-real-settlement')),
+    ).toEqual(
+      TassadarReplayRoute({ replaySlug: 'first-real-settlement' }),
+    )
+  })
+
+  test('uses the Pylon scene as the root route', () => {
+    expect(urlToAppRoute(appUrl('/'))).toEqual(PylonRoute())
+  })
+
+  test('keeps the explicit Pylon scene route alias', () => {
+    expect(urlToAppRoute(appUrl('/pylon'))).toEqual(PylonRoute())
+  })
+
+  test('does not keep the retired live Pylon launch preview route', () => {
+    expect(urlToAppRoute(appUrl('/live'))).toEqual(
+      NotFoundRoute({ path: '/live' }),
+    )
+  })
+
+  test('accepts public stats routes', () => {
+    expect(urlToAppRoute(appUrl('/stats'))).toEqual(StatsRoute())
+    expect(urlToAppRoute(appUrl('/stats-old'))).toEqual(
+      PublicStatsArchiveRoute(),
+    )
   })
 
   test('accepts the admin overview route', () => {
@@ -146,6 +232,36 @@ describe('app route parser', () => {
       ),
     ).toEqual(
       DemoTeamFileRoute({
+        teamRef: 'openagents-core-team',
+        fileId: 'file_pylon_release_plan',
+      }),
+    )
+    expect(urlToAppRoute(appUrl('/demo2'))).toEqual(Demo2Route())
+    expect(urlToAppRoute(appUrl('/demo2/order'))).toEqual(Demo2OrderRoute())
+    expect(urlToAppRoute(appUrl('/demo2/t/pylon-release-demo'))).toEqual(
+      Demo2ThreadRoute({ threadId: 'pylon-release-demo' }),
+    )
+    expect(
+      urlToAppRoute(
+        appUrl('/demo2/teams/openagents-core-team/projects/artanis/chat'),
+      ),
+    ).toEqual(
+      Demo2TeamProjectChatRoute({
+        teamRef: 'openagents-core-team',
+        projectRef: 'artanis',
+      }),
+    )
+    expect(
+      urlToAppRoute(appUrl('/demo2/teams/openagents-core-team/files')),
+    ).toEqual(Demo2TeamFilesRoute({ teamRef: 'openagents-core-team' }))
+    expect(
+      urlToAppRoute(
+        appUrl(
+          '/demo2/teams/openagents-core-team/files/file_pylon_release_plan',
+        ),
+      ),
+    ).toEqual(
+      Demo2TeamFileRoute({
         teamRef: 'openagents-core-team',
         fileId: 'file_pylon_release_plan',
       }),

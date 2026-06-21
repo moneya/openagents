@@ -8,6 +8,7 @@ import type {
   OpenAgentsAutopilotPlacementPolicy,
   OpenAgentsAutopilotRunnerKind,
 } from './autopilot-work-request'
+import { pricingReasonRefsForRunnerKind } from './autopilot-work-pricing-policy'
 
 export const onlineHeartbeatStatuses = new Set([
   'available',
@@ -19,9 +20,11 @@ export const onlineHeartbeatStatuses = new Set([
 
 const onlineWindowMs = 5 * 60 * 1000
 export const assignmentReadyCapabilityRef = 'capability.pylon.assignment_ready'
+export const localClaudeAgentCapabilityRef = 'capability.pylon.local_claude_agent'
+export const localCodexCapabilityRef = 'capability.pylon.local_codex'
 export const localCodingAgentCapabilityRefs = [
-  'capability.pylon.local_codex',
-  'capability.pylon.local_coding_agent',
+  localClaudeAgentCapabilityRef,
+  localCodexCapabilityRef,
 ] as const
 
 export type AutopilotPylonPlacementCandidateProjection = Readonly<{
@@ -275,6 +278,7 @@ export const selectAutopilotPlacement = (
       reasonRefs: [
         'placement.selected.requester_pylon',
         'placement.pylon.preferred_before_fallback',
+        ...pricingReasonRefsForRunnerKind('requester_pylon'),
       ],
       refusalReasonRefs: [],
       retryAfterSeconds: null,
@@ -309,6 +313,7 @@ export const selectAutopilotPlacement = (
       : [
           'placement.selected.fallback',
           `placement.fallback.${fallbackRunnerKind}`,
+          ...pricingReasonRefsForRunnerKind(fallbackRunnerKind),
         ],
     refusalReasonRefs,
     retryAfterSeconds: availabilityState === 'retry_later' ? 300 : null,

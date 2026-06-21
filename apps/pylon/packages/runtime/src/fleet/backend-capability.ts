@@ -1,24 +1,24 @@
 import { Effect, Schema as S } from "effect";
-import { makeAppleFmClient } from "../backends/apple-fm/client";
-import { APPLE_FM_BACKEND_KIND } from "../backends/apple-fm/contract";
-import { redactUrl } from "../backends/apple-fm/receipts";
-import { resolveGeminiApiKey } from "../backends/gemini/auth";
+import { makeAppleFmClient } from "../backends/apple-fm/client.js";
+import { APPLE_FM_BACKEND_KIND } from "../backends/apple-fm/contract.js";
+import { resolveGeminiApiKey } from "../backends/gemini/auth.js";
 import {
   GEMINI_API_PROFILE_ID,
   GEMINI_BACKEND_KIND,
   GEMINI_DEFAULT_BASE_URL,
   GEMINI_DEFAULT_MODEL_ID,
   PROBE_GEMINI_BACKEND_CAPABILITY,
-} from "../backends/gemini/contract";
-import { makeGeminiAvailabilityReceipt } from "../backends/gemini/receipts";
-import { resolveGeminiBackendProfile } from "../backends/registry";
+} from "../backends/gemini/contract.js";
+import { makeGeminiAvailabilityReceipt } from "../backends/gemini/receipts.js";
+import { resolveGeminiBackendProfile } from "../backends/registry.js";
 import {
   BlueprintProgramRegistryProjection,
   validateBlueprintRegistryProjection,
   type BlueprintProgramRegistryProjection as BlueprintProgramRegistryProjectionType,
-} from "../blueprint/contracts";
-import { STATIC_BLUEPRINT_PROGRAM_REGISTRY, STATIC_BLUEPRINT_REGISTRY_VERSION_REF } from "../blueprint/fixtures";
-import { PROBE_APPLE_FM_BACKEND_CAPABILITY, type ProbeRunnerIdentity } from "../runner/identity";
+} from "../blueprint/contracts.js";
+import { STATIC_BLUEPRINT_PROGRAM_REGISTRY, STATIC_BLUEPRINT_REGISTRY_VERSION_REF } from "../blueprint/fixtures.js";
+import { redactReceiptUrl } from "../receipt-redaction.js";
+import { PROBE_APPLE_FM_BACKEND_CAPABILITY, type ProbeRunnerIdentity } from "../runner/identity.js";
 
 const APPLE_FM_BLUEPRINT_TOOL_PROJECTION_ADAPTER = "adapter.probe.apple_fm.blueprint_tools.v1" as const;
 const PROBE_LOCAL_PROGRAM_RUN_EVIDENCE_CAPABILITY = "probe.program_run.evidence.local_offline" as const;
@@ -181,7 +181,7 @@ export function reportAppleFmBackendCapability(
           advertisedCapabilities,
           available: blueprintRunnable,
           status: readiness.ready && !blueprintRunnable ? "malformed" : readiness.status,
-          baseUrl: redactUrl(client.profile.baseUrl),
+          baseUrl: redactReceiptUrl(client.profile.baseUrl),
           platform: readiness.health?.platform,
           version: readiness.health?.version,
           unavailableReason:
@@ -303,7 +303,7 @@ export function reportGeminiBackendCapability(
           advertisedCapabilities: [PROBE_GEMINI_BACKEND_CAPABILITY],
           available: true,
           status: "ready" as const,
-          baseUrl: redactUrl(profile.baseUrl),
+          baseUrl: redactReceiptUrl(profile.baseUrl),
           requirements: {
             apiKey: "required" as const,
             liveHealth: "not_required" as const,
@@ -336,7 +336,7 @@ export function reportGeminiBackendCapability(
             advertisedCapabilities: [],
             available: false,
             status: "unavailable" as const,
-            baseUrl: redactUrl(profile.baseUrl),
+            baseUrl: redactReceiptUrl(profile.baseUrl),
             unavailableReason: "missing_credential",
             message: error.reason,
             requirements: {
@@ -375,7 +375,7 @@ export function reportGeminiBackendCapability(
         advertisedCapabilities: [],
         available: false,
         status: "malformed" as const,
-        baseUrl: redactUrl(GEMINI_DEFAULT_BASE_URL),
+        baseUrl: redactReceiptUrl(GEMINI_DEFAULT_BASE_URL),
         unavailableReason: "malformed_backend_profile",
         message: "Gemini backend capability profile could not be resolved",
         requirements: {

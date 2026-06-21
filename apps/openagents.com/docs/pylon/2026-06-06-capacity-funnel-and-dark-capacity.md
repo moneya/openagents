@@ -11,7 +11,9 @@ The capacity funnel shows where Pylon/provider capacity sits before it becomes
 accepted and, later, paid or settled work. It also records why capacity is
 "dark" instead of silently treating registered machines as useful supply.
 
-The implementation lives in `workers/api/src/pylon-capacity-funnel.ts`.
+The pure projection contract lives in
+`workers/api/src/pylon-capacity-funnel.ts`. The live public route lives in
+`workers/api/src/pylon-capacity-funnel-live-routes.ts`.
 
 ## Funnel Stages
 
@@ -59,6 +61,60 @@ Operator projection can see safe private provider/node refs and safe reward or
 settlement refs. It still rejects raw host identifiers, private hardware
 telemetry, wallet/payment secrets, provider tokens, raw runner logs, private
 repo material, customer-private data, and raw timestamps.
+
+## Provider Job Lifecycle
+
+The live public route projects assigned, running, artifact-producing, and
+accepted stages from durable `pylon_provider_job_lifecycle` rows, then falls
+back to the public-safe assignment state when a lifecycle row is missing or
+lagging. Assignment creation and assignment-state updates write the assignment
+row and matching lifecycle row in one D1 `db.batch`; the fallback prevents the
+public count route from showing zero accepted work if a lifecycle projection
+lags behind the accepted-work assignment row.
+
+Lifecycle stages are:
+
+- `offered`;
+- `accepted`;
+- `running`;
+- `artifact_submitted`;
+- `closeout_submitted`;
+- `accepted_work`.
+
+The public funnel remains count-only. Lifecycle rows are keyed by Pylon and
+assignment refs, but the public route still returns aggregate stage and dark
+reason counts without exposing device identifiers, wallet material, raw
+artifacts, or provider-private details.
+
+## Retained History
+
+Issue #4660 adds retained live-funnel snapshots. The Worker cron refreshes the
+current hourly bucket and current daily bucket from the live public aggregate.
+The public history route is:
+
+- `GET /api/public/pylon-capacity-funnel/history`
+
+The history route returns count-only hourly and daily series with the same
+read-only accounting authority boundary as the live route. It does not expose
+device identifiers, owner linkage, wallet material, raw assignment details,
+artifacts, or provider-private details.
+
+Retention policy:
+
+- hourly snapshots: 14 days;
+- daily snapshots: 180 days.
+
+Closeout evidence recorded 2026-06-11:
+
+- the live history route retained hourly and daily buckets for both
+  2026-06-10 and 2026-06-11;
+- provider lifecycle accounting from #4659 was already deployed;
+- transition receipt `promise_transition_cd1c3145-eccd-4985-b48a-99f8b1b20fbe`
+  proposed `pylon.no_dark_capacity_accounting.v1` from yellow to green before
+  the registry edit;
+- registry version `2026-06-10.27` marks the promise green while preserving
+  the boundary that capacity presence is not accepted work, payment,
+  settlement, or withdrawal evidence.
 
 ## Aggregates
 
@@ -131,3 +187,12 @@ counted as settled without a visible receipt for that audience.
 - required refs for benchmarked/eligible/running/paid/dark stages;
 - rejection of raw host, private hardware, wallet, payment, provider, runner,
   customer, and payout-destination material.
+
+`workers/api/src/pylon-capacity-funnel-live-routes.test.ts` and
+`workers/api/src/pylon-api-routes.test.ts` cover:
+
+- lifecycle-backed live funnel stages;
+- unchanged public route shape with counts only;
+- assignment/lifecycle atomic D1 batch writes and mid-batch failure behavior;
+- retained hourly/daily history snapshots, retention pruning, and the public
+  history route's count-only output.

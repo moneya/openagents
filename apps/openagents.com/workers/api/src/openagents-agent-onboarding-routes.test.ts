@@ -1,10 +1,14 @@
-import { containsProviderSecretMaterial } from '@openagents/provider-account-schema'
+import { containsProviderSecretMaterial } from '@openagentsinc/provider-account-schema'
 import { Effect } from 'effect'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, test } from 'vitest'
 
 import {
+  OpenAgentsAgentCorePath,
+  OpenAgentsAgentCoreSha256,
+  OpenAgentsAgentCoreSourceRef,
+  OpenAgentsAgentCoreUrl,
   OpenAgentsAgentOnboardingCanonicalPath,
   OpenAgentsAgentOnboardingLastUpdated,
   OpenAgentsAgentOnboardingSha256,
@@ -18,18 +22,32 @@ import {
 
 const repoRoot = resolve(import.meta.dirname, '../../..')
 const liveAgentDocPath = resolve(repoRoot, 'docs/live/AGENTS.md')
+const liveAgentCoreDocPath = resolve(repoRoot, 'docs/live/AGENTS-CORE.md')
 const liveHeartbeatPath = resolve(repoRoot, 'docs/live/HEARTBEAT.md')
 const liveRulesPath = resolve(repoRoot, 'docs/live/RULES.md')
 const liveSkillJsonPath = resolve(repoRoot, 'docs/live/skill.json')
 const publicAgentDocPath = resolve(repoRoot, 'apps/web/public/AGENTS.md')
+const publicAgentCoreDocPath = resolve(
+  repoRoot,
+  'apps/web/public/AGENTS-CORE.md',
+)
 const publicHeartbeatPath = resolve(repoRoot, 'apps/web/public/HEARTBEAT.md')
 const publicRulesPath = resolve(repoRoot, 'apps/web/public/RULES.md')
 const publicSkillJsonPath = resolve(repoRoot, 'apps/web/public/skill.json')
 const liveAgentDocMarkdown = readFileSync(liveAgentDocPath, 'utf8')
+const liveAgentCoreMarkdown = readFileSync(liveAgentCoreDocPath, 'utf8')
+// SURFACES.md holds the registration / owner-claim / hosted-search / campaign
+// detail that was extracted out of the compact AGENTS.md; assert that content
+// against the doc it now lives in.
+const liveSurfacesMarkdown = readFileSync(
+  resolve(repoRoot, 'docs/live/SURFACES.md'),
+  'utf8',
+)
 const liveHeartbeatMarkdown = readFileSync(liveHeartbeatPath, 'utf8')
 const liveRulesMarkdown = readFileSync(liveRulesPath, 'utf8')
 const liveSkillJson = readFileSync(liveSkillJsonPath, 'utf8')
 const publicAgentDocMarkdown = readFileSync(publicAgentDocPath, 'utf8')
+const publicAgentCoreMarkdown = readFileSync(publicAgentCoreDocPath, 'utf8')
 const publicHeartbeatMarkdown = readFileSync(publicHeartbeatPath, 'utf8')
 const publicRulesMarkdown = readFileSync(publicRulesPath, 'utf8')
 const publicSkillJson = readFileSync(publicSkillJsonPath, 'utf8')
@@ -53,6 +71,7 @@ const liveAssets: Fetcher = {
   fetch: (request: Request) => {
     const path = new URL(request.url).pathname
     const bodyByPath: Record<string, string> = {
+      '/AGENTS-CORE.md': liveAgentCoreMarkdown,
       '/AGENTS.md': liveAgentDocMarkdown,
       '/HEARTBEAT.md': liveHeartbeatMarkdown,
       '/RULES.md': liveRulesMarkdown,
@@ -77,7 +96,7 @@ const runRoute = (path: string, method = 'GET'): Promise<Response> =>
   )
 
 const runCompanionRoute = (
-  path: '/HEARTBEAT.md' | '/RULES.md' | '/skill.json',
+  path: '/AGENTS-CORE.md' | '/HEARTBEAT.md' | '/RULES.md' | '/skill.json',
   method = 'GET',
 ): Promise<Response> =>
   Effect.runPromise(
@@ -101,8 +120,12 @@ describe('OpenAgents agent onboarding routes', () => {
     expect(markdown).toContain('# OpenAgents')
     expect(markdown).toBe(liveAgentDocMarkdown)
     expect(markdown).toContain(`version: ${OpenAgentsAgentOnboardingVersion}`)
-    expect(OpenAgentsAgentOnboardingLastUpdated).toBe('2026-06-09')
-    expect(markdown).toContain('Last updated: June 9, 2026')
+    expect(OpenAgentsAgentOnboardingLastUpdated).toBe('2026-06-20')
+    expect(markdown).toContain('Last updated: June 15, 2026')
+    expect(markdown).toContain('https://openagents.com/AGENTS-CORE.md')
+    expect(markdown.indexOf('https://openagents.com/AGENTS-CORE.md')).toBeLessThan(
+      markdown.indexOf('# OpenAgents'),
+    )
     expect(markdown).toContain(
       'Canonical URL: https://openagents.com/AGENTS.md',
     )
@@ -116,7 +139,7 @@ describe('OpenAgents agent onboarding routes', () => {
     )
     expect(markdown).not.toContain(deprecatedTranscript230Url)
     expect(markdown).toContain('/api/public/launch-dashboard')
-    expect(markdown).toContain('Product Promise Reports')
+    expect(markdown).toContain('Product Promises Forum')
     expect(markdown).toContain(
       'https://openagents.com/forum/f/product-promises',
     )
@@ -132,14 +155,14 @@ describe('OpenAgents agent onboarding routes', () => {
     expect(markdown).toContain('Meaningful Work Without A Bearer Token')
     expect(markdown).toContain('Live Browser-Session Surfaces')
     expect(markdown).toContain('Live Programmatic Agent Surfaces')
-    expect(markdown).toContain('self-service registration is the normal path')
+    expect(liveSurfacesMarkdown).toContain('self-service registration is the normal path')
     expect(markdown).toContain('/api/agents/register')
-    expect(markdown).toContain('Owner claim is also live and optional')
-    expect(markdown).toContain('/api/agents/claims')
-    expect(markdown).toContain('An owner claim is optional for Forum speech')
-    expect(markdown).toContain('1000 sats promotional')
-    expect(markdown).toContain('reward is a separate campaign ledger')
-    expect(markdown).toContain('Nostr is planned')
+    expect(liveSurfacesMarkdown).toContain('Owner claim is also live and optional')
+    expect(liveSurfacesMarkdown).toContain('/api/agents/claims')
+    expect(liveSurfacesMarkdown).toContain('An owner claim is optional for Forum speech')
+    expect(liveSurfacesMarkdown).toContain('1000 sats promotional')
+    expect(liveSurfacesMarkdown).toContain('reward is a separate campaign ledger')
+    expect(liveSurfacesMarkdown).toContain('Nostr is planned')
     expect(markdown).toContain('/api/agents/proposals')
     expect(markdown).toContain('Public proposal intake is live')
     expect(markdown).toContain('https://openagents.com/HEARTBEAT.md')
@@ -148,14 +171,14 @@ describe('OpenAgents agent onboarding routes', () => {
     expect(markdown).toContain('Autopilot Sites')
     expect(markdown).toContain('/api/customer-orders/{orderId}/site-revisions')
     expect(markdown).toContain('/api/customer-orders/{orderId}/site-feedback')
-    expect(markdown).toContain('Register an agent')
-    expect(markdown).toContain('Hosted Search For Registered Agents')
-    expect(markdown).toContain('/api/agents/search')
-    expect(markdown).toContain('/api/agents/search/payments/preview')
-    expect(markdown).toContain('/api/agents/search/payments/redeem')
-    expect(markdown).toContain('X-OpenAgents-Agent-Search-Entitlement')
-    expect(markdown).toContain('Every active registered agent token')
-    expect(markdown).toContain('node scripts/forum-void-smoke.mjs')
+    expect(liveSurfacesMarkdown).toContain('Register an agent')
+    expect(liveSurfacesMarkdown).toContain('Hosted Search For Registered Agents')
+    expect(liveSurfacesMarkdown).toContain('/api/agents/search')
+    expect(liveSurfacesMarkdown).toContain('/api/agents/search/payments/preview')
+    expect(liveSurfacesMarkdown).toContain('/api/agents/search/payments/redeem')
+    expect(liveSurfacesMarkdown).toContain('X-OpenAgents-Agent-Search-Entitlement')
+    expect(liveSurfacesMarkdown).toContain('Every active registered agent token')
+    expect(liveSurfacesMarkdown).toContain('node scripts/forum-void-smoke.mjs')
     expect(markdown).toContain('AGENTS.md remains guidance. Runtime authority')
     expect(markdown).toContain(
       'Include a fresh `Idempotency-Key` for every logical write',
@@ -181,13 +204,42 @@ describe('OpenAgents agent onboarding routes', () => {
     await expect(sha256Hex(liveAgentDocMarkdown)).resolves.toBe(
       OpenAgentsAgentOnboardingSha256,
     )
+    await expect(sha256Hex(liveAgentCoreMarkdown)).resolves.toBe(
+      OpenAgentsAgentCoreSha256,
+    )
     expect(OpenAgentsAgentOnboardingSourceRef).toBe(
       'https://github.com/OpenAgentsInc/openagents/blob/main/apps/openagents.com/docs/live/AGENTS.md',
+    )
+    expect(OpenAgentsAgentCoreSourceRef).toBe(
+      'https://github.com/OpenAgentsInc/openagents/blob/main/apps/openagents.com/docs/live/AGENTS-CORE.md',
     )
   })
 
   test('keeps the deployed public asset synced from docs/live/AGENTS.md', () => {
     expect(publicAgentDocMarkdown).toBe(liveAgentDocMarkdown)
+    expect(publicAgentCoreMarkdown).toBe(liveAgentCoreMarkdown)
+    expect(new TextEncoder().encode(liveAgentCoreMarkdown).byteLength).toBeLessThan(
+      10_000,
+    )
+  })
+
+  test('serves the compact core tier from the public asset bundle', async () => {
+    const response = await runCompanionRoute(OpenAgentsAgentCorePath)
+    const markdown = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('content-type')).toBe(
+      'text/markdown; charset=utf-8',
+    )
+    expect(OpenAgentsAgentCoreUrl).toBe('https://openagents.com/AGENTS-CORE.md')
+    expect(markdown).toBe(liveAgentCoreMarkdown)
+    expect(markdown).toContain('# OpenAgents Core Agent Instructions')
+    expect(markdown).toContain('## Five-Step Start')
+    expect(markdown).toContain('## Public Endpoints')
+    expect(markdown).toContain('## Security Rules')
+    expect(markdown).toContain('https://openagents.com/AGENTS.md')
+    expect(containsProviderSecretMaterial(markdown)).toBe(false)
   })
 
   test('serves public companion files with matching versions and references', async () => {
@@ -200,6 +252,7 @@ describe('OpenAgents agent onboarding routes', () => {
     const metadata = JSON.parse(metadataText) as {
       openagents: {
         api_base: string
+        core_instructions_url: string
         files: Record<string, string>
         omni_sdk_seed_url: string
         openapi_url: string
@@ -234,8 +287,12 @@ describe('OpenAgents agent onboarding routes', () => {
     expect(metadata.openagents.omni_sdk_seed_url).toBe(
       'https://openagents.com/api/omni/sdk-seed',
     )
+    expect(metadata.openagents.core_instructions_url).toBe(
+      'https://openagents.com/AGENTS-CORE.md',
+    )
     expect(metadata.openagents.requires.bins).toContain('curl')
     expect(Object.values(metadata.openagents.files).sort()).toEqual([
+      'https://openagents.com/AGENTS-CORE.md',
       'https://openagents.com/AGENTS.md',
       'https://openagents.com/HEARTBEAT.md',
       'https://openagents.com/RULES.md',

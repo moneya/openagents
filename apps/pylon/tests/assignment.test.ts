@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, describe, expect, test } from "bun:test"
@@ -9,12 +9,19 @@ import {
   pollAssignments,
   runNoSpendAssignment,
   submitAssignmentCloseout,
+  trainingWorkerReceiptsPathForHome,
   type PylonAssignmentLease,
 } from "../src/assignment"
 import { sendHeartbeat } from "../src/presence"
 import { verifyNip98Authorization } from "../src/nostr-identity"
 import { assertPublicProjectionSafe, ensurePylonLocalState, writePresenceState } from "../src/state"
 import { PSIONIC_QWEN_MODEL_REFS, type PsionicQwenModelAdmission } from "../packages/runtime/src/index"
+import { CLAUDE_AGENT_SDK_PACKAGE } from "../src/claude-agent"
+import {
+  CLAUDE_AGENT_TASK_SCHEMA,
+  type ClaudeAgentCheckoutRunner,
+  type ClaudeAgentRunner,
+} from "../src/claude-agent-executor"
 
 const servers: ReturnType<typeof Bun.serve>[] = []
 
@@ -62,7 +69,12 @@ function fakeAssignmentServer(input: { leases?: PylonAssignmentLease[]; rejectAc
           method: request.method,
           url: request.url,
           body: text,
-          maxSkewSeconds: 300_000,
+          // Verify against the same fixed epoch the tests inject into the
+          // client (`now: () => new Date("2026-06-09T...")`). A wall-clock
+          // `now` with a wide maxSkewSeconds was a date bomb: it expired
+          // 300,000s after the fixed epoch and failed every NIP-98 test.
+          now: new Date("2026-06-09T00:00:30.000Z"),
+          maxSkewSeconds: 300,
         })
         expect(request.headers.get("x-nip98-body-sha256")).toBeNull()
         expect(request.headers.get("x-nip98-signature")).toBeNull()
@@ -120,23 +132,23 @@ function fakeAssignmentServer(input: { leases?: PylonAssignmentLease[]; rejectAc
   return { baseUrl: `http://127.0.0.1:${server.port}`, requests }
 }
 
-async function readySummary(home: string) {
+async function readySummary(home: string, capabilityRefs: string[] = ["cap.gepa.retained.v1"]) {
   const summary = createBootstrapSummary(
-    parseBootstrapArgs(["--display-name", "Assignment Test", "--capability-ref", "cap.gepa.retained.v1"]),
+    parseBootstrapArgs(["--display-name", "Assignment Test", ...capabilityRefs.flatMap(ref => ["--capability-ref", ref])]),
     { PYLON_HOME: home },
     "darwin",
   )
   const state = await ensurePylonLocalState(summary)
   await writeFile(
     state.paths.runtimeState,
-    `${JSON.stringify({
-      lifecycle: "assignment-ready",
-      displayName: "Assignment Test",
-      resourceMode: "background_20",
-      capabilityRefs: ["cap.gepa.retained.v1"],
-      blockerRefs: [],
-      updatedAt: "2026-06-09T00:00:00.000Z",
-    })}\n`,
+      `${JSON.stringify({
+        lifecycle: "assignment-ready",
+        displayName: "Assignment Test",
+        resourceMode: "background_20",
+        capabilityRefs,
+        blockerRefs: [],
+        updatedAt: "2026-06-09T00:00:00.000Z",
+      })}\n`,
   )
   return summary
 }
@@ -170,6 +182,136 @@ describe("Pylon assignment lease flow", () => {
       expect(fake.requests.map((request) => request.path).filter((path) => path.endsWith("/assignments"))).toEqual([
         `/api/pylons/${encodeURIComponent(pylonRef)}/assignments`,
       ])
+
+      const bundle = JSON.parse(
+        await readFile(trainingWorkerReceiptsPathForHome(home), "utf8"),
+      )
+      expect(bundle.schema).toBe(
+        "openagents.pylon.training_worker_receipts_bundle.v0.3",
+      )
+      expect(bundle.sourceRefs).toContain("source.pylon.assignment_closeout")
+      expect(bundle.workerReceipts).toHaveLength(1)
+      expect(bundle.workerReceipts[0]).toMatchObject({
+        schema: "openagents.psionic.training_worker_receipt.v0.3",
+        assignmentRef: result.lease.assignmentRef,
+        workerRef: pylonRef,
+      })
+      expect(bundle.workerReceipts[0].receiptRef).toStartWith(
+        "receipt.pylon.training_worker.",
+      )
+      expect(bundle.workerReceipts[0].checkpointRefs).toContain(
+        result.closeoutReceipt.closeoutRef,
+      )
+      expect(bundle.workerReceipts[0].proofRefs).toEqual(
+        expect.arrayContaining(result.closeout.proofRefs),
+      )
+      expect(JSON.stringify(bundle)).not.toContain(home)
+      expect(JSON.stringify(bundle)).not.toContain("/Users/")
+      assertPublicProjectionSafe(bundle)
+    })
+  })
+
+  test("skips locally terminal leases that are still offered by the server", async () => {
+    await withTempHome(async (home) => {
+      const firstLease = lease({
+        assignmentRef: "assignment.public.no_spend.rejected",
+        leaseRef: "lease.public.no_spend.rejected",
+      })
+      const secondLease = lease({
+        assignmentRef: "assignment.public.no_spend.next",
+        leaseRef: "lease.public.no_spend.next",
+      })
+      const fake = fakeAssignmentServer({ leases: [firstLease, secondLease] })
+      const summary = await readySummary(home)
+      const state = await ensurePylonLocalState(summary)
+      await writeFile(
+        state.paths.assignmentState,
+        `${JSON.stringify({
+          schema: "openagents.pylon.assignment_state.v0.3",
+          leases: {
+            [firstLease.leaseRef]: {
+              assignmentRef: firstLease.assignmentRef,
+              status: "rejected",
+              closedAt: "2026-06-09T00:00:10.000Z",
+            },
+          },
+        }, null, 2)}\n`,
+      )
+      await sendHeartbeat(summary, { baseUrl: fake.baseUrl, now: () => new Date("2026-06-09T00:00:00.000Z") })
+
+      const result = await runNoSpendAssignment(summary, {
+        baseUrl: fake.baseUrl,
+        now: () => new Date("2026-06-09T00:00:30.000Z"),
+      })
+
+      expect(result.ok).toBe(true)
+      if (!result.ok) throw new Error("expected runner to skip terminal lease")
+      expect(result.lease.leaseRef).toBe(secondLease.leaseRef)
+      const acceptPaths = fake.requests
+        .map((request) => request.path)
+        .filter((path) => path.endsWith("/accept"))
+      expect(acceptPaths).toEqual([
+        `/api/pylons/${encodeURIComponent(fake.requests[0].body.pylonRef)}/assignments/${encodeURIComponent(secondLease.leaseRef)}/accept`,
+      ])
+    })
+  })
+
+  test("executes runtime-gate coding assignment and reports only public-safe refs", async () => {
+    await withTempHome(async (home) => {
+      const codingAssignment = {
+        assignmentRef: "pylon_assignment.public.runtime_gate.fixture_repair",
+        budget: {
+          paymentMode: "unpaid_smoke",
+        },
+        objective: {
+          objectiveRef: "objective.public.pylon_runtime_gate.fixture_repair",
+        },
+        publicSafe: true,
+        requiredCapabilityRefs: ["cap.gepa.retained.v1"],
+        runtimeGate: {
+          agentKind: "codex_cli_or_fixture",
+          fixtureRef: "fixture.public.pylon.codex_runtime.sum_repair.v1",
+          schema: "openagents.pylon.runtime_gate.v0.3",
+        },
+        schema: "openagents.autopilot_coding_assignment.v1",
+      }
+      const fake = fakeAssignmentServer({
+        leases: [
+          lease({
+            assignmentRef: "pylon_assignment.public.runtime_gate.fixture_repair",
+            codingAssignment,
+            goal: "objective.public.pylon_runtime_gate.fixture_repair",
+            leaseRef: "lease.public.runtime_gate.fixture_repair",
+          }),
+        ],
+      })
+      const summary = await readySummary(home)
+      await sendHeartbeat(summary, { baseUrl: fake.baseUrl, now: () => new Date("2026-06-09T00:00:00.000Z") })
+
+      const result = await runNoSpendAssignment(summary, {
+        baseUrl: fake.baseUrl,
+        now: () => new Date("2026-06-09T00:00:30.000Z"),
+      })
+
+      expect(result.ok).toBe(true)
+      if (!result.ok) throw new Error("expected runtime gate assignment to run")
+      expect(result.progress.artifactRefs[0].startsWith("artifact.pylon.runtime_gate.fixture_patch.")).toBe(true)
+      expect(result.progress.proofRefs[0].startsWith("proof.pylon.runtime_gate.test_passed.")).toBe(true)
+      expect(result.closeout.artifactRefs).toEqual(result.progress.artifactRefs)
+      expect(result.closeout.proofRefs).toEqual(result.progress.proofRefs)
+      expect(result.closeout.buildRefs[0].startsWith("command.pylon.runtime_gate.bun_test.")).toBe(true)
+      expect(result.closeout.receiptRefs.some((ref) => ref.startsWith("run.pylon.runtime_gate."))).toBe(true)
+      expect(result.closeout.resultRefs).toEqual(["result.public.pylon_runtime_gate.fixture_repair_passed"])
+      expect(result.closeout.summaryRefs).toEqual(["summary.public.pylon_runtime_gate.fixture_repair_passed"])
+      expect(result.closeout.testRefs).toEqual(result.closeout.buildRefs)
+      const serverBodies = JSON.stringify(fake.requests.map((request) => request.body))
+      expect(serverBodies).not.toContain(home)
+      expect(serverBodies).not.toContain("/Users/")
+      expect(serverBodies).not.toContain(".cache")
+      expect(serverBodies).not.toContain("sum.ts")
+      expect(serverBodies).not.toContain("left + right")
+      expect(serverBodies).not.toContain("oa_agent")
+      assertPublicProjectionSafe(result.closeout)
     })
   })
 
@@ -217,6 +359,120 @@ describe("Pylon assignment lease flow", () => {
           paymentMode: "no-spend",
         }),
       ])
+    })
+  })
+
+  test("runs a projected claude_agent_task git_checkout assignment through no-spend closeout", async () => {
+    await withTempHome(async (home) => {
+      const codingAssignment = {
+        assignmentRef: "pylon_assignment.autopilot_work_order.test_1.task.public_sum_repair",
+        budget: {
+          paymentMode: "unpaid_smoke",
+        },
+        objective: {
+          objectiveRef: "objective.autopilot_work_order.test_1.task.public_sum_repair",
+          publicSummary: "Repair the public sum fixture.",
+        },
+        publicSafe: true,
+        requiredCapabilityRefs: ["capability.pylon.local_claude_agent"],
+        claudeAgent: {
+          agentKind: "claude_agent_sdk",
+          allowedToolKinds: ["edit", "file", "git", "shell", "test_runner"],
+          maxTurns: 8,
+          schema: CLAUDE_AGENT_TASK_SCHEMA,
+          timeoutSeconds: 120,
+        },
+        schema: "openagents.autopilot_coding_assignment.v1",
+        workspace: {
+          kind: "git_checkout",
+          repository: {
+            branch: "main",
+            commitSha: "4444444444444444444444444444444444444444",
+            fullName: "OpenAgentsInc/public-sum-fixture",
+            provider: "github",
+            visibility: "public",
+          },
+          verificationCommand: {
+            args: ["bun", "test", "sum.test.ts"],
+            commandRef: "command.public.autopilot_coder.bun_test_sum",
+          },
+        },
+      }
+      const checkoutRunner: ClaudeAgentCheckoutRunner = async (workspace) => {
+        await mkdir(workspace, { recursive: true })
+        await writeFile(
+          join(workspace, "package.json"),
+          `${JSON.stringify({ private: true, scripts: { test: "bun test sum.test.ts" }, type: "module" }, null, 2)}\n`,
+        )
+        await writeFile(join(workspace, "sum.ts"), "export const sum = (left: number, right: number) => left - right\n")
+        await writeFile(
+          join(workspace, "sum.test.ts"),
+          [
+            'import { describe, expect, test } from "bun:test"',
+            'import { sum } from "./sum"',
+            "",
+            'describe("sum checkout", () => {',
+            '  test("adds two numbers", () => {',
+            "    expect(sum(2, 3)).toBe(5)",
+            "  })",
+            "})",
+            "",
+          ].join("\n"),
+        )
+      }
+      const claudeAgentRunner: ClaudeAgentRunner = async (input) => {
+        expect(input.cwd).toContain("claude-agent-tasks")
+        expect(input.instructions).toContain("command.public.autopilot_coder.bun_test_sum")
+        await writeFile(
+          join(input.cwd, "sum.ts"),
+          "export const sum = (left: number, right: number) => left + right\n",
+        )
+        return { commandCount: 1, editedFileCount: 1, outcome: "completed", sessionRef: null, turnCount: 3 }
+      }
+      const fake = fakeAssignmentServer({
+        leases: [
+          {
+            assignmentRef: "pylon_assignment.autopilot_work_order.test_1.task.public_sum_repair",
+            codingAssignment,
+            jobKind: "claude_agent_task",
+            leaseExpiresInSeconds: 600,
+            state: "offered",
+            taskRefs: ["autopilot_work_order.test_1", "task.public_sum_repair"],
+          } as unknown as PylonAssignmentLease,
+        ],
+      })
+      const summary = await readySummary(home, ["capability.pylon.local_claude_agent"])
+      await sendHeartbeat(summary, { baseUrl: fake.baseUrl, now: () => new Date("2026-06-09T00:00:00.000Z") })
+
+      const result = await runNoSpendAssignment(summary, {
+        baseUrl: fake.baseUrl,
+        claudeAgentCheckoutRunner: checkoutRunner,
+        claudeAgentProbe: {
+          env: { ANTHROPIC_API_KEY: "test-key-shape" },
+          importer: async (specifier: string) => {
+            if (specifier !== CLAUDE_AGENT_SDK_PACKAGE) throw new Error("unexpected import")
+            return {}
+          },
+          platform: "darwin",
+        },
+        claudeAgentRunner,
+        now: () => new Date("2026-06-09T00:00:30.000Z"),
+      })
+
+      expect(result.ok).toBe(true)
+      if (!result.ok) throw new Error("expected claude_agent_task git checkout assignment to run")
+      expect(result.closeout.resultRefs).toContain("result.public.pylon.claude_agent_task.git_checkout_verified_passed")
+      expect(result.closeout.blockerRefs).toEqual([])
+      expect(result.closeout.artifactRefs[0]).toStartWith("artifact.pylon.claude_agent_task.patch.")
+      expect(result.closeout.testRefs[0]).toStartWith("command.pylon.claude_agent_task.verification.")
+      expect(result.closeout.previewRefs[0]).toStartWith("workspace.pylon.claude_agent_task.")
+      const serverBodies = JSON.stringify(fake.requests.map((request) => request.body))
+      expect(serverBodies).not.toContain(home)
+      expect(serverBodies).not.toContain("/Users/")
+      expect(serverBodies).not.toContain("OpenAgentsInc/public-sum-fixture")
+      expect(serverBodies).not.toContain("Repair the public sum fixture.")
+      expect(serverBodies).not.toContain("left + right")
+      assertPublicProjectionSafe(result.closeout)
     })
   })
 
@@ -287,7 +543,7 @@ describe("Pylon assignment lease flow", () => {
     })
   })
 
-  test("denies paused, stale, wrong-capability, unsupported-backend, paid-wallet-blocked, and expired leases", async () => {
+  test("denies paused, stale, wrong-capability, unsupported-backend, and expired leases without wallet gating", async () => {
     await withTempHome(async (home) => {
       const summary = await readySummary(home)
       const state = await ensurePylonLocalState(summary)
@@ -332,7 +588,6 @@ describe("Pylon assignment lease flow", () => {
         }),
         {
           now: () => new Date("2026-06-09T00:05:00.000Z"),
-          walletRunner: async () => ({ exitCode: 1, stdout: "", stderr: "offline" }),
         },
       )
 
@@ -341,7 +596,7 @@ describe("Pylon assignment lease flow", () => {
       expect(admission.blockerRefs).toContain("blocker.assignment.presence_stale")
       expect(admission.blockerRefs).toContain("blocker.assignment.wrong_capability")
       expect(admission.blockerRefs).toContain("blocker.assignment.unsupported_backend")
-      expect(admission.blockerRefs).toContain("blocker.assignment.wallet_blocked")
+      expect(admission.blockerRefs).not.toContain("blocker.assignment.wallet_blocked")
       expect(admission.blockerRefs).toContain("blocker.assignment.lease_expired")
     })
   })
@@ -461,7 +716,10 @@ describe("Pylon assignment lease flow", () => {
       } as const
 
       assertPublicProjectionSafe(closeout)
-      const result = await submitAssignmentCloseout(summary, closeout, { baseUrl: fake.baseUrl })
+      const result = await submitAssignmentCloseout(summary, closeout, {
+        baseUrl: fake.baseUrl,
+        now: () => new Date("2026-06-09T00:00:30.000Z"),
+      })
       expect(result.closeoutRef).toBe("assignment.closeout.lease.public.timeout")
     })
   })

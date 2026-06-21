@@ -22,7 +22,7 @@
   --color-forum-online: #85de39;
   --color-forum-page: #f5f5f5;
   --color-forum-panel: #f0f3f5;
-  --color-forum-payment: #ffb400;
+  --color-forum-payment: #b45309;
   --color-forum-post-link: #2d80d2;
   --color-forum-post-link-hover-bg: #d4e6f7;
   --color-forum-row-a: #edf4f7;
@@ -31,8 +31,95 @@
   --color-forum-text: #47536b;
   --color-forum-wrap: #ffffff;
   --color-forum-wrap-border: #ededed;
+  --color-public-landing-accent: #8a5a00;
+  --color-public-landing-border: #d8dde5;
+  --color-public-landing-faint: #8a93a3;
+  --color-public-landing-muted: #5f6673;
+  --color-public-landing-negative: #b91c1c;
+  --color-public-landing-page: #f7f8fa;
+  --color-public-landing-positive: #047857;
+  --color-public-landing-surface: #ffffff;
+  --color-public-landing-surface-muted: #f1f3f5;
+  --color-public-landing-text: #101318;
+  --color-public-landing-warning: #92400e;
   --font-mono: var(--font-family-mono);
   --font-sans: var(--font-family-sans);
+}
+
+/*
+ * Forum theme switching (light / dark).
+ *
+ * The forum's --color-forum-* tokens default to light (defined in @theme
+ * above). The theme selector in the public header writes the resolved theme
+ * to <html data-forum-theme="light|dark">; the "System" option resolves to
+ * one of those via prefers-color-scheme before being written. Dark mode just
+ * re-points the same tokens, so every bg-forum-* / text-forum-* utility
+ * follows automatically. color-scheme is scoped to the forum shell so the
+ * dark-only core app is never affected by a forum theme choice.
+ */
+[data-forum-shell] {
+  color-scheme: light;
+}
+
+:root[data-forum-theme='dark'] [data-forum-shell] {
+  color-scheme: dark;
+}
+
+:root[data-forum-theme='dark'] {
+  --color-forum-alert: #ff6088;
+  --color-forum-heading: #e6edf3;
+  --color-forum-header: #3a6ea5;
+  --color-forum-link: #6cb0f5;
+  --color-forum-link-hover: #ff6088;
+  --color-forum-navbar: #1c3346;
+  --color-forum-online: #85de39;
+  --color-forum-page: #0e1217;
+  --color-forum-panel: #161c24;
+  --color-forum-payment: #d9942f;
+  --color-forum-post-link: #5aa6ef;
+  --color-forum-post-link-hover-bg: #213447;
+  --color-forum-row-a: #161d26;
+  --color-forum-row-b: #1b2531;
+  --color-forum-row-c: #2b3744;
+  --color-forum-text: #9aa7b8;
+  --color-forum-wrap: #151a21;
+  --color-forum-wrap-border: #262e39;
+}
+
+/*
+ * The forum container paints a 1px light ring via an arbitrary shadow
+ * utility; re-point it to the themed border colour so it doesn't glow in
+ * dark mode.
+ */
+:root[data-forum-theme='dark'] [data-forum-app] {
+  box-shadow: 0 0 0 1px var(--color-forum-wrap-border);
+}
+
+/*
+ * Public landing theme switching (light / dark / system).
+ *
+ * This mirrors the Forum selector model but intentionally scopes resolved
+ * values to [data-public-landing-shell]. The script never writes theme state
+ * to <html>, so a light public landing can coexist with the dark-only app
+ * shell and with Forum's own token set.
+ */
+[data-public-landing-shell] {
+  color-scheme: light;
+}
+
+[data-public-landing-shell][data-public-landing-theme='dark'] {
+  color-scheme: dark;
+  --color-public-landing-accent: #ffb400;
+  --color-public-landing-border: #222222;
+  --color-public-landing-faint: rgba(255, 255, 255, 0.35);
+  --color-public-landing-muted: rgba(255, 255, 255, 0.58);
+  --color-public-landing-negative: #ff9a9a;
+  --color-public-landing-page: #000000;
+  --color-public-landing-positive: #7fdc9b;
+  --color-public-landing-surface: #010102;
+  --color-public-landing-surface-muted: #030303;
+  --color-public-landing-text: #f1efe8;
+  --color-public-landing-warning: #ffd54a;
 }
 
 @layer base {
@@ -71,8 +158,8 @@
   :root {
     color-scheme: dark;
     --font-family-sans:
-      ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
-      sans-serif;
+      'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+      'Segoe UI', sans-serif;
     --font-family-sans--font-feature-settings: normal;
     --font-family-mono:
       'Berkeley Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,

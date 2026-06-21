@@ -3,6 +3,139 @@ import * as Context from 'effect/Context'
 
 export type OpenAgentsWorkerConfigEnv = Readonly<{
   ARTANIS_SCHEDULED_RUNNER_ENABLED?: string | undefined
+  // Compose-and-list marketplace MVP flag (EPIC #5510, #5515). Default OFF: the
+  // `/api/public/marketplace/composed-products` listing surface is INERT (empty
+  // store) on the live Worker until the marketplace build lands. Set
+  // "true"/"1"/"on" to arm the (still planned/inert) surface.
+  MARKETPLACE_COMPOSE_AND_LIST_ENABLED?: string | undefined
+  // Autopilot all-in-one composed-run scaffold flag (EPIC #5510, #5519). Default
+  // OFF: the `/api/public/autopilot/composed-runs` listing surface is INERT
+  // (empty store) on the live Worker. Set "true"/"1"/"on" to arm the (still
+  // planned/inert) surface. The composition makes no live/billable claim and the
+  // autopilot.all_in_one_business_system.v1 + cloud.primitives_suite.v1 promises
+  // stay planned regardless.
+  AUTOPILOT_COMPOSED_RUN_ENABLED?: string | undefined
+  // Agentic labor-product flow flag (promise autopilot.agentic_labor_products.v1,
+  // yellow). Default OFF: the `/api/public/autopilot/labor-products` listing
+  // surface is INERT (empty store) and the settlement seam never settles. Set
+  // "true"/"1"/"on" to arm the (still yellow/inert) surface. The flow makes no
+  // live-sale claim and the promise stays yellow regardless; a green flip stays
+  // receipt-first and owner-signed with a dereferenceable settlement receipt.
+  AGENTIC_LABOR_PRODUCTS_ENABLED?: string | undefined
+  // Self-serve control-center fanout flag (promise
+  // autopilot.control_center_fanout_marketplace.v1, yellow). Default OFF: the
+  // `/api/public/autopilot/self-serve-fanout` listing surface is INERT (empty
+  // store) and the dispatch seam (dispatchSelfServeFanout) lists nothing. Set
+  // "true"/"1"/"on" to arm the (still yellow/inert) surface. The plan makes no
+  // broad-live-marketplace claim and the promise stays yellow regardless; the
+  // capability clears only blocker.product_promises.self_serve_fanout_missing
+  // (a customer-initiated single-action fanout planner/route exists), while
+  // blocker.product_promises.plugin_marketplace_beyond_code_task_missing stays
+  // uncleared (code_task work class only). A green flip stays receipt-first and
+  // owner-signed with a dereferenceable settlement receipt.
+  SELF_SERVE_FANOUT_ENABLED?: string | undefined
+  // Labor self-serve earning payout flag (promise
+  // provider.compliant_usage_labor.v1, yellow). Default OFF: the
+  // `/api/public/labor-earnings/payout` route is INERT. When false, the
+  // dispatch seam returns disabled and lists/moves nothing.
+  LABOR_SELF_SERVE_PAYOUT_ENABLED?: string | undefined
+  // Signature usage-metering surface flag (EPIC #5523 / DE-6 #5529; promise
+  // marketplace.signature_monetization.v1, red). Default OFF: the
+  // `/api/public/markets/signature-monetization/metering` surface is INERT
+  // (empty store) on the live Worker. Set "true"/"1"/"on" to arm the (still
+  // red/inert) surface. Metering clears only the usage-metering blocker; the
+  // settlement blocker stays owner-gated and the promise stays red regardless.
+  SIGNATURE_USAGE_METERING_ENABLED?: string | undefined
+  // Voice-session transcript ingestion endpoint flag (EPIC #5523 / DE-7 #5530;
+  // promise mobile.voice_session_evidence_transcript_ingest.v1, red). Default
+  // OFF: the `/api/mobile/voice-sessions/ingest` route is INERT on the live
+  // Worker (returns an honest inert/red payload and never runs the ingest
+  // core). Set "true"/"1"/"on" to arm the endpoint so it decodes
+  // already-transcribed, redacted, ref-only segments and returns an
+  // approval-gated program-input proposal. Arming clears ONLY the
+  // ingestion-endpoint blocker; STT vendor + approval UI stay owner/product-
+  // gated and the promise stays red regardless.
+  VOICE_PROGRAM_INGEST_ENABLED?: string | undefined
+  // Site page form-capture wiring flag (#5523 / DE-9 #5532; promise
+  // autopilot_sites.native_email_sequences.v1, yellow). Default OFF: the public
+  // capture route (POST /api/sites/forms/:formId/submit) stays unmounted and
+  // the omni dispatch chain falls through exactly as today. Set "true"/"1"/"on"
+  // to mount it — the route resolves a page's FormCaptureSpec from the active
+  // site version metadata via site-form-spec-registry and persists leads via
+  // the native-lists addSubscriber sink. Arming clears ONLY the
+  // route-unmounted blocker; the customer UI, send service, and deliverability
+  // stay owner/product-gated and the promise stays yellow.
+  SITE_FORM_CAPTURE_ENABLED?: string | undefined
+  // Mobile workroom approval projection flag (promise
+  // mobile.voice_approval_companion.v1, yellow). Default OFF: the
+  // `/api/mobile/workroom-approval-projection` route is INERT (empty store) on
+  // the live Worker. Set "true"/"1"/"on" to arm the read-only projection over
+  // an injected authorized store. It clears only the mobile-projection blocker;
+  // voice-command approval receipts + cross-device sync stay open and the
+  // promise stays yellow regardless.
+  MOBILE_WORKROOM_APPROVAL_PROJECTION_ENABLED?: string | undefined
+  // Omni client-delivery business-object projection flag (DE-9 / EPIC #5532;
+  // promise workrooms.omni_client_delivery_workrooms.v1, yellow). Default OFF:
+  // the `/api/public/omni/client-delivery-projection` route is INERT (empty
+  // store) on the live Worker. Set "true"/"1"/"on" to arm the read-only
+  // delivery-plan projection over an injected store. It clears only the missing
+  // read-only delivery-projection blocker; the live integration, owner sign-off,
+  // and closeout receipt stay owner-gated and the promise stays yellow.
+  OMNI_CLIENT_DELIVERY_PROJECTION_ENABLED?: string | undefined
+  // Pylon multi-earning-node projection flag (EPIC #5523 / DE-4 #5527; promise
+  // pylon.v0_3_multi_earning_node.v1, red). Default OFF: the
+  // `/api/public/pylon/multi-earning-node` surface is INERT (empty store) on
+  // the live Worker. Set "true"/"1"/"on" to arm the (still red/inert) surface.
+  // The projection clears only blocker.product_promises.safe_public_projection_missing;
+  // the install/receipt/settlement blockers stay owner-gated and the promise
+  // stays red regardless.
+  PYLON_MULTI_EARNING_PROJECTION_ENABLED?: string | undefined
+  // Inference gateway feature flag (EPIC #5474, #5476). Default OFF: the
+  // `/v1/chat/completions` route is inert on the live Worker until the
+  // inference build lands. Set "true"/"1"/"on" to enable.
+  INFERENCE_GATEWAY_ENABLED?: string | undefined
+  // Cloud primitive scaffold feature flags (EPIC #5510, #5516/#5517). Default
+  // OFF: the `/v1/fine_tuning/jobs` and `/v1/sandboxes` routes are inert on the
+  // live Worker until those builds land. Set "true"/"1"/"on" to enable. The
+  // related promises stay red until a dereferenceable paid receipt exists.
+  CLOUD_FINE_TUNING_ENABLED?: string | undefined
+  CLOUD_SANDBOX_COMPUTE_ENABLED?: string | undefined
+  // Cloud coding-session surface flag (autopilot.cloud_coding_sessions.v1, red).
+  // Default OFF: the `/v1/cloud-coding-sessions` launch + lifecycle routes are
+  // inert on the live Worker until the managed GCE runtime is wired. Set
+  // "true"/"1"/"on" to enable. The promise stays red until a desktop-originated
+  // cloud session runs a real repo-edit on GCE and produces a content-addressed
+  // artifact plus a dereferenceable resource_usage_receipt with owner sign-off.
+  CLOUD_CODING_SESSIONS_ENABLED?: string | undefined
+  // Partner passthrough adapter secrets (EPIC #5474, #5481). Worker secrets,
+  // never committed/logged. Each enables the corresponding passthrough adapter
+  // when the gateway flag is on; absent => that partner adapter stays inert.
+  ANTHROPIC_API_KEY?: string | undefined
+  OPENAI_API_KEY?: string | undefined
+  // Optional partner base-URL overrides (origin, no trailing slash). Default to
+  // the public Anthropic / OpenAI origins when unset.
+  ANTHROPIC_BASE_URL?: string | undefined
+  OPENAI_BASE_URL?: string | undefined
+  // Vertex Anthropic adapter (EPIC #5474, #5480) — Claude lane on Google Cloud
+  // Vertex AI. VERTEX_SA_KEY is the full service-account key JSON (a Worker
+  // secret; NEVER committed) used to mint a short-lived GCP access token via a
+  // JWT->token exchange. VERTEX_PROJECT_ID / VERTEX_LOCATION are optional
+  // overrides (default project "openagentsgemini", default location "global").
+  // The adapter is inert without VERTEX_SA_KEY; the route stays flag-gated off
+  // via INFERENCE_GATEWAY_ENABLED regardless.
+  VERTEX_SA_KEY?: string | undefined
+  VERTEX_PROJECT_ID?: string | undefined
+  VERTEX_LOCATION?: string | undefined
+  // Hosted Gemini Autopilot executor arming flag (api.hosted_gemini.v1, yellow;
+  // blocker.product_promises.production_hosted_gemini_executor_binding_missing).
+  // Default OFF. The hosted Gemini `executeReadyWork` binding stays INERT on the
+  // live Worker (no execution, no closeout) until this flag is on AND
+  // VERTEX_SA_KEY is present (DOUBLE-gated). Set "1"/"true"/"yes"/"on" to arm;
+  // optional HOSTED_GEMINI_MODEL overrides the requested model alias. Arming
+  // does NOT flip the promise: green still needs the upstream task-ref resolver
+  // and a registered-agent production smoke (see the launch worklog).
+  HOSTED_GEMINI_EXECUTOR_ENABLED?: string | undefined
+  HOSTED_GEMINI_MODEL?: string | undefined
   EXA_API_KEY?: string | undefined
   EXA_BASE_URL?: string | undefined
   EXA_DEFAULT_NUM_RESULTS?: string | undefined
@@ -16,6 +149,11 @@ export type OpenAgentsWorkerConfigEnv = Readonly<{
   EXA_REQUEST_TIMEOUT_MS?: string | undefined
   EXA_RETRY_LIMIT?: string | undefined
   EXA_RATE_LIMIT_BACKOFF_MS?: string | undefined
+  // Fireworks AI provider adapter key (EPIC #5474, #5479). Worker secret; the
+  // Fireworks open-model supply lane. Never logged. The gateway stays inert
+  // under INFERENCE_GATEWAY_ENABLED, so this is only read when the adapter is
+  // actually dispatched by routing (#5482).
+  FIREWORKS_API_KEY?: string | undefined
   GITHUB_CLIENT_ID?: string | undefined
   GITHUB_CLIENT_SECRET?: string | undefined
   MDK_ACCESS_TOKEN?: string | undefined
@@ -32,7 +170,14 @@ export type OpenAgentsWorkerConfigEnv = Readonly<{
   MDK_CHECKOUT_WEBHOOK_SOURCE?: string | undefined
   MDK_WEBHOOK_SECRET?: string | undefined
   MDK_MNEMONIC?: string | undefined
+  MDK_TIPS_BUFFER_ACCESS_TOKEN?: string | undefined
+  MDK_TIPS_BUFFER_MNEMONIC?: string | undefined
+  MDK_TIPS_BUFFER_SERVICE_TOKEN?: string | undefined
+  MDK_TREASURY_ACCESS_TOKEN?: string | undefined
+  MDK_TREASURY_MNEMONIC?: string | undefined
+  MDK_TREASURY_SERVICE_TOKEN?: string | undefined
   MDK_WALLET_MNEMONIC?: string | undefined
+  OPENAGENTS_SPARK_API_KEY?: string | undefined
   OPENAGENTS_ADMIN_API_TOKEN?: string | undefined
   OPENAGENTS_APP_URL?: string | undefined
   OPENAUTH_CLIENT_ID?: string | undefined
@@ -59,6 +204,17 @@ export type OpenAgentsWorkerConfigEnv = Readonly<{
   SHC_CONTROL_API_URL?: string | undefined
   SHC_DISPATCH_MODE?: string | undefined
   SHC_RUNNER_CALLBACK_TOKEN?: string | undefined
+  SPARK_TREASURY_API_KEY?: string | undefined
+  SPARK_TREASURY_MNEMONIC?: string | undefined
+  SPARK_TREASURY_NETWORK?: string | undefined
+  SPARK_TREASURY_STORAGE_DIR?: string | undefined
+  SPARK_TREASURY_TIMEOUT_MS?: string | undefined
+  TREASURY_DISPATCH_DAILY_SATS_CAP?: string | undefined
+  TREASURY_DISPATCH_ENABLED?: string | undefined
+  TREASURY_DISPATCH_LIQUIDITY_BUFFER_SATS?: string | undefined
+  TREASURY_DISPATCH_PAYMENT_TIMEOUT_SECS?: string | undefined
+  TREASURY_DISPATCH_PER_RUN_REWARD_CAP?: string | undefined
+  WITHDRAWAL_DESTINATION?: string | undefined
 }>
 
 export const OpenAgentsAppUrl = S.String.pipe(S.brand('OpenAgentsAppUrl'))
@@ -239,7 +395,7 @@ export class OpenAgentsWorkerConfigError extends S.TaggedErrorClass<OpenAgentsWo
 export class OpenAgentsWorkerConfig extends Context.Service<
   OpenAgentsWorkerConfig,
   OpenAgentsWorkerConfigShape
->()('@openagents/OpenAgentsWorkerConfig') {
+>()('@openagentsinc/OpenAgentsWorkerConfig') {
   static layer = (env: OpenAgentsWorkerConfigEnv) =>
     Layer.effect(OpenAgentsWorkerConfig, decodeOpenAgentsWorkerConfig(env))
 }

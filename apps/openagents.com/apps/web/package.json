@@ -1,5 +1,5 @@
 {
-  "name": "@openagents/autopilot-web",
+  "name": "@openagentsinc/autopilot-web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,20 +12,32 @@
   },
   "dependencies": {
     "@effect/platform-browser": "4.0.0-beta.70",
-    "@openagents/mullet-schema": "workspace:*",
-    "@openagents/mullet-sim": "workspace:*",
-    "@openagents/provider-account-schema": "workspace:*",
-    "@openagents/sync-client": "workspace:*",
-    "@openagents/sync-schema": "workspace:*",
+    "@openagentsinc/autopilot-control-protocol": "workspace:*",
+    "@openagentsinc/autopilot-ui": "workspace:*",
+    "@openagentsinc/mullet-schema": "workspace:*",
+    "@openagentsinc/mullet-sim": "workspace:*",
+    "@openagentsinc/provider-account-schema": "workspace:*",
+    "@openagentsinc/proof-replay": "workspace:*",
+    "@openagentsinc/public-activity-timeline": "workspace:*",
+    "@openagentsinc/replay-clips": "workspace:*",
+    "@openagentsinc/ui": "workspace:*",
+    "@openagentsinc/sync-client": "workspace:*",
+    "@openagentsinc/sync-schema": "workspace:*",
+    "@openagentsinc/three-effect": "github:OpenAgentsInc/three-effect#746af2a",
     "@tailwindcss/vite": "^4.2.4",
+    "aws4fetch": "^1.0.20",
     "clsx": "^2.1.1",
     "effect": "4.0.0-beta.70",
     "foldkit": "^0.102.1",
-    "tailwindcss": "^4.2.4"
+    "slot-text": "0.3.1",
+    "spacetimedb": "2.6.0",
+    "tailwindcss": "^4.2.4",
+    "three": "0.184.0"
   },
   "devDependencies": {
     "@foldkit/devtools-mcp": "^0.9.0",
     "@foldkit/vite-plugin": "^0.7.0",
+    "@types/three": "0.184.0",
     "happy-dom": "^20.9.0",
     "vite": "^8.0.10"
   }

@@ -1,6 +1,6 @@
-import type { PylonHostInventoryProjection } from "./inventory"
-import { assertPublicProjectionSafe } from "./state"
-import type { WalletStatusProjection } from "./wallet"
+import type { PylonHostInventoryProjection } from "./inventory.js"
+import { assertPublicProjectionSafe } from "./state.js"
+import type { UnifiedWalletBalanceProjection, WalletStatusProjection } from "./wallet.js"
 
 export type OperatorMode = "automated" | "inspect" | "recovery"
 
@@ -21,6 +21,7 @@ export type PylonOperatorSnapshot = {
     payoutTargetRefs: string[]
     settlementRefs: string[]
     blockerRefs: string[]
+    unifiedBalance: UnifiedWalletBalanceProjection
   }
   inspect: {
     inventoryFreshness: string
@@ -64,6 +65,7 @@ export function createOperatorSnapshot(input: {
       payoutTargetRefs: input.wallet.payoutTargetRefs,
       settlementRefs: input.wallet.settlementRefs,
       blockerRefs: input.wallet.blockerRefs,
+      unifiedBalance: input.wallet.unifiedBalance,
     },
     inspect: {
       inventoryFreshness: input.inventory.freshness,
@@ -90,7 +92,11 @@ export function createOperatorSnapshot(input: {
 }
 
 export function formatOperatorSnapshotText(snapshot: PylonOperatorSnapshot) {
+  const sparkPrimary = snapshot.wallet.unifiedBalance.primaryRail === "spark"
   const walletBalance = snapshot.wallet.balanceKnown ? `${snapshot.wallet.balanceSats} sats` : "--"
+  const totalVisible = snapshot.wallet.unifiedBalance.totalVisibleSats === null
+    ? "--"
+    : `${snapshot.wallet.unifiedBalance.totalVisibleSats} sats`
   const backendRefs = snapshot.inspect.backendRefs.slice(0, 4).join("\n ")
   const blockers = snapshot.blockerRefs.length > 0 ? snapshot.blockerRefs.slice(0, 4).join("\n ") : "none"
 
@@ -102,7 +108,8 @@ export function formatOperatorSnapshotText(snapshot: PylonOperatorSnapshot) {
     `Market: ${snapshot.marketActivityRefs.length}`,
     "",
     `Wallet: ${snapshot.wallet.readiness}`,
-    `Balance: ${walletBalance}`,
+    sparkPrimary ? `Agent balance: ${walletBalance}` : `Balance: ${walletBalance}`,
+    ...(sparkPrimary ? [] : [`Total visible: ${totalVisible}`]),
     `Receipts: ${snapshot.receiptRefs.length}`,
     "",
     `Inspect: ${snapshot.inspect.inventoryFreshness}`,

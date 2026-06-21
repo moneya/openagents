@@ -1,6 +1,7 @@
 import { Effect, Schema as S } from "effect";
 import {
   BlueprintProgramToolScope,
+  BlueprintTassadarModuleStepBinding,
   BlueprintToolAccess,
   ProbeToolMenuPlan,
   type BlueprintProgramToolScope as BlueprintProgramToolScopeType,
@@ -13,6 +14,8 @@ export const ProbeToolName = S.Literals([
   "code_search",
   "record_evidence",
   "propose_action_submission",
+  "execute_tassadar_module_step",
+  "show_proof_replay_bundle",
 ]);
 export type ProbeToolName = typeof ProbeToolName.Type;
 
@@ -46,6 +49,7 @@ export const ProbeToolDefinition = S.Struct({
   programTypeId: S.String,
   receiptRequirementRefs: S.Array(S.String),
   sourceAuthorityRefs: S.Array(S.String),
+  tassadarModuleStep: S.optional(BlueprintTassadarModuleStepBinding),
   toolName: ProbeToolName,
   toolRef: S.String,
 });
@@ -164,6 +168,36 @@ const TOOL_CATALOG: Readonly<Record<string, ToolCatalogEntry>> = {
     name: "record_evidence",
     outputSchemaRef: "schema.probe.tool.record_evidence.output.v1",
   },
+  "tool.tassadar.module.execute": {
+    description: "Execute a bound Tassadar module step and record exact-replay evidence.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        stepRef: { type: "string" },
+      },
+      required: ["stepRef"],
+      additionalProperties: false,
+    },
+    inputSchemaRef: "schema.blueprint.tassadar_module_step.input.v1",
+    name: "execute_tassadar_module_step",
+    outputSchemaRef: "schema.blueprint.BlueprintTassadarModuleStepEvidence.v1",
+  },
+  "tool.proof_replay.bundle.show": {
+    description: "Load a public-safe proof replay bundle through the Blueprint replay module.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        intentRef: { type: "string" },
+        replaySlug: { type: "string" },
+        targetRef: { type: "string" },
+      },
+      required: ["replaySlug", "intentRef"],
+      additionalProperties: false,
+    },
+    inputSchemaRef: "schema.blueprint.ShowReplayInput.v1",
+    name: "show_proof_replay_bundle",
+    outputSchemaRef: "schema.blueprint.BlueprintReplayModuleEvidence.v1",
+  },
 };
 
 export function makeProbeToolMenuPlanner(): ProbeToolMenuPlanner {
@@ -268,6 +302,7 @@ export function probeToolMenuPlanFromMenu(menu: ProbeToolMenu): ProbeToolMenuPla
       inputSchemaRef: tool.inputSchemaRef,
       programSignatureId: tool.programSignatureId,
       requiresApproval: tool.policy === "approval_required",
+      tassadarModuleStep: tool.tassadarModuleStep,
       toolRef: tool.toolRef,
     })),
   };
@@ -300,6 +335,7 @@ function toolDefinitionFromScope(
     programTypeId: input.lookup.programTypeIds[0] ?? "program_type.unknown",
     receiptRequirementRefs: input.lookup.receiptRequirementRefs,
     sourceAuthorityRefs: input.sourceAuthorityRefs,
+    tassadarModuleStep: scope.tassadarModuleStep,
     toolName: catalogEntry.name,
     toolRef: scope.toolRef,
   };

@@ -7,46 +7,72 @@ import { notFoundView } from '../../notFoundView'
 import { browserRouteIsEnabled } from '../../product-policy'
 import {
   adminRouter,
+  activityRouter,
+  animationsRouter,
+  autopilotWorkDetailRouter,
+  autopilotWorkRouter,
   billingRouter,
   blogPostRouter,
   blogRouter,
+  businessRouter,
   chatRouter,
+  clientsPreviewRouter,
+  componentsFamilyRouter,
+  componentsRouter,
+  decisionsRouter,
+  demoLegalRouter,
   docsPageRouter,
   docsRouter,
+  forgeRouter,
   forumForumRouter,
   forumReceiptRouter,
   forumRouter,
   forumTopicRouter,
   imagesRouter,
   inviteRouter,
+  loginRouter,
   mulletRouter,
   onboardingRouter,
   orderDetailRouter,
   orderRouter,
   personalFileRouter,
   publicAgentRouter,
+  publicTrainingRunRouter,
+  publicTrainingRunsRouter,
+  runRouter,
   settingsRouter,
   siteCheckoutDemoReturnRouter,
   siteCheckoutDemoRouter,
   statsRouter,
+  tassadarReplayRouter,
+  tassadarRouter,
   teamChatRouter,
   teamFileRouter,
   teamFilesRouter,
   teamProjectChatRouter,
   threadRouter,
   usageRouter,
+  workroomRouter,
+  workroomTabRouter,
+  workspaceRouter,
 } from '../../route'
 import * as Ui from '../../ui'
+import * as Activity from '../activity'
+import * as ClientsPreview from '../clientsPreview'
 import * as Forum from '../forum'
 import * as SiteCheckoutDemo from '../siteCheckoutDemo'
 import { ClickedLogout, ClickedNewChat, Message } from './message'
 import { type Model, type SidebarModel, teamRouteRef } from './model'
 import * as Mullet from './mullet/view'
+import { notificationsPanel } from './notifications/view'
 import * as Admin from './page/admin'
+import * as AutopilotWork from './page/autopilot-work'
 import * as Billing from './page/billing'
 import * as Chat from './page/chat'
 import * as Dashboard from './page/dashboard'
+import * as Decisions from './page/decisions'
 import * as Files from './page/files'
+import * as Forge from './page/forge'
 import * as Images from './page/images'
 import * as Invite from './page/invite'
 import * as Onboarding from './page/onboarding'
@@ -54,6 +80,8 @@ import * as Order from './page/order'
 import * as Settings from './page/settings'
 import * as Stats from './page/stats'
 import * as Usage from './page/usage'
+import * as Workroom from './page/workroom'
+import * as Workspace from './page/workspace'
 
 const currentHref = (model: Model): string =>
   M.value(model.route).pipe(
@@ -61,6 +89,15 @@ const currentHref = (model: Model): string =>
       Onboarding: () => onboardingRouter(),
       Order: () => orderRouter(),
       OrderDetail: ({ orderId }) => orderDetailRouter({ orderId }),
+      AutopilotWork: () => autopilotWorkRouter(),
+      AutopilotWorkDetail: ({ workOrderRef }) =>
+        autopilotWorkDetailRouter({ workOrderRef }),
+      Forge: () => forgeRouter(),
+      Decisions: () => decisionsRouter(),
+      Workspace: ({ workspaceId }) => workspaceRouter({ workspaceId }),
+      Workroom: ({ workroomId }) => workroomRouter({ workroomId }),
+      WorkroomTab: ({ tab, workroomId }) =>
+        workroomTabRouter({ tab, workroomId }),
       Invite: () => inviteRouter(),
       Chat: () => chatRouter(),
       TeamChat: ({ teamRef }) => teamChatRouter({ teamRef }),
@@ -79,9 +116,22 @@ const currentHref = (model: Model): string =>
       SiteCheckoutDemo: () => siteCheckoutDemoRouter(),
       SiteCheckoutDemoReturn: ({ returnAction }) =>
         siteCheckoutDemoReturnRouter({ returnAction }),
+      ClientsPreview: () => clientsPreviewRouter(),
+      Components: () => componentsRouter(),
+      ComponentsFamily: ({ family }) => componentsFamilyRouter({ family }),
+      Business: () => businessRouter(),
+      Animations: () => animationsRouter(),
+      Activity: () => activityRouter(),
+      DemoLegal: () => demoLegalRouter(),
+      Run: () => runRouter(),
+      Tassadar: () => tassadarRouter(),
+      TassadarReplay: ({ replaySlug }) => tassadarReplayRouter({ replaySlug }),
+      Login: () => loginRouter(),
       Blog: () => blogRouter(),
       BlogPost: ({ slug }) => blogPostRouter({ slug }),
       PublicAgent: ({ agentRef }) => publicAgentRouter({ agentRef }),
+      PublicTrainingRuns: () => publicTrainingRunsRouter(),
+      PublicTrainingRun: ({ runId }) => publicTrainingRunRouter({ runId }),
       Dashboard: () => '',
       Billing: () => billingRouter(),
       Usage: () => usageRouter(),
@@ -102,6 +152,14 @@ const routeKey = (model: Model): string =>
       Onboarding: () => 'Onboarding',
       Order: () => 'Order',
       OrderDetail: ({ orderId }) => `OrderDetail:${orderId}`,
+      AutopilotWork: () => 'AutopilotWork',
+      AutopilotWorkDetail: ({ workOrderRef }) =>
+        `AutopilotWorkDetail:${workOrderRef}`,
+      Forge: () => 'Forge',
+      Decisions: () => 'Decisions',
+      Workspace: ({ workspaceId }) => `Workspace:${workspaceId}`,
+      Workroom: ({ workroomId }) => `Workroom:${workroomId}`,
+      WorkroomTab: ({ tab, workroomId }) => `WorkroomTab:${workroomId}:${tab}`,
       Invite: () => 'Invite',
       Chat: () => 'Chat',
       TeamChat: ({ teamRef }) => `TeamChat:${teamRef}`,
@@ -120,9 +178,22 @@ const routeKey = (model: Model): string =>
       SiteCheckoutDemo: () => 'SiteCheckoutDemo',
       SiteCheckoutDemoReturn: ({ returnAction }) =>
         `SiteCheckoutDemoReturn:${returnAction}`,
+      ClientsPreview: () => 'ClientsPreview',
+      Components: () => 'Components',
+      ComponentsFamily: () => 'Components',
+      Business: () => 'Business',
+      Animations: () => 'Animations',
+      Activity: () => 'Activity',
+      DemoLegal: () => 'DemoLegal',
+      Run: () => 'Run',
+      Tassadar: () => 'Tassadar',
+      TassadarReplay: ({ replaySlug }) => `TassadarReplay:${replaySlug}`,
+      Login: () => 'Login',
       Blog: () => 'Blog',
       BlogPost: ({ slug }) => `BlogPost:${slug}`,
       PublicAgent: ({ agentRef }) => `PublicAgent:${agentRef}`,
+      PublicTrainingRuns: () => 'PublicTrainingRuns',
+      PublicTrainingRun: ({ runId }) => `PublicTrainingRun:${runId}`,
       Dashboard: () => 'Dashboard',
       Billing: () => 'Billing',
       Usage: () => 'Usage',
@@ -337,6 +408,9 @@ const routeView = (model: Model): Html => {
         : 'scroll',
     mobileSidebar: mobileSidebarView(model),
     children: [
+      ...(model.notifications.items.length > 0
+        ? [notificationsPanel(model)]
+        : []),
       M.value(model.route).pipe(
         M.tagsExhaustive({
           Invite: () =>
@@ -347,6 +421,27 @@ const routeView = (model: Model): Html => {
           Order: () => Ui.workroomScrollableRoute<Message>([Order.view(model)]),
           OrderDetail: () =>
             Ui.workroomScrollableRoute<Message>([Order.view(model)]),
+          AutopilotWork: () =>
+            Ui.workroomScrollableRoute<Message>([
+              AutopilotWork.listView(model),
+            ]),
+          AutopilotWorkDetail: () =>
+            Ui.workroomScrollableRoute<Message>([
+              AutopilotWork.detailView(model),
+            ]),
+          Forge: () => Ui.workroomScrollableRoute<Message>([Forge.view(model)]),
+          Decisions: () =>
+            Ui.workroomScrollableRoute<Message>([Decisions.view(model)]),
+          Workspace: () =>
+            Ui.workroomScrollableRoute<Message>([Workspace.view(model)]),
+          Workroom: () =>
+            Ui.workroomScrollableRoute<Message>([
+              Workroom.view(model.workroom),
+            ]),
+          WorkroomTab: () =>
+            Ui.workroomScrollableRoute<Message>([
+              Workroom.view(model.workroom),
+            ]),
           TeamChat: ({ teamRef }) =>
             Ui.workroomChatRoute<Message>(Chat.teamRoomView(model, teamRef)),
           TeamProjectChat: ({ projectRef, teamRef }) =>
@@ -429,6 +524,55 @@ const routeView = (model: Model): Html => {
                 onLogout: ClickedLogout(),
               }),
             ]),
+          ClientsPreview: () =>
+            Ui.workroomScrollableRoute<Message>([ClientsPreview.view()]),
+          Components: () =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView('/components', chatRouter(), 'Go to Chat'),
+            ]),
+          ComponentsFamily: () =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView('/components', chatRouter(), 'Go to Chat'),
+            ]),
+          Business: () =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView('/business', chatRouter(), 'Go to Chat'),
+            ]),
+          Animations: () =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView('/animations', chatRouter(), 'Go to Chat'),
+            ]),
+          Activity: () =>
+            Ui.workroomScrollableRoute<Message>([
+              Activity.view({
+                _tag: 'LoggedIn',
+                onLogout: ClickedLogout(),
+              }),
+            ]),
+          DemoLegal: () =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView('/demo/legal', chatRouter(), 'Go to Chat'),
+            ]),
+          Run: () =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView('/run', chatRouter(), 'Go to Chat'),
+            ]),
+          Tassadar: () =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView('/tassadar', chatRouter(), 'Go to Chat'),
+            ]),
+          TassadarReplay: ({ replaySlug }) =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView(
+                tassadarReplayRouter({ replaySlug }),
+                chatRouter(),
+                'Go to Chat',
+              ),
+            ]),
+          Login: () =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView('/login', chatRouter(), 'Go to Chat'),
+            ]),
           Blog: () =>
             Ui.workroomScrollableRoute<Message>([
               notFoundView('/blog', chatRouter(), 'Go to Chat'),
@@ -441,6 +585,22 @@ const routeView = (model: Model): Html => {
             Ui.workroomScrollableRoute<Message>([
               notFoundView(
                 publicAgentRouter({ agentRef }),
+                chatRouter(),
+                'Go to Chat',
+              ),
+            ]),
+          PublicTrainingRuns: () =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView(
+                publicTrainingRunsRouter(),
+                chatRouter(),
+                'Go to Chat',
+              ),
+            ]),
+          PublicTrainingRun: ({ runId }) =>
+            Ui.workroomScrollableRoute<Message>([
+              notFoundView(
+                publicTrainingRunRouter({ runId }),
                 chatRouter(),
                 'Go to Chat',
               ),

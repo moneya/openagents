@@ -1,4 +1,4 @@
-import { containsProviderSecretMaterial } from '@openagents/provider-account-schema'
+import { containsProviderSecretMaterial } from '@openagentsinc/provider-account-schema'
 import { Schema as S } from 'effect'
 
 import {
@@ -15,7 +15,9 @@ export type ForumTipRecipientWalletState = Exclude<
 
 export type ForumTipRecipientWalletRecord = Readonly<{
   actorRef: string
+  sparkAddress: string | null
   bolt12Offer: string | null
+  lightningAddress: string | null
   caveatRefs: ReadonlyArray<string>
   claimPolicyRefs: ReadonlyArray<string>
   custodyPolicyRefs: ReadonlyArray<string>
@@ -54,6 +56,53 @@ const publicRefIsSafe = (value: string): boolean =>
   !unsafeWalletMaterialPattern.test(value) &&
   !rawTimestampPattern.test(value)
 
+// A native Spark address is a bech32m string whose human-readable part is a
+// Spark network HRP (`spark`, `sparkt`, `sparkrt`, `sparks`, or the legacy
+// `sp`/`spt`/`sprt`/`sps`), e.g. `spark1pgss…`. It is a derived, static,
+// registration-free Spark→Spark receive destination the recipient publishes —
+// a public payment destination like a BOLT 12 offer, NOT a private payout
+// target or wallet secret. See projects/repos/spark-sdk
+// (crates/spark/src/address/mod.rs HRP constants).
+const sparkAddressPattern =
+  /^(?:spark|sparkt|sparkrt|sparks|sp|spt|sprt|sps)1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{16,512}$/i
+
+const normalizeSparkAddress = (value: string): string =>
+  value.trim().toLowerCase()
+
+const sparkAddressIsPublicReceiveInstruction = (value: string): boolean => {
+  const normalized = normalizeSparkAddress(value)
+
+  return (
+    normalized.length <= 600 &&
+    sparkAddressPattern.test(normalized) &&
+    !containsProviderSecretMaterial(normalized) &&
+    // Reject anything that is actually a raw invoice / lnurl / wallet secret
+    // smuggled into the Spark-address field. A plain `spark1…` address is fine.
+    !/\s|@|lnbc|lntb|lnbcrt|lnurl|lno1|mnemonic|preimage|payment[_-]?secret|private[_-]?key|wallet[_-]?secret|seed[_-]?phrase|recovery[_-]?phrase|access[_-]?token|api[_-]?key|macaroon/i.test(
+      normalized,
+    )
+  )
+}
+
+const assertSparkAddress = (
+  label: string,
+  value: string | null,
+): string | null => {
+  if (value === null) {
+    return null
+  }
+
+  const normalized = normalizeSparkAddress(value)
+
+  if (!sparkAddressIsPublicReceiveInstruction(normalized)) {
+    throw new ForumTipRecipientWalletUnsafe({
+      reason: `${label} must be a public native Spark address (bech32m, e.g. spark1…), not a BOLT 11 invoice, LNURL, mnemonic, preimage, private key, wallet secret, or provider credential.`,
+    })
+  }
+
+  return normalized
+}
+
 const normalizeBolt12Offer = (value: string): string => value.trim().toLowerCase()
 
 const bolt12OfferIsPublicReceiveInstruction = (value: string): boolean => {
@@ -67,6 +116,48 @@ const bolt12OfferIsPublicReceiveInstruction = (value: string): boolean => {
       normalized,
     )
   )
+}
+
+// A static Lightning Address is `localpart@domain` (LNURL-pay), e.g.
+// `oab38ad12345abcd9@spark.money`. It is a public payment destination the
+// recipient chooses to publish, like a BOLT 12 offer, so the `@` is allowed
+// here even though the generic unsafe-material pattern flags `@` for refs.
+const lightningAddressPattern =
+  /^[a-z0-9][a-z0-9._%+-]{0,127}@[a-z0-9](?:[a-z0-9-]{0,62}\.)+[a-z]{2,24}$/i
+
+const lightningAddressIsPublicReceiveInstruction = (value: string): boolean => {
+  const normalized = value.trim()
+
+  return (
+    normalized.length <= 512 &&
+    !/\s/.test(normalized) &&
+    lightningAddressPattern.test(normalized) &&
+    !containsProviderSecretMaterial(normalized) &&
+    // Reject anything that is actually a raw invoice / lnurl / wallet secret
+    // smuggled into the address field. A plain email-shaped address is fine.
+    !/lnbc|lntb|lnbcrt|lnurl|lno1|mnemonic|preimage|payment[_-]?secret|private[_-]?key|wallet[_-]?secret|seed[_-]?phrase|recovery[_-]?phrase|access[_-]?token|api[_-]?key|macaroon/i.test(
+      normalized,
+    )
+  )
+}
+
+const assertLightningAddress = (
+  label: string,
+  value: string | null | undefined,
+): string | null => {
+  if (value === null || value === undefined) {
+    return null
+  }
+
+  const normalized = value.trim()
+
+  if (!lightningAddressIsPublicReceiveInstruction(normalized)) {
+    throw new ForumTipRecipientWalletUnsafe({
+      reason: `${label} must be a public static Lightning Address of the form name@domain, not a BOLT 11 invoice, LNURL, mnemonic, preimage, private key, wallet secret, or provider credential.`,
+    })
+  }
+
+  return normalized
 }
 
 const assertSafeRef = (label: string, value: string | null): void => {
@@ -148,9 +239,17 @@ export const assertForumTipRecipientWalletRecordSafe = (
     record.payoutTargetApprovalRef,
   )
   assertSafeRef('Forum tip recipient source ref', record.sourceRef)
+  const sparkAddress = assertSparkAddress(
+    'Forum tip recipient Spark address',
+    record.sparkAddress,
+  )
   const bolt12Offer = assertBolt12Offer(
     'Forum tip recipient BOLT 12 offer',
     record.bolt12Offer,
+  )
+  const lightningAddress = assertLightningAddress(
+    'Forum tip recipient Lightning Address',
+    record.lightningAddress,
   )
   const readinessRefs = assertSafeRefs(
     'Forum tip recipient readiness ref',
@@ -185,7 +284,9 @@ export const assertForumTipRecipientWalletRecordSafe = (
 
   return {
     ...record,
+    sparkAddress,
     bolt12Offer,
+    lightningAddress,
     caveatRefs,
     claimPolicyRefs,
     custodyPolicyRefs,
@@ -213,8 +314,23 @@ export const projectForumTipRecipientReadiness = (
 ): ForumTipRecipientReadiness => {
   const safe = assertForumTipRecipientWalletRecordSafe(record)
   const blocked = safe.state !== 'ready'
+  // Native Spark address is the preferred rail: Spark→Spark, 0-fee,
+  // registration-free, offline-receive. The Lightning rails are fallbacks for
+  // external Lightning senders only.
   const directPayment =
-    safe.state === 'ready' && safe.bolt12Offer !== null
+    safe.state === 'ready' && safe.sparkAddress !== null
+      ? {
+          sparkAddress: safe.sparkAddress,
+          kind: 'spark_address' as const,
+          settlementAuthority: 'recipient_wallet_direct' as const,
+        }
+      : safe.state === 'ready' && safe.lightningAddress !== null
+      ? {
+          lightningAddress: safe.lightningAddress,
+          kind: 'lightning_address' as const,
+          settlementAuthority: 'recipient_wallet_direct' as const,
+        }
+      : safe.state === 'ready' && safe.bolt12Offer !== null
       ? {
           bolt12Offer: safe.bolt12Offer,
           kind: 'bolt12_offer' as const,
@@ -233,7 +349,7 @@ export const projectForumTipRecipientReadiness = (
     blockerRef: blocked
       ? stateBlockerRef
       : missingDirectOffer
-        ? 'blocker.public.forum_tip_recipient.bolt12_offer_missing'
+        ? 'blocker.public.forum_tip_recipient.payment_instruction_missing'
         : null,
     caveatRefs: uniqueRefs([
       ...safe.caveatRefs,
@@ -243,8 +359,15 @@ export const projectForumTipRecipientReadiness = (
         ? ['caveat.public.forum_tip_recipient.payout_target_unapproved']
         : []),
       ...(missingDirectOffer
-        ? ['caveat.public.forum_tip_recipient.bolt12_offer_missing']
+        ? ['caveat.public.forum_tip_recipient.payment_instruction_missing']
         : []),
+      ...(directPayment === null
+        ? []
+        : directPayment.kind === 'spark_address'
+          ? ['caveat.public.forum_tip_recipient.spark_offline_receive']
+          : directPayment.kind === 'lightning_address'
+            ? ['caveat.public.forum_tip_recipient.spark_lightning_address_claim_required']
+            : ['caveat.public.forum_tip_recipient.daemon_reachability_required']),
     ]),
     directPayment,
     providerClass: safe.providerClass,
@@ -265,8 +388,17 @@ export const forumTipRecipientReadinessIsSafe = (
     !unsafeWalletMaterialPattern.test(JSON.stringify(genericProbe)) &&
     !rawTimestampPattern.test(JSON.stringify(genericProbe)) &&
     (directPayment === null ||
-      (directPayment.kind === 'bolt12_offer' &&
-        directPayment.settlementAuthority === 'recipient_wallet_direct' &&
-        bolt12OfferIsPublicReceiveInstruction(directPayment.bolt12Offer)))
+      (directPayment.settlementAuthority === 'recipient_wallet_direct' &&
+        (directPayment.kind === 'spark_address'
+          ? sparkAddressIsPublicReceiveInstruction(directPayment.sparkAddress)
+          : directPayment.kind === 'bolt12_offer'
+          ? bolt12OfferIsPublicReceiveInstruction(directPayment.bolt12Offer) &&
+            (directPayment.lightningAddress === undefined ||
+              lightningAddressIsPublicReceiveInstruction(
+                directPayment.lightningAddress,
+              ))
+          : lightningAddressIsPublicReceiveInstruction(
+              directPayment.lightningAddress,
+            ))))
   )
 }

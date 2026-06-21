@@ -64,11 +64,20 @@ If `foldkit-skills` is installed as a Claude Code plugin, the `generate-program`
   is not the production `/login` surface. When changing deployed UI, verify
   against the served bundle or rendered DOM before calling the work complete.
 - When the user asks to deploy this repo, always build the latest web assets
-  before deploying the Worker. Use `bun run --cwd workers/api deploy` as the
-  canonical production deploy command because it runs deploy checks, rebuilds
-  `apps/web/dist`, and then runs Wrangler. Do not run bare `wrangler deploy`
-  after UI/web changes unless `bun run build:web` has already succeeded in the
-  same checkout after those changes.
+  before deploying the Worker. For JS/CSS/public-doc/web-asset-only changes,
+  prefer the no-container path in
+  `docs/2026-06-15-openagents-web-deploy-runbook.md`: run
+  `bun run check:deploy`, run `bun run build:web`, then deploy from
+  `apps/openagents.com/workers/api` with
+  `npx wrangler deploy --containers-rollout=none --assets ../../apps/web/dist`
+  so Wrangler does not build or update Containers. Use
+  `bun run --cwd workers/api deploy` for full production deploys that need its
+  orchestration, such as container image rollout or remote D1 migrations. Do
+  not run bare `wrangler deploy` after UI/web changes. Never report deployment
+  success until live smoke checks prove both the document and JS asset are
+  reachable:
+  `curl -fsSI https://openagents.com/` and the concrete
+  `/assets/index-*.js` URL referenced by the served HTML must both return 200.
 - Before changing Worker route/service boundaries, sync/runtime/config code,
   provider-account or GitHub-write error handling, logged-in update routing,
   login/root route behavior, UI family modules, or other zero-tech-debt
@@ -92,6 +101,20 @@ If `foldkit-skills` is installed as a Claude Code plugin, the `generate-program`
   icon dependencies. If a needed icon is missing, update the upstream Fireball
   catalog first, then run `bun run sync:icons` and keep `apps/web/src/icon*.test.ts`
   passing.
+- Training and proof replay visual surfaces must use the existing
+  `@openagentsinc/three-effect` renderer vocabulary and the visual taxonomy
+  documented in `docs/launch/2026-06-17-tassadar-training-run-visual-language.md`
+  plus the `/animations` studies. `@openagentsinc/proof-replay` owns replay
+  bundle shape, clocks, source gates, and render plans only; it is not a visual
+  renderer. Browser or desktop app code may adapt public replay bundles into
+  `three-effect` options and may render Foldkit controls, inspectors, transcript
+  mirrors, and accessibility fallbacks. Do not add new app-local DOM/CSS/canvas
+  stages, actor/avatar renderers, payment-zap effects, camera grammar, particles,
+  or other proof replay visuals. Add missing primitives to
+  `/Users/christopherdavid/work/three-effect` first, then consume the package.
+  The current `apps/web/src/scene/tassadarProofReplayElement.ts` is a temporary
+  legacy bridge for the first replay route; do not extend its visual language
+  except to replace it with `three-effect` mounts.
 - Use Tailwind utility classes and the local Foldkit UI registry as the default
   styling path. For Worker-rendered HTML, put Tailwind classes in the template
   and make sure `apps/web/src/styles.css` sources the Worker templates so the
@@ -107,6 +130,34 @@ If `foldkit-skills` is installed as a Claude Code plugin, the `generate-program`
 - Use `m()` for message schemas, `ts()` for tagged structs (model states, field validation), and `r()` for route schemas.
 - Push back on any direction that violates Elm Architecture principles: unidirectional data flow, messages as facts (not commands), model as single source of truth, side effects confined to commands. If a prompt suggests mutating state, imperative event handlers, or two-way bindings, flag the issue and propose the idiomatic Foldkit approach.
 - Never use `NoOp`. Every message must describe what happened. Fire-and-forget commands use `Completed*` messages mirroring the Command name verb-first: `LockScroll` → `CompletedLockScroll`.
+
+## Pylon Presence Auth Contract (token-only)
+
+Pylon presence and lifecycle writes (`POST /api/pylons/:ref/heartbeat`,
+`/wallet-readiness`, `/payout-target-admission`, `/assignments/*`, and
+`/register`) are authenticated with an OpenAgents agent **bearer token**
+(`Authorization: Bearer <agent token>`) in `workers/api/src/pylon-api-routes.ts`
+(`requireAgent`). This is intentional and is the documented contract.
+
+A node's self-held Nostr key (NIP-98) is **not** accepted as presence
+authority. Registrations are bound to `ownerAgentUserId` derived from the
+bearer-token session; the registry does not bind a verified Nostr pubkey to
+that owner (`providerNostrPubkey` is optional discovery metadata, only set for
+NIP-90 provider Pylons, and is never verified server-side). Accepting a
+self-signed heartbeat would require server-side NIP-98 schnorr verification
+plus a mandatory pubkey→owner binding — a broader auth change that must not be
+made implicitly.
+
+When a presence request arrives with a `Nostr`/NIP-98 `Authorization` scheme
+and no usable bearer token, the route returns a typed, explanatory `401`
+(`error: pylon_api_presence_requires_agent_token`, `WWW-Authenticate: Bearer`)
+naming the token-only contract and pointing the node at the bearer path,
+rather than a bare `unauthorized` (#5058). Do not silently fall back to a bare
+401 for the Nostr-signed presence path. If self-signed presence is ever to be
+supported, design the NIP-98 verification + pubkey binding deliberately with a
+new dated review and tests; do not broaden any other authority (spend,
+settlement, moderation) in the process. Regression coverage lives in
+`workers/api/src/pylon-api-routes.test.ts`.
 
 ## Foldkit Patterns
 

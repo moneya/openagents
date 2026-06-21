@@ -3,7 +3,7 @@ import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { describe, expect, test } from "bun:test"
-import { createBootstrapSummary, parseBootstrapArgs } from "../src/bootstrap"
+import { createBootstrapSummary, parseBootstrapArgs, PYLON_DEFAULT_CAPABILITY_REFS } from "../src/bootstrap"
 import {
   assertPublicProjectionSafe,
   ensurePylonLocalState,
@@ -63,11 +63,35 @@ describe("Pylon identity and public projection state", () => {
       expect(projected.state.identity.nodeLabel).toBe("status-test")
       expect(projected.state.identity.publicKey).toMatch(/^[0-9a-f]{64}$/)
       expect(projected.state.runtime.lifecycle).toBe("offline")
-      expect(projected.state.runtime.capabilityRefs).toEqual(["cap.gepa.retained.v1"])
+      expect(projected.state.runtime.capabilityRefs).toEqual([
+        "cap.gepa.retained.v1",
+        ...PYLON_DEFAULT_CAPABILITY_REFS,
+      ])
       expect(JSON.stringify(projected)).not.toContain("privateKeyPem")
       expect(JSON.stringify(projected)).not.toContain("nsec")
       expect(JSON.stringify(projected)).not.toContain("mnemonic")
       expect(existsSync(state.paths.runtimeState)).toBe(true)
+    })
+  })
+
+  test("preserves persisted capabilities when a later command provides no capability flags", async () => {
+    await withTempHome(async (home) => {
+      const configured = createBootstrapSummary(
+        parseBootstrapArgs(["--display-name", "Capability Test", "--capability-ref", "cap.gepa.retained.v1"]),
+        { PYLON_HOME: home },
+        "darwin",
+      )
+      const first = await ensurePylonLocalState(configured)
+      expect(first.runtime.capabilityRefs).toEqual(["cap.gepa.retained.v1", ...PYLON_DEFAULT_CAPABILITY_REFS])
+
+      const commandSummary = createBootstrapSummary(
+        parseBootstrapArgs(["--json"]),
+        { PYLON_HOME: home },
+        "darwin",
+      )
+      const reloaded = await ensurePylonLocalState(commandSummary)
+
+      expect(reloaded.runtime.capabilityRefs).toEqual(["cap.gepa.retained.v1", ...PYLON_DEFAULT_CAPABILITY_REFS])
     })
   })
 

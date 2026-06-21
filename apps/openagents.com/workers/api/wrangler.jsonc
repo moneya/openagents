@@ -37,6 +37,7 @@
   ],
   "vars": {
     "GITHUB_CLIENT_ID": "Ov23lirHI1DWTzZ1zT1u",
+    "INFERENCE_GATEWAY_ENABLED": "true",
     "OPENAUTH_CLIENT_ID": "openagents-web",
     "OPENAUTH_ISSUER_URL": "https://auth.openagents.com",
     "OPENAGENTS_APP_URL": "https://openagents.com",
@@ -61,6 +62,20 @@
       "instance_type": "basic",
       "max_instances": 2,
     },
+    {
+      "class_name": "MdkTreasuryContainer",
+      "image": "../../services/mdk-treasury/Dockerfile",
+      "image_build_context": "../../services/mdk-treasury",
+      "instance_type": "basic",
+      "max_instances": 1,
+    },
+    {
+      "class_name": "MdkTipsBufferContainer",
+      "image": "../../services/mdk-tips-buffer/Dockerfile",
+      "image_build_context": "../../services/mdk-tips-buffer",
+      "instance_type": "basic",
+      "max_instances": 1,
+    },
   ],
   "kv_namespaces": [
     {
@@ -79,6 +94,16 @@
     {
       "binding": "SITES_DISPATCH",
       "namespace": "openagents-sites-production",
+    },
+  ],
+  // Direct worker-to-worker binding for the relay-health NIP-11 probe leg
+  // (#4865): same-zone plain-GET subrequests to the relay's custom domain
+  // fail from inside this worker, while service bindings always invoke
+  // the target worker directly.
+  "services": [
+    {
+      "binding": "MARKET_RELAY_SERVICE",
+      "service": "openagents-market-relay",
     },
   ],
   "d1_databases": [
@@ -127,6 +152,14 @@
         "name": "MDK_SIDECAR",
         "class_name": "MdkSidecarContainer",
       },
+      {
+        "name": "MDK_TREASURY",
+        "class_name": "MdkTreasuryContainer",
+      },
+      {
+        "name": "MDK_TIPS_BUFFER",
+        "class_name": "MdkTipsBufferContainer",
+      },
     ],
   },
   "migrations": [
@@ -137,6 +170,14 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["MdkSidecarContainer"],
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["MdkTreasuryContainer"],
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["MdkTipsBufferContainer"],
     },
   ],
   "env": {
@@ -162,11 +203,19 @@
       "routes": [],
       "vars": {
         "ARTANIS_SCHEDULED_RUNNER_ENABLED": "false",
+        "INFERENCE_GATEWAY_ENABLED": "true",
+        // Ep239 "Let's Make Money" loop surfaces — armed on STAGING ONLY so
+        // external agent-testers can exercise the inert/scaffold endpoints.
+        // Production (the top-level config above) leaves these unset, so the
+        // markets/marketplace/cloud surfaces stay default-OFF (404) on prod.
+        "CLOUD_FINE_TUNING_ENABLED": "true",
+        "CLOUD_SANDBOX_COMPUTE_ENABLED": "true",
+        "MARKETPLACE_COMPOSE_AND_LIST_ENABLED": "true",
         "GITHUB_CLIENT_ID": "Ov23lirHI1DWTzZ1zT1u",
         "GITHUB_CLIENT_SECRET": "staging-unconfigured",
         "OPENAUTH_CLIENT_ID": "openagents-web",
         "OPENAUTH_ISSUER_URL": "https://auth.openagents.com",
-        "OPENAGENTS_APP_URL": "https://openagents.com",
+        "OPENAGENTS_APP_URL": "https://openagents-staging.openagents.workers.dev",
         "MDK_CHECKOUT_CONFIG_REF": "config.openagents.mdk.cloudflare_container",
         "MDK_CHECKOUT_CREDENTIAL_BINDING_REF": "credential_binding.openagents.mdk.cloudflare_worker_binding",
         "MDK_CHECKOUT_ENVIRONMENT": "production",
@@ -180,8 +229,8 @@
       "kv_namespaces": [
         {
           "binding": "AUTH_STORAGE",
-          "id": "d6b40d28e0a640bfb29d50c7afe458b1",
-          "preview_id": "02566e7567b6479ebdada57c93991383",
+          "id": "586eb41c0d69448a96ffabaa5fc9bafd",
+          "preview_id": "586eb41c0d69448a96ffabaa5fc9bafd",
         },
       ],
       "assets": {
@@ -199,26 +248,33 @@
       "d1_databases": [
         {
           "binding": "OPENAGENTS_DB",
-          "database_name": "openagents-autopilot",
-          "database_id": "9644ea09-f682-4971-98de-e0c791cb67fb",
+          "database_name": "openagents-autopilot-staging",
+          "database_id": "b30c43fa-fa39-4e56-8b95-f90d5b58292d",
           "migrations_dir": "migrations",
         },
       ],
       "r2_buckets": [
         {
           "binding": "ARTIFACTS",
-          "bucket_name": "openagents-autopilot-artifacts",
+          "bucket_name": "openagents-autopilot-artifacts-staging",
         },
       ],
       "queues": {
         "producers": [
           {
             "binding": "RUNNER_EVENTS",
-            "queue": "openagents-autopilot-runner-events",
+            "queue": "openagents-autopilot-runner-events-staging",
           },
           {
             "binding": "ADJUTANT_ENRICHMENT_QUEUE",
-            "queue": "openagents-adjutant-enrichment-jobs",
+            "queue": "openagents-adjutant-enrichment-jobs-staging",
+          },
+        ],
+        "consumers": [
+          {
+            "queue": "openagents-adjutant-enrichment-jobs-staging",
+            "max_batch_size": 1,
+            "max_retries": 3,
           },
         ],
       },

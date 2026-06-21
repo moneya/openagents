@@ -1,3 +1,4 @@
+import { CursorGap, SyncPatch } from '@openagentsinc/sync-schema'
 import { Schema as S } from 'effect'
 import { m } from 'foldkit/message'
 
@@ -9,7 +10,9 @@ import {
   PublicForumLaunchStatus,
   PublicForumTipLeaderboards,
   PublicProductPromises,
+  PublicPromiseTransitions,
   PublicPylonStats,
+  PublicTrainingRunsResponse,
   ShareProjectionResponse,
 } from './model'
 
@@ -110,6 +113,29 @@ export const FailedLoadPublicProductPromises = m(
     error: S.String,
   },
 )
+export const SucceededLoadPublicPromiseTransitions = m(
+  'SucceededLoadPublicPromiseTransitions',
+  {
+    transitions: PublicPromiseTransitions,
+  },
+)
+export const FailedLoadPublicPromiseTransitions = m(
+  'FailedLoadPublicPromiseTransitions',
+  {
+    error: S.String,
+  },
+)
+export const SucceededLoadPublicTrainingRuns = m(
+  'SucceededLoadPublicTrainingRuns',
+  {
+    response: PublicTrainingRunsResponse,
+    selectedRunId: S.NullOr(S.String),
+  },
+)
+export const FailedLoadPublicTrainingRuns = m('FailedLoadPublicTrainingRuns', {
+  error: S.String,
+  runId: S.NullOr(S.String),
+})
 export const SucceededLoadShareProjection = m('SucceededLoadShareProjection', {
   response: ShareProjectionResponse,
   shareId: S.String,
@@ -121,6 +147,36 @@ export const FailedLoadShareProjection = m('FailedLoadShareProjection', {
 })
 export const CompletedCopyShareLink = m('CompletedCopyShareLink', {
   url: S.String,
+})
+// Live settled feed stream (openagents #5311).
+export const SucceededLoadSettledFeedSnapshot = m(
+  'SucceededLoadSettledFeedSnapshot',
+  {
+    cursor: S.Number,
+    summary: S.NullOr(
+      S.Struct({
+        totalSettledCount: S.Number,
+        totalSettledSats: S.Number,
+      }),
+    ),
+  },
+)
+export const FailedLoadSettledFeedSnapshot = m(
+  'FailedLoadSettledFeedSnapshot',
+  {
+    error: S.String,
+  },
+)
+export const OpenedSettledFeedStream = m('OpenedSettledFeedStream')
+export const ClosedSettledFeedStream = m('ClosedSettledFeedStream')
+export const FailedSettledFeedStream = m('FailedSettledFeedStream', {
+  error: S.String,
+})
+export const ReceivedSettledFeedPatch = m('ReceivedSettledFeedPatch', {
+  patch: SyncPatch,
+})
+export const ReceivedSettledFeedCursorGap = m('ReceivedSettledFeedCursorGap', {
+  gap: CursorGap,
 })
 export const Message = S.Union([
   ClickedCopyShareLink,
@@ -144,8 +200,19 @@ export const Message = S.Union([
   FailedLoadPublicForumTipLeaderboards,
   SucceededLoadPublicProductPromises,
   FailedLoadPublicProductPromises,
+  SucceededLoadPublicPromiseTransitions,
+  FailedLoadPublicPromiseTransitions,
+  SucceededLoadPublicTrainingRuns,
+  FailedLoadPublicTrainingRuns,
   SucceededLoadShareProjection,
   FailedLoadShareProjection,
   CompletedCopyShareLink,
+  SucceededLoadSettledFeedSnapshot,
+  FailedLoadSettledFeedSnapshot,
+  OpenedSettledFeedStream,
+  ClosedSettledFeedStream,
+  FailedSettledFeedStream,
+  ReceivedSettledFeedPatch,
+  ReceivedSettledFeedCursorGap,
 ])
 export type Message = typeof Message.Type

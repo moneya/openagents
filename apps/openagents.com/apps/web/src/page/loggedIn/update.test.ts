@@ -3,7 +3,7 @@ import {
   ProviderAccountRef,
   ProviderConnectionAttemptId,
   IsoTimestamp as ProviderIsoTimestamp,
-} from '@openagents/provider-account-schema'
+} from '@openagentsinc/provider-account-schema'
 import {
   CollectionName,
   CursorGap,
@@ -13,7 +13,7 @@ import {
   SyncScope,
   SyncSequence,
   SyncSnapshot,
-} from '@openagents/sync-schema'
+} from '@openagentsinc/sync-schema'
 import { Option } from 'effect'
 import { describe, expect, test } from 'vitest'
 
@@ -27,6 +27,7 @@ import {
 import {
   ChatRoute,
   DocsPageRoute,
+  ForgeRoute,
   OnboardingRoute,
   SettingsRoute,
   SettingsSectionRoute,
@@ -35,6 +36,7 @@ import {
   TeamFileRoute,
   TeamProjectChatRoute,
   ThreadRoute,
+  WorkspaceRoute,
 } from '../../route'
 import {
   ClickedAgentGoalAction,
@@ -51,11 +53,14 @@ import {
   FailedLaunchAutopilotRun,
   ReceivedSyncCursorGap,
   ReceivedSyncPatch,
-  RequestedPollAutopilotRun,
+  RequestedLoadPrefilledWorkspace,
   RequestedLoadTokenUsageStats,
+  RequestedPollAutopilotRun,
+  SelectedForgeAutomationTemplate,
   SelectedOnboardingRepository,
   SubmittedAgentGoal,
   SubmittedChatComposer,
+  SubmittedForgeAutomationRun,
   SubmittedOnboardingGoal,
   SubmittedOnboardingRepository,
   SubmittedThreadFileUpload,
@@ -63,10 +68,11 @@ import {
   SucceededLaunchAutopilotRun,
   SucceededLoadAgentGoal,
   SucceededLoadOnboardingRepositories,
-  SucceededLoadTokenUsageStats,
+  SucceededLoadPrefilledWorkspace,
   SucceededLoadSyncSnapshot,
   SucceededLoadTeamChatMessages,
   SucceededLoadThreadFileDetail,
+  SucceededLoadTokenUsageStats,
   SucceededPostTeamChatMessage,
   SucceededSelectOnboardingRepository,
   SucceededSkipOnboardingBilling,
@@ -639,6 +645,58 @@ describe('logged-in Autopilot chat runs', () => {
     ])
   })
 
+  test('loads Forge automation templates into the tuned work-order draft', () => {
+    const model = init(ForgeRoute(), authWithTeam)
+    const [loadedModel, commands] = update(
+      model,
+      SelectedForgeAutomationTemplate({
+        automationId: 'forge.automation.triage_scope',
+      }),
+    )
+
+    expect(commands).toEqual([])
+    expect(loadedModel.autopilotWorkComposer._tag).toBe(
+      'AutopilotWorkComposerIdle',
+    )
+    expect(loadedModel.autopilotWorkComposerDraft).toMatchObject({
+      branch: 'main',
+      maxSpendCents: '0',
+      repositoryFullName: 'OpenAgentsInc/openagents',
+      verificationCommand: 'bun run check:deploy',
+    })
+    expect(loadedModel.autopilotWorkComposerDraft.objective).toContain(
+      'forge.automation.triage_scope',
+    )
+  })
+
+  test('submits Forge automation runs through the Autopilot work-order command', () => {
+    const model = init(ForgeRoute(), authWithTeam)
+    const [submittingModel, commands] = update(
+      model,
+      SubmittedForgeAutomationRun({
+        automationId: 'forge.automation.validate_gate',
+      }),
+    )
+
+    expect(submittingModel.autopilotWorkComposer._tag).toBe(
+      'AutopilotWorkComposerSubmitting',
+    )
+    expect(submittingModel.autopilotWorkComposerDraft.objective).toContain(
+      'forge.automation.validate_gate',
+    )
+    expect(commands.map(command => command.name)).toEqual([
+      'SubmitAutopilotWorkComposer',
+    ])
+    expect(commands[0]?.args).toMatchObject({
+      draft: {
+        branch: 'main',
+        maxSpendCents: '0',
+        repositoryFullName: 'OpenAgentsInc/openagents',
+        verificationCommand: 'bun run check:deploy',
+      },
+    })
+  })
+
   test('walks repository selection, goal submission, and billing skip', () => {
     const model = init(OnboardingRoute(), authWithIncompleteOnboarding)
     const [loadedModel] = update(
@@ -940,6 +998,7 @@ describe('logged-in Autopilot chat runs', () => {
       'LoadAgentGoal',
       'LoadThreadFiles',
       'FocusChatComposer',
+      'RequestNotificationPermission',
     ])
     expect(commands[2]?.args).toEqual({
       agentId: 'autopilot',
@@ -1172,9 +1231,7 @@ describe('logged-in Autopilot chat runs', () => {
       'InstallAccountMenuOutsideClick',
       'LoadTokenUsageStats',
     ])
-    expect(filteredModel.tokenUsageStats.filters.provider).toBe(
-      'google_gemini',
-    )
+    expect(filteredModel.tokenUsageStats.filters.provider).toBe('google_gemini')
     expect(loadCommands.map(command => command.name)).toEqual([
       'LoadTokenUsageStats',
     ])
@@ -1184,6 +1241,67 @@ describe('logged-in Autopilot chat runs', () => {
     expect(loadedModel.tokenUsageStats).toMatchObject({
       _tag: 'TokenUsageStatsLoaded',
       response: { usageEvents: 1 },
+    })
+  })
+
+  test('loads prefilled workspace invites for signed-in holders', () => {
+    const model = init(
+      WorkspaceRoute({ workspaceId: 'workspace_seed' }),
+      authWithTeam,
+    )
+    const commands = initialCommands(model)
+    const [loadingModel, loadCommands] = update(
+      model,
+      RequestedLoadPrefilledWorkspace({ workspaceId: 'workspace_seed' }),
+    )
+    const [loadedModel] = update(
+      loadingModel,
+      SucceededLoadPrefilledWorkspace({
+        response: {
+          generatedAt: '2026-06-16T12:00:00.000Z',
+          viewer: 'holder',
+          workspace: {
+            id: 'workspace_seed',
+            projectName: 'Seeded Storefront Sprint',
+            status: 'invited',
+            seededMemory: [
+              {
+                label: 'Website',
+                value: 'Public catalog is live.',
+                publicSourceRef: 'https://example.com',
+              },
+            ],
+            starterWorkflows: [
+              {
+                title: 'Draft product page update',
+                description: 'Create the first accepted-outcome draft.',
+                outcomeKind: 'draft',
+                status: 'ready',
+              },
+            ],
+            introReceipt: {
+              summary: 'Workspace prepared from public sources.',
+              publicSourceRefs: ['https://example.com'],
+            },
+          },
+        },
+      }),
+    )
+
+    expect(commands.map(command => command.name)).toEqual([
+      'InstallAccountMenuOutsideClick',
+      'LoadPrefilledWorkspace',
+    ])
+    expect(commands[1]?.args).toEqual({ workspaceId: 'workspace_seed' })
+    expect(loadCommands.map(command => command.name)).toEqual([
+      'LoadPrefilledWorkspace',
+    ])
+    expect(loadedModel.prefilledWorkspace).toMatchObject({
+      _tag: 'PrefilledWorkspaceLoaded',
+      workspace: {
+        id: 'workspace_seed',
+        projectName: 'Seeded Storefront Sprint',
+      },
     })
   })
 
@@ -1209,6 +1327,7 @@ describe('logged-in Autopilot chat runs', () => {
       'LoadTeamChatMessages',
       'LoadThreadFiles',
       'FocusChatComposer',
+      'RequestNotificationPermission',
     ])
     expect(commands[3]?.args).toEqual({
       href: '/api/teams/team_openagents_core/chat/messages',
@@ -1234,6 +1353,7 @@ describe('logged-in Autopilot chat runs', () => {
       'LoadSyncSnapshot',
       'InstallAccountMenuOutsideClick',
       'FocusChatComposer',
+      'RequestNotificationPermission',
     ])
   })
 
@@ -1951,6 +2071,7 @@ describe('logged-in Autopilot chat runs', () => {
       'LoadSyncSnapshot',
       'InstallAccountMenuOutsideClick',
       'LoadThreadFileDetail',
+      'RequestNotificationPermission',
     ])
     expect(commands[2]?.args).toEqual({
       fileId: 'file_1',

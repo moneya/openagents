@@ -8,13 +8,24 @@ import type {
   NexusTreasuryPayoutIntentRecord,
   NexusTreasuryPayoutReconciliationEventRecord,
 } from './nexus-treasury-payout-ledger'
+import type {
+  Nip90MarketReceiptStore,
+  Nip90MarketSettlementReceiptRecord,
+} from './nip90-market-receipts'
 import {
   PUBLIC_PYLON_STATS_URL,
   publicPylonStatsFromNexusPayload,
   publicPylonStatsFromRegistrations,
 } from './public-pylon-stats'
 import { handlePublicPylonStatsApi } from './public-pylon-stats-routes'
+import { publicScannerSafeRef } from './public-ref-scanner-safety'
 import type { PylonApiRegistrationRecord } from './pylon-api'
+import type { TreasuryTransactionRecord } from './treasury-page-routes'
+import {
+  buildTrainingRunRecord,
+  buildTrainingWindowLeaseRecord,
+  buildTrainingWindowRecord,
+} from './training-run-window-authority'
 
 const nowUnixMs = Date.parse('2026-06-08T14:00:00.000Z')
 
@@ -37,6 +48,10 @@ const registration = (
   ownerAgentCredentialId: 'credential_agent_public',
   ownerAgentTokenPrefix: 'oa_agent_test',
   ownerAgentUserId: 'agent_public',
+  providerMarketRelayRefs: [],
+  providerNip90LaneRefs: [],
+  providerNostrNpub: null,
+  providerNostrPubkey: null,
   publicProjectionJson: '{}',
   resourceMode: 'background_20',
   status: 'active',
@@ -212,6 +227,113 @@ const settlementReceiptStore = (
   return store
 }
 
+const marketReceipt = (
+  input: Partial<Nip90MarketSettlementReceiptRecord> &
+    Pick<Nip90MarketSettlementReceiptRecord, 'receiptRef' | 'streamKind'>,
+): Nip90MarketSettlementReceiptRecord => {
+  const { receiptRef, streamKind, ...overrides } = input
+
+  return {
+    amountMsats: 2_000,
+    createdAt: '2026-06-08T13:45:00.000Z',
+    jobRef: `buy_mode_job_${receiptRef}`,
+    receiptRef,
+    requestEventRef: `event.request.${receiptRef}`,
+    resultEventRef: `event.result.${receiptRef}`,
+    settledAt: '2026-06-08T13:57:00.000Z',
+    state: 'settled',
+    streamKind,
+    ...overrides,
+  }
+}
+
+const marketReceiptStore = (
+  records: ReadonlyArray<Nip90MarketSettlementReceiptRecord>,
+): Nip90MarketReceiptStore => ({
+  listSettledMarketReceipts: () => Promise.resolve(records),
+  readSettledMarketReceiptByRef: receiptRef =>
+    Promise.resolve(
+      records.find(record => record.receiptRef === receiptRef) ?? null,
+    ),
+})
+
+const treasuryPayoutTransaction = (
+  input: Readonly<{
+    amountSat: number
+    createdAt?: string
+    id: string
+    settledAt?: string | null
+    state?: TreasuryTransactionRecord['state']
+  }>,
+): TreasuryTransactionRecord => ({
+  amountSat: input.amountSat,
+  bolt11: null,
+  createdAt: input.createdAt ?? '2026-06-08T13:57:00.000Z',
+  direction: 'out',
+  expiresAt: null,
+  failureReasonRef: null,
+  id: input.id,
+  owedRef: null,
+  owedSat: null,
+  paymentRef: `payment.public.${input.id}`,
+  recipientConfirmationRef: null,
+  recipientConfirmationState: 'unconfirmed',
+  recipientConfirmedAt: null,
+  recipientRef: null,
+  redactedDestinationRef: null,
+  settledAt: input.settledAt ?? '2026-06-08T13:58:00.000Z',
+  state: input.state ?? 'settled',
+})
+
+const treasuryPayoutStore = (
+  transactions: ReadonlyArray<TreasuryTransactionRecord>,
+) => ({
+  listRecent: () => Promise.resolve(transactions),
+})
+
+const trainingContributorStore = (pylonRefs: ReadonlyArray<string>) => {
+  const run = buildTrainingRunRecord({
+    makeId: () => 'stats_run',
+    nowIso: '2026-06-08T13:00:00.000Z',
+    request: {
+      promiseRef: 'promise.public.training.stats',
+      receiptRefs: ['receipt.public.training.stats.run'],
+      sourceRefs: ['source.public.training.stats'],
+      trainingRunRef: 'run.tassadar.executor.20260615',
+    },
+  })
+  const window = buildTrainingWindowRecord({
+    makeId: () => 'stats_window',
+    nowIso: '2026-06-08T13:05:00.000Z',
+    request: {
+      datasetRefs: ['dataset.public.training.stats'],
+      receiptRefs: ['receipt.public.training.stats.window'],
+      sourceRefs: ['source.public.training.stats.window'],
+      trainingRunRef: run.trainingRunRef,
+      windowRef: 'window.public.training.stats',
+    },
+  })
+  const leases = pylonRefs.map((pylonRef, index) =>
+    buildTrainingWindowLeaseRecord({
+      makeId: () => `stats_lease_${index}`,
+      nowIso: '2026-06-08T13:10:00.000Z',
+      request: {
+        pylonRef,
+        receiptRefs: [`receipt.public.training.stats.lease.${index}`],
+      },
+      window,
+    }),
+  )
+
+  return {
+    listVerificationChallengesForRun: () => Promise.resolve([]),
+    listWindowLeasesForRun: () => Promise.resolve(leases),
+    listWindowsForRun: () => Promise.resolve([window]),
+    readRun: (trainingRunRef: string) =>
+      Promise.resolve(trainingRunRef === run.trainingRunRef ? run : undefined),
+  }
+}
+
 describe('public pylon stats', () => {
   afterEach(() => {
     vi.useRealTimers()
@@ -380,8 +502,106 @@ describe('public pylon stats', () => {
       'pylon.public.online_wallet_not_ready',
       'pylon.public.seen_not_online',
     ])
+    expect(stats.recentPylons[0]).toMatchObject({
+      ownerAgentRef: 'agent:agent_public',
+      pylonRef: 'pylon.public.online_wallet_ready',
+      tipEndpoint:
+        '/api/pylons/pylon.public.online_wallet_ready/tips/ladder',
+      tippingAvailable: true,
+    })
     expect(JSON.stringify(stats)).not.toMatch(
       /wallet\.secret|lnbc|preimage|\/Users\/|provider_secret|customer@example.com|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+    )
+  })
+
+  test('renders scanner-shaped capability refs safely in recent Pylon products', () => {
+    const scannerShapedCapabilityRef =
+      'edge-pylon-capability-8b378373002501f3e896dcd3'
+    const stats = publicPylonStatsFromRegistrations(
+      [
+        registration({
+          capabilityRefs: [
+            scannerShapedCapabilityRef,
+            'capability.public.inference',
+          ],
+          pylonRef: 'pylon.public.online_wallet_ready',
+        }),
+      ],
+      nowUnixMs,
+    )
+
+    expect(stats.recentPylons[0]?.products).toEqual([
+      'capability.public.inference',
+      publicScannerSafeRef(
+        'capability.public.pylon_stats',
+        scannerShapedCapabilityRef,
+      ),
+    ])
+    expect(JSON.stringify(stats)).not.toContain(scannerShapedCapabilityRef)
+  })
+
+  test('self-describes counter windows so rows can never contradict counters unlabeled', () => {
+    const stats = publicPylonStatsFromRegistrations(
+      [
+        registration({
+          pylonRef: 'pylon.public.fresh_online',
+        }),
+        registration({
+          // Reported "online" 20 minutes ago: inside the 24h sample window,
+          // outside the 5-minute online-now window. This is the exact shape
+          // from issue #4735 and must now be reconcilable from the JSON.
+          latestHeartbeatAt: '2026-06-08T13:40:00.000Z',
+          pylonRef: 'pylon.public.stale_reported_online',
+        }),
+      ],
+      nowUnixMs,
+    )
+
+    expect(stats.counterWindows).toMatchObject({
+      assignmentReadyNowWindowMinutes: 5,
+      onlineNowWindowMinutes: 5,
+      recentPylonsLimit: 12,
+      recentPylonsWindowMinutes: 1440,
+      seen24hWindowMinutes: 1440,
+      walletReadyNowWindowMinutes: 5,
+    })
+    expect(stats.counterWindows.onlineHeartbeatStatuses).toContain('online')
+    expect(stats.counterWindows.definitionRefs).toContain(
+      'definition.public.pylon_stats.runtime_state_is_last_reported_not_live.v1',
+    )
+    expect(stats.caveatRefs).toContain(
+      'caveat.public.recent_pylon_runtime_state_is_last_reported_not_live',
+    )
+
+    const fresh = stats.recentPylons.find(
+      pylon => pylon.nostrPubkeyShort === 'pylon.public.fresh_online',
+    )
+    const stale = stats.recentPylons.find(
+      pylon => pylon.nostrPubkeyShort === 'pylon.public.stale_reported_online',
+    )
+
+    expect(fresh).toMatchObject({
+      assignmentReadyNow: true,
+      lastHeartbeatAgeSeconds: 120,
+      onlineNow: true,
+      runtimeState: 'online',
+      walletReadyNow: true,
+    })
+    expect(stale).toMatchObject({
+      assignmentReadyNow: false,
+      lastHeartbeatAgeSeconds: 1200,
+      onlineNow: false,
+      runtimeState: 'online',
+      walletReadyNow: false,
+    })
+
+    const rowsCountedOnline = stats.recentPylons.filter(
+      pylon => pylon.onlineNow === true,
+    ).length
+
+    expect(stats.pylonsOnlineNow).toBe(rowsCountedOnline)
+    expect(stats.pylonsWalletReadyNow).toBe(
+      stats.recentPylons.filter(pylon => pylon.walletReadyNow === true).length,
     )
   })
 
@@ -703,6 +923,8 @@ describe('public pylon stats', () => {
       nexusAcceptedWorkPayoutReceiptRefs: ['receipt.nexus.public.counted'],
       nexusAcceptedWorkPayoutSatsPaid24h: 13,
       nexusAcceptedWorkPayoutSatsPaidTotal: 13,
+      publicRealSatsSettled24h: 13,
+      publicRealSatsSettledTotal: 13,
       nexusAcceptedWorkSettlementGate: {
         publicPaidWorkTotalsAllowed: true,
         state: 'ready',
@@ -758,6 +980,183 @@ describe('public pylon stats', () => {
         state: 'unavailable',
       },
     })
+  })
+
+  test('counts only settled public NIP-90 market receipts by stream', async () => {
+    const response = await Effect.runPromise(
+      handlePublicPylonStatsApi(
+        new Request('https://openagents.com/api/public/pylon-stats'),
+        {
+          marketReceiptStore: marketReceiptStore([
+            marketReceipt({
+              amountMsats: 2_000,
+              receiptRef: 'receipt.nip90_market.compute.settled_recent',
+              streamKind: 'compute',
+            }),
+            marketReceipt({
+              amountMsats: 3_000,
+              receiptRef: 'receipt.nip90_market.data.settled_old',
+              settledAt: '2026-06-06T13:57:00.000Z',
+              streamKind: 'data',
+            }),
+            marketReceipt({
+              receiptRef: 'receipt.nip90_market.labor.pending',
+              state: 'issued',
+              streamKind: 'labor',
+            }),
+            marketReceipt({
+              amountMsats: 1_500,
+              receiptRef: 'receipt.nip90_market.compute.fractional_msat',
+              streamKind: 'compute',
+            }),
+          ]),
+          nowUnixMs: () => nowUnixMs,
+          store: storeFor([registration({ pylonRef: 'pylon.public.ready' })]),
+        },
+      ),
+    )
+    const stats = (await response.json()) as Record<string, any>
+
+    expect(response.status).toBe(200)
+    expect(stats.nip90MarketSettlementStats).toMatchObject({
+      available: true,
+      compute: {
+        jobsSettled24h: 1,
+        jobsSettledTotal: 1,
+        receiptRefs: ['receipt.nip90_market.compute.settled_recent'],
+        satsSettled24h: 2,
+        satsSettledTotal: 2,
+        streamKind: 'compute',
+      },
+      data: {
+        jobsSettled24h: 0,
+        jobsSettledTotal: 1,
+        receiptRefs: ['receipt.nip90_market.data.settled_old'],
+        satsSettled24h: 0,
+        satsSettledTotal: 3,
+        streamKind: 'data',
+      },
+      labor: {
+        jobsSettled24h: 0,
+        jobsSettledTotal: 0,
+        receiptRefs: [],
+        satsSettled24h: 0,
+        satsSettledTotal: 0,
+        streamKind: 'labor',
+      },
+    })
+    expect(JSON.stringify(stats.nip90MarketSettlementStats)).not.toMatch(
+      /lnbc|bolt11|invoice|preimage|payment_hash|wallet|mnemonic|private_key/,
+    )
+  })
+
+  test('aggregates real homepage sats across treasury, NIP-90, and accepted-work rails', async () => {
+    const acceptedIntent = payoutIntent({
+      amountSats: 21,
+      payoutIntentRef: 'intent.public.accepted_work',
+    })
+    const acceptedAttempt = payoutAttempt({
+      payoutAttemptRef: 'attempt.public.accepted_work',
+      payoutIntentRef: acceptedIntent.payoutIntentRef,
+    })
+    const acceptedEvent = reconciliationEvent({
+      eventRef: 'event.public.accepted_work',
+      payoutAttemptRef: acceptedAttempt.payoutAttemptRef,
+      payoutIntentRef: acceptedIntent.payoutIntentRef,
+    })
+    const response = await Effect.runPromise(
+      handlePublicPylonStatsApi(
+        new Request('https://openagents.com/api/public/pylon-stats'),
+        {
+          marketReceiptStore: marketReceiptStore([
+            marketReceipt({
+              amountMsats: 2_000,
+              receiptRef: 'receipt.nip90_market.compute.stats',
+              streamKind: 'compute',
+            }),
+          ]),
+          nowUnixMs: () => nowUnixMs,
+          receiptStore: settlementReceiptStore({
+            attempts: [acceptedAttempt],
+            events: [acceptedEvent],
+            intents: [acceptedIntent],
+            receipts: [
+              paymentReceipt({
+                eventRef: acceptedEvent.eventRef,
+                payoutAttemptRef: acceptedAttempt.payoutAttemptRef,
+                payoutIntentRef: acceptedIntent.payoutIntentRef,
+                receiptRef: 'receipt.nexus.public.accepted_work',
+              }),
+            ],
+          }),
+          store: storeFor([registration({ pylonRef: 'pylon.public.ready' })]),
+          treasuryPayoutStore: treasuryPayoutStore([
+            treasuryPayoutTransaction({
+              amountSat: 50_000,
+              id: 'treasury_payout_public_recognition',
+            }),
+            treasuryPayoutTransaction({
+              amountSat: 9_999,
+              createdAt: '2026-06-06T13:57:00.000Z',
+              id: 'treasury_payout_public_old',
+              settledAt: '2026-06-06T13:58:00.000Z',
+            }),
+            treasuryPayoutTransaction({
+              amountSat: 123,
+              id: 'treasury_payout_public_pending',
+              settledAt: null,
+              state: 'pending',
+            }),
+          ]),
+        },
+      ),
+    )
+    const stats = (await response.json()) as Record<string, unknown>
+
+    expect(response.status).toBe(200)
+    expect(stats).toMatchObject({
+      nexusAcceptedWorkPayoutSatsPaid24h: 21,
+      publicRealSatsSettled24h: 50_002,
+      publicRealSatsSettledTotal: 60_001,
+      treasuryPayoutCount24h: 1,
+      treasuryPayoutCountTotal: 2,
+      treasuryPayoutSatsPaid24h: 50_000,
+      treasuryPayoutSatsPaidTotal: 59_999,
+    })
+    expect((stats.caveatRefs as ReadonlyArray<string>)).toContain(
+      'caveat.public.accepted_work_not_added_on_top_of_treasury_outflows_to_avoid_double_count',
+    )
+    expect(JSON.stringify(stats)).not.toMatch(
+      /lnbc|bolt11|invoice|preimage|payment_hash|wallet_secret|mnemonic|private_key/,
+    )
+  })
+
+  test('projects training contributors from the live run authority store', async () => {
+    const response = await Effect.runPromise(
+      handlePublicPylonStatsApi(
+        new Request('https://openagents.com/api/public/pylon-stats'),
+        {
+          nowUnixMs: () => nowUnixMs,
+          store: storeFor([registration({ pylonRef: 'pylon.public.ready' })]),
+          trainingStore: trainingContributorStore([
+            'pylon.public.training.alpha',
+            'pylon.public.training.alpha',
+            'pylon.public.training.beta',
+          ]),
+        },
+      ),
+    )
+    const stats = (await response.json()) as Record<string, unknown>
+
+    expect(response.status).toBe(200)
+    expect(stats).toMatchObject({
+      trainingAcceptedContributors: 0,
+      trainingAssignedContributors: 2,
+      trainingModelProgressContributors: 2,
+    })
+    expect((stats.caveatRefs as ReadonlyArray<string>)).toContain(
+      'caveat.public.training_contributors_are_live_run_contributor_refs_not_stale_registrations',
+    )
   })
 
   test('serves no-store public stats from the injected Omega store', async () => {

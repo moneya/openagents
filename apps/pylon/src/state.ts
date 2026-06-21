@@ -3,9 +3,11 @@ import { existsSync } from "node:fs"
 import { createHash, randomUUID } from "node:crypto"
 import { hostname } from "node:os"
 import { dirname } from "node:path"
-import type { BootstrapSummary } from "./bootstrap"
-import type { PylonHostInventoryProjection } from "./inventory"
-import { loadOrCreateNostrIdentity } from "./nostr-identity"
+import { PYLON_DEFAULT_CAPABILITY_REFS, type BootstrapSummary } from "./bootstrap.js"
+import { PYLON_VERSION, type PylonVersion } from "./version.js"
+import type { PylonHostInventoryProjection } from "./inventory.js"
+import type { PsionicConnectorState } from "./psionic-connector.js"
+import { loadOrCreateNostrIdentity } from "./nostr-identity.js"
 
 export type PylonLifecycleState = "offline" | "online" | "paused" | "degraded" | "assignment-ready"
 
@@ -43,7 +45,7 @@ export type PylonRuntimeState = {
 export type PylonLocalState = {
   schema: "openagents.pylon.local_state.v0.3"
   packageName: "@openagentsinc/pylon"
-  version: "0.3.0-rc1"
+  version: PylonVersion
   paths: PylonPaths
   identity: PylonIdentity
   runtime: PylonRuntimeState
@@ -60,6 +62,12 @@ export type PylonPresenceState = {
   lastHeartbeatAt: string | null
   heartbeatSequence: number
   blockerRefs: string[]
+  // #5305: the redacted `payout.spark.<digest>` ref of this node's OWN Spark
+  // address once it has been auto-registered as a payout target. Null until the
+  // first successful auto-register. This is a digest (public-safe), NEVER the
+  // raw `spark1…` address — that only ever rides the authenticated private
+  // request body. Persisted so the auto-register is idempotent across reboots.
+  sparkPayoutTargetRef: string | null
   updatedAt: string
 }
 
@@ -83,13 +91,30 @@ export type PublicProjection =
   | Record<string, unknown>
 
 const forbiddenKeyPattern =
-  /(^|[._-])(wallet_seed|seed|mnemonic|private_key|privatekey|preimage|bearer|access_token|api_key|apikey|provider_token|provider_auth|raw_prompt|raw_prompts|private_repo|repo_content|private_topology|cache_path|cachepath|env_dump|environment_dump|capacity_pool_secret|internal_accounting_credential|invoice|offer|payment_hash|payment_preimage|secret|password|xprv)([._-]|$)/i
+  /(^|[._-])(wallet_seed|seed|mnemonic|private_key|privatekey|preimage|bearer|access_token|api_key|apikey|provider_token|provider_auth|raw_prompt|raw_prompts|private_repo|repo_content|private_topology|cache_path|cachepath|env_dump|environment_dump|capacity_pool_secret|internal_accounting_credential|invoice|offer|payment_hash|payment_preimage|spark_address|spark_invoice|spark_request|secret|password|xprv)([._-]|$)/i
 
 const forbiddenExactKeyPattern =
-  /^(walletSeed|seed|mnemonic|privateKey|private_key|preimage|bearer|accessToken|apiKey|providerToken|providerAuth|rawPrompt|rawPrompts|privateRepo|repoContent|privateTopology|cachePath|envDump|environmentDump|capacityPoolSecret|internalAccountingCredential|invoice|offer|paymentHash|paymentPreimage|secret|password|xprv)$/i
+  /^(walletSeed|seed|mnemonic|privateKey|private_key|preimage|bearer|accessToken|apiKey|providerToken|providerAuth|rawPrompt|rawPrompts|privateRepo|repoContent|privateTopology|cachePath|envDump|environmentDump|capacityPoolSecret|internalAccountingCredential|invoice|offer|paymentHash|paymentPreimage|sparkAddress|sparkInvoice|sparkRequest|secret|password|xprv)$/i
 
-const forbiddenStringPattern =
-  /\b(wallet seed|mnemonic|private key|payment preimage|bearer\s+[a-z0-9._-]+|sk-[a-z0-9_-]+|lnbc[a-z0-9]+|lntb[a-z0-9]+|lno[a-z0-9]+|private-repo:\/\/|private_repo|raw prompt|capacity pool secret|internal accounting credential|xprv|\/Users\/[^\s]+\/\.cache|\/home\/[^\s]+\/\.cache)\b/i
+const forbiddenStringPatterns = [
+  /\b(?:wallet seed|mnemonic|private key|capacity pool secret|internal accounting credential)\s*[:=]\s*\S+/i,
+  /\bpayment preimage\s+\S+/i,
+  /\bbearer\s+(?!token\b)[a-z0-9._-]{6,}\b/i,
+  /\bsk-[a-z0-9_-]+\b/i,
+  /\blnbc[a-z0-9]+\b/i,
+  /\blntb[a-z0-9]+\b/i,
+  /\blno[a-z0-9]+\b/i,
+  /\bspark1[a-z0-9]{20,}\b/i,
+  /\bsprt1[a-z0-9]{20,}\b/i,
+  /\bspt1[a-z0-9]{20,}\b/i,
+  /\bsp1[a-z0-9]{20,}\b/i,
+  /\bprivate-repo:\/\/\S*/i,
+  /\bprivate_repo\b/i,
+  /\braw prompt\b/i,
+  /\bxprv[a-z0-9]+\b/i,
+  /\/Users\/[^\s]+\/\.cache\b/i,
+  /\/home\/[^\s]+\/\.cache\b/i,
+]
 
 function stableHash(input: string, length = 24) {
   return createHash("sha256").update(input).digest("hex").slice(0, length)
@@ -179,11 +204,22 @@ export async function loadOrCreateRuntimeState(
 ) {
   await ensureStateDirectories(paths)
   const existing = await readJsonFile<PylonRuntimeState>(paths.runtimeState)
+  const requestedCapabilityRefs = input.capabilityRefs ?? []
+  const defaultCapabilityRefSet = new Set<string>(PYLON_DEFAULT_CAPABILITY_REFS)
+  const defaultOnly =
+    requestedCapabilityRefs.length > 0 &&
+    requestedCapabilityRefs.every(ref => defaultCapabilityRefSet.has(ref))
+  const capabilityRefs =
+    requestedCapabilityRefs.length === 0
+      ? existing?.capabilityRefs ?? []
+      : defaultOnly && existing?.capabilityRefs
+        ? [...new Set([...existing.capabilityRefs, ...requestedCapabilityRefs])]
+        : requestedCapabilityRefs
   const state: PylonRuntimeState = {
     lifecycle: existing?.lifecycle ?? "offline",
     displayName: input.displayName ?? existing?.displayName ?? null,
     resourceMode: input.resourceMode ?? existing?.resourceMode ?? "background_20",
-    capabilityRefs: input.capabilityRefs ?? existing?.capabilityRefs ?? [],
+    capabilityRefs,
     blockerRefs: existing?.blockerRefs ?? [],
     updatedAt: new Date().toISOString(),
   }
@@ -204,6 +240,7 @@ export async function loadOrCreatePresenceState(paths: PylonPaths, identity: Pyl
     lastHeartbeatAt: existing?.lastHeartbeatAt ?? null,
     heartbeatSequence: existing?.heartbeatSequence ?? 0,
     blockerRefs: existing?.blockerRefs ?? [],
+    sparkPayoutTargetRef: existing?.sparkPayoutTargetRef ?? null,
     updatedAt: new Date().toISOString(),
   }
   await writeFile(paths.presenceState, `${JSON.stringify(state, null, 2)}\n`)
@@ -213,6 +250,11 @@ export async function loadOrCreatePresenceState(paths: PylonPaths, identity: Pyl
 export async function writePresenceState(paths: PylonPaths, state: PylonPresenceState) {
   await ensureStateDirectories(paths)
   await writeFile(paths.presenceState, `${JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2)}\n`)
+}
+
+export async function writeRuntimeState(paths: PylonPaths, state: PylonRuntimeState) {
+  await ensureStateDirectories(paths)
+  await writeFile(paths.runtimeState, `${JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2)}\n`)
 }
 
 export async function ensurePylonLocalState(summary: BootstrapSummary): Promise<PylonLocalState> {
@@ -231,7 +273,7 @@ export async function ensurePylonLocalState(summary: BootstrapSummary): Promise<
   return {
     schema: "openagents.pylon.local_state.v0.3",
     packageName: "@openagentsinc/pylon",
-    version: "0.3.0-rc1",
+    version: PYLON_VERSION,
     paths,
     identity,
     runtime,
@@ -242,7 +284,7 @@ export async function ensurePylonLocalState(summary: BootstrapSummary): Promise<
 export function assertPublicProjectionSafe(value: unknown, path = "projection"): asserts value is PublicProjection {
   if (value === null || value === undefined) return
   if (typeof value === "string") {
-    if (forbiddenStringPattern.test(value)) {
+    if (forbiddenStringPatterns.some(pattern => pattern.test(value))) {
       throw new Error(`${path} contains private-data-shaped text`)
     }
     return
@@ -257,7 +299,11 @@ export function assertPublicProjectionSafe(value: unknown, path = "projection"):
   }
 }
 
-export function projectPublicStatus(state: PylonLocalState, inventory?: PylonHostInventoryProjection) {
+export function projectPublicStatus(
+  state: PylonLocalState,
+  inventory?: PylonHostInventoryProjection,
+  psionicConnector?: PsionicConnectorState,
+) {
   const projection = {
     kind: "status",
     state: {
@@ -274,6 +320,7 @@ export function projectPublicStatus(state: PylonLocalState, inventory?: PylonHos
       runtime: state.runtime,
       presence: state.presence,
       inventory,
+      psionicConnector,
     },
   } as const
 

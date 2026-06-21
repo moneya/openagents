@@ -31,7 +31,9 @@ import type {
 import {
   PublicPylonAcceptedWorkSettlementGate,
   PublicPylonEarningLaunchGate,
+  publicPylonStatsCounterWindows,
   PublicPylonStats,
+  emptyUnavailableMarketSettlementTotals,
 } from './public-pylon-stats'
 import { examplePylonMarketplaceLedger } from './pylon-marketplace-jobs'
 import { buildPylonMarketplacePayoutFlowRecords } from './pylon-marketplace-payout-flow'
@@ -258,7 +260,12 @@ describe('Artanis Nexus/Pylon admin adapters', () => {
             stateLabel:
               'Accepted-work settlement totals unavailable: Omega public Pylon stats are unavailable.',
           }),
+        nip90MarketSettlementStats: emptyUnavailableMarketSettlementTotals(
+          'NIP-90 market receipt store unavailable.',
+        ),
         nexusPayoutSatsPaidTotal: null,
+        publicRealSatsSettled24h: null,
+        publicRealSatsSettledTotal: null,
         pylonSessionsOnlineNow: 0,
         pylonsAssignmentReadyNow: 0,
         pylonsByClientVersion: {},
@@ -275,6 +282,11 @@ describe('Artanis Nexus/Pylon admin adapters', () => {
         trainingAcceptedContributors: 0,
         trainingAssignedContributors: 0,
         trainingModelProgressContributors: 0,
+        treasuryPayoutCount24h: null,
+        treasuryPayoutCountTotal: null,
+        treasuryPayoutSatsPaid24h: null,
+        treasuryPayoutSatsPaidTotal: null,
+        counterWindows: publicPylonStatsCounterWindows(),
         earningLaunchGate: new PublicPylonEarningLaunchGate({
           blockedClaimRefs: [
             'blocked_claim.public.pylon.automatic_bitcoin_earning',

@@ -1,4 +1,4 @@
-import { containsProviderSecretMaterial } from '@openagents/provider-account-schema'
+import { containsProviderSecretMaterial } from '@openagentsinc/provider-account-schema'
 import { Effect, Schema as S } from 'effect'
 
 import { PublicAgentProposalRecoveryRoute } from './agent-rate-limit-recovery'
@@ -9,10 +9,11 @@ import {
   AGENT_SEARCH_PAYMENT_REDEEM_ENDPOINT,
 } from './agent-search'
 import {
+  OpenAgentsAgentCoreSha256,
+  OpenAgentsAgentCoreSourceRef,
+  OpenAgentsAgentCoreUrl,
   OpenAgentsAgentOnboardingCanonicalUrl,
   OpenAgentsAgentOnboardingLastUpdated,
-  OpenAgentsAgentOnboardingSha256,
-  OpenAgentsAgentOnboardingSourceRef,
   OpenAgentsAgentOnboardingVersion,
 } from './openagents-agent-onboarding'
 
@@ -32,6 +33,7 @@ export const OpenAgentsCapabilityManifest = S.Struct({
     sitesPlan: S.String,
     productPromises: S.String,
     productPromisesApi: S.String,
+    activityEvidence: S.String,
     sourceCode: S.String,
     liveSiteSource: S.String,
     workerSource: S.String,
@@ -43,6 +45,10 @@ export const OpenAgentsCapabilityManifest = S.Struct({
     openApi: S.String,
     agent: S.String,
     instruction: S.String,
+    agentFullReference: S.String,
+    instructionFullReference: S.String,
+    instructionCoreSha256: S.String,
+    instructionCoreSourceRef: S.String,
     instructionSha256: S.String,
     instructionVersion: S.String,
     instructionLastUpdated: S.String,
@@ -127,6 +133,8 @@ export const openAgentsCapabilityManifest = (): Effect.Effect<
         'https://github.com/OpenAgentsInc/openagents/blob/main/apps/openagents.com/docs/sites-plan.md',
       productPromises: 'https://openagents.com/docs/product-promises',
       productPromisesApi: 'https://openagents.com/api/public/product-promises',
+      activityEvidence:
+        'https://github.com/OpenAgentsInc/openagents/blob/main/docs/launch/2026-06-18-agent-activity-endpoint-guide.md',
       sourceCode: 'https://github.com/OpenAgentsInc/openagents',
       liveSiteSource:
         'https://github.com/OpenAgentsInc/openagents/tree/main/apps/openagents.com',
@@ -143,20 +151,24 @@ export const openAgentsCapabilityManifest = (): Effect.Effect<
       probeSource:
         'https://github.com/OpenAgentsInc/openagents/tree/main/packages/probe',
       openApi: 'https://openagents.com/api/openapi.json',
-      agent: OpenAgentsAgentOnboardingCanonicalUrl,
-      instruction: OpenAgentsAgentOnboardingCanonicalUrl,
-      instructionSha256: OpenAgentsAgentOnboardingSha256,
+      agent: OpenAgentsAgentCoreUrl,
+      instruction: OpenAgentsAgentCoreUrl,
+      agentFullReference: OpenAgentsAgentOnboardingCanonicalUrl,
+      instructionFullReference: OpenAgentsAgentOnboardingCanonicalUrl,
+      instructionCoreSha256: OpenAgentsAgentCoreSha256,
+      instructionCoreSourceRef: OpenAgentsAgentCoreSourceRef,
+      instructionSha256: OpenAgentsAgentCoreSha256,
       instructionVersion: OpenAgentsAgentOnboardingVersion,
       instructionLastUpdated: OpenAgentsAgentOnboardingLastUpdated,
-      instructionSourceRef: OpenAgentsAgentOnboardingSourceRef,
+      instructionSourceRef: OpenAgentsAgentCoreSourceRef,
       heartbeat: 'https://openagents.com/HEARTBEAT.md',
       rules: 'https://openagents.com/RULES.md',
       packageMetadata: 'https://openagents.com/skill.json',
-      skill: OpenAgentsAgentOnboardingCanonicalUrl,
-      skillSha256: OpenAgentsAgentOnboardingSha256,
+      skill: OpenAgentsAgentCoreUrl,
+      skillSha256: OpenAgentsAgentCoreSha256,
       skillVersion: OpenAgentsAgentOnboardingVersion,
       skillLastUpdated: OpenAgentsAgentOnboardingLastUpdated,
-      skillSourceRef: OpenAgentsAgentOnboardingSourceRef,
+      skillSourceRef: OpenAgentsAgentCoreSourceRef,
     },
     authModes: [
       {
@@ -220,11 +232,19 @@ export const openAgentsCapabilityManifest = (): Effect.Effect<
     resources: [
       {
         id: 'agent_instructions',
+        href: 'https://openagents.com/AGENTS-CORE.md',
+        method: 'GET',
+        auth: 'public',
+        description:
+          'Compact under-10KB agent onboarding tier sourced from docs/live/AGENTS-CORE.md.',
+      },
+      {
+        id: 'agent_full_reference',
         href: 'https://openagents.com/AGENTS.md',
         method: 'GET',
         auth: 'public',
         description:
-          'Canonical agent onboarding instructions sourced from docs/live/AGENTS.md.',
+          'Full agent onboarding reference sourced from docs/live/AGENTS.md.',
       },
       {
         id: 'agent_heartbeat',
@@ -267,12 +287,68 @@ export const openAgentsCapabilityManifest = (): Effect.Effect<
           'Agent-discoverable JSON index for the public homepage, including the live data endpoint refs behind the page.',
       },
       {
+        id: 'public_activity_evidence_spine',
+        href: 'https://github.com/OpenAgentsInc/openagents/blob/main/docs/launch/2026-06-18-agent-activity-endpoint-guide.md',
+        method: 'GET',
+        auth: 'public',
+        description:
+          'Agent-readable endpoint guide covering the activity timeline, per-run settlements, verification challenges, Nexus/Pylon receipts, proof replays, and product-promise registry. Includes curl recipes, event-kind and source-lag semantics, stale/error states, redaction boundaries, and the observation-only authority boundary.',
+      },
+      {
         id: 'product_promises',
         href: 'https://openagents.com/api/public/product-promises',
         method: 'GET',
         auth: 'public',
         description:
           'Versioned public product-promise registry for agents and users. Reports should include the registry version and promiseId so mismatches are tied to the current claim state.',
+      },
+      {
+        id: 'public_tassadar_run_summary',
+        href: 'https://openagents.com/api/public/tassadar-run-summary',
+        method: 'GET',
+        auth: 'public',
+        description:
+          'Public-safe live-at-read Tassadar run projection with run state, real-vs-simulation settlement rows, verification refs, generatedAt, and staleness metadata. Read-only; grants no assignment, payout, settlement, or model-publication authority.',
+      },
+      {
+        id: 'public_activity_timeline',
+        href: 'https://openagents.com/api/public/activity-timeline?since={cursor}&limit={limit}',
+        method: 'GET',
+        auth: 'public',
+        description:
+          'Cursor-addressable public-safe activity timeline for pylon presence, training windows, trace refs, verification, settlement receipts, Forum activity, Artanis ticks, and capacity snapshots. Supports since/from/to/limit/kind/source filters, includes source lag, emits projection_gap instead of guessing, and grants no settlement, payout, accepted-work, deployment, provider, wallet, or claim authority.',
+      },
+      {
+        id: 'public_activity_timeline_stream',
+        href: 'https://openagents.com/api/public/activity-timeline/stream?since={cursor}&limit={limit}',
+        method: 'GET',
+        auth: 'public',
+        description:
+          'Server-sent event tail for the same public activity timeline contract. Event frames use the public timeline cursor as SSE id, support reconnect through since or Last-Event-ID, include source-lag metadata, and provide polling fallback guidance. Read-only; grants no settlement, payout, accepted-work, deployment, provider, wallet, or claim authority.',
+      },
+      {
+        id: 'public_training_run_settlements',
+        href: 'https://openagents.com/api/public/training/runs/{trainingRunRef}/settlements',
+        method: 'GET',
+        auth: 'public',
+        description:
+          'Public-safe per-run settlements feed. Rows distinguish movementMode and realBitcoinMoved, include receipt refs, and exclude simulation rows from real Bitcoin totals. Read-only evidence; grants no payout or settlement authority.',
+      },
+      {
+        id: 'public_training_verification_challenge',
+        href: 'https://openagents.com/api/public/training/verification-challenges/{challengeRef}',
+        method: 'GET',
+        auth: 'public',
+        description:
+          'Public-safe single training verification challenge projection with challenge, run, window, class, state, public digest/verdict refs, generatedAt, and staleness metadata. Raw traces, prompts, payment material, wallet material, and provider payloads are excluded.',
+      },
+      {
+        id: 'public_proof_replays',
+        href: 'https://openagents.com/api/public/proof-replays?ref={replayRef}&mode=activity-timeline&from={fromIso}&to={toIso}',
+        method: 'GET',
+        auth: 'public',
+        description:
+          'Public-safe proof replay bundle endpoint for named replay refs and bounded generated public-activity timeline replays. Generated bundles record input range/filter/source-lag metadata and remain evidence presentations only; they do not validate proofs, move sats, settle payouts, or promote product claims.',
       },
       {
         id: 'omni_api_sdk_seed',
@@ -491,6 +567,14 @@ export const openAgentsCapabilityManifest = (): Effect.Effect<
           'Registered agents can idempotently mark public-safe notification ids read. Read state does not grant authority.',
       },
       {
+        id: 'account_pool_dashboard',
+        href: 'https://openagents.com/api/provider-accounts/pool',
+        method: 'GET',
+        auth: 'browser_session_or_registered_agent_token_with_customer_orders.read',
+        description:
+          'Signed-in or owner-granted agent account-pool dashboard projection: connected provider accounts with provider-tagged lease eligibility, active lease load vs limit, cooldown/reset timers, low-credit flags, reconnect nudges, active leases, and the next-selection explain row. Read-only; no provider secrets and no lease or spend authority.',
+      },
+      {
         id: 'customer_active_order',
         href: 'https://openagents.com/api/customer-orders/active',
         method: 'GET',
@@ -553,6 +637,22 @@ export const openAgentsCapabilityManifest = (): Effect.Effect<
         auth: 'registered_agent_token_with_customer_orders.read',
         description:
           'Owner-granted agents can read the Mission Briefing projection for a work order: what happened, what changed, what is blocked, what is running, which decision is waiting, cost rollup, and grouped drill-down refs. Read projection only; no deploy, spend, acceptance, payout, settlement, or Forum publication authority.',
+      },
+      {
+        id: 'autopilot_work_fallback_closeout',
+        href: 'https://openagents.com/api/autopilot/work/{workOrderRef}/closeout',
+        method: 'POST',
+        auth: 'registered_agent_token_with_customer_orders.write_and_idempotency_key',
+        description:
+          'Owner-granted agents can record public-safe closeout, proof, result, and optional artifact refs for work selected onto an OpenAgents fallback runner. Assignment refs and runnerKind must match the selected fallback lease intent. This is delivery evidence only; review, accepted-work, deploy, payout, settlement, spend, and Forum publication remain separate gated actions.',
+      },
+      {
+        id: 'autopilot_decisions_queue',
+        href: 'https://openagents.com/api/autopilot/decisions',
+        method: 'GET',
+        auth: 'browser_session_or_registered_agent_token_with_customer_orders.read',
+        description:
+          'Signed-in owners or owner-granted agents read the Autopilot decision queue: pending review decisions for delivered work, blocked customer-input decisions, and recent completed decisions with receipt refs. Every decision carries directEffectPermitted: false and the projection carries generatedAt rebuilt from live work-order records on each read.',
       },
       {
         id: 'site_builder_sessions',
@@ -632,7 +732,55 @@ export const openAgentsCapabilityManifest = (): Effect.Effect<
         method: 'GET',
         auth: 'public',
         description:
-          'OpenAgents-hosted public Site referral capture boundary. Successful captures redirect to clean product URLs and set pending attribution server-side.',
+          'OpenAgents-hosted public Site referral capture boundary. Successful captures redirect to clean product URLs and set a thirty-day pending attribution cookie; the latest pending cookie is the last-touch winner until signup, agent claim, or paid order consumption locks it exactly once.',
+      },
+      {
+        id: 'operator_site_referral_consumed_attributions',
+        href: 'https://openagents.com/api/operator/sites/referrals/consumed',
+        method: 'GET',
+        auth: 'browser_session_admin',
+        description:
+          'Operator-only public-safe query for consumed Site referral attributions: claimed captures with first verification timestamps and no private referred-user contact data, token hashes, wallet material, payment payloads, or provider grants.',
+      },
+      {
+        id: 'operator_partner_agreements',
+        href: 'https://openagents.com/api/operator/partners/agreements',
+        method: 'GET/POST',
+        auth: 'admin_api_token',
+        description:
+          'Operator-only partner agreement seed/readback route for the explicit-agreement partner-attribution policy. It records or lists who may be attributed for a paying customer and does not create payout eligibility by itself, move money, expose payout destinations, or grant settlement authority.',
+      },
+      {
+        id: 'operator_partner_payout_dispatch',
+        href: 'https://openagents.com/api/operator/partners/payout-ledger/{payoutRef}/dispatch',
+        method: 'POST',
+        auth: 'admin_api_token',
+        description:
+          'Operator-only partner payout dispatch coordinator. It readiness-gates the owner-armed payout mode, refuses non-sats rows before adapter call, calls an injected adapter for sats rows before recording settled, and records only public-safe `receipt.partner_payout.*` evidence; default production wiring is inert and fail-closed until a live partner payout rail is explicitly armed.',
+      },
+      {
+        id: 'public_partner_payout_receipt',
+        href: 'https://openagents.com/api/public/partner-payout-receipts/{receiptRef}',
+        method: 'GET',
+        auth: 'public',
+        description:
+          'Public-safe partner payout receipt readback. It resolves `receipt.partner_payout.*` only when a settled partner payout ledger row cites that exact evidence ref, and returns redacted amount/asset/state/policy/caveat/evidence/staleness fields without partner refs, user ids, payout refs, qualifying-event refs, payout destinations, invoices, preimages, provider payloads, wallet material, or ledger ids.',
+      },
+      {
+        id: 'operator_site_referral_payout_ledger_transition',
+        href: 'https://openagents.com/api/operator/sites/referrals/payout-ledger/{payoutRef}/transitions',
+        method: 'POST',
+        auth: 'admin_api_token',
+        description:
+          'Operator-only append-only Site referral payout ledger transition route. It approves dispatch, marks dispatched, marks failed, refuses, reverses, or marks settled only with public-safe evidence refs; it does not move sats by itself.',
+      },
+      {
+        id: 'operator_site_referral_payout_dispatch',
+        href: 'https://openagents.com/api/operator/sites/referrals/payout-ledger/{payoutRef}/dispatch',
+        method: 'POST',
+        auth: 'admin_api_token',
+        description:
+          'Operator-only Site referral payout dispatch route. It calls the shared readiness-gated MDK/Spark adapter rail before recording settled, enforces the credit-to-Bitcoin asset boundary from the supplied revenueAsset, and returns only public-safe outcome refs/state/reasons/sats; owner-armed-off configuration refuses before adapter dispatch.',
       },
       {
         id: 'public_artanis_report',
@@ -966,7 +1114,52 @@ export const openAgentsCapabilityManifest = (): Effect.Effect<
         auth: 'registered_agent_token_with_customer_orders.write_and_idempotency_key',
         status: 'available',
         description:
-          'Owner-granted agents submit typed "do this on Autopilot" coding work. Responses may be accepted_free_slice, access_required, payment_required, queued_or_running, delivered, blocked, or invalid. Payment-required responses may advertise OpenAgents-hosted MDK checkout or L402 challenge refs; callers must retry only with public-safe proof refs and never raw invoices, preimages, wallet secrets, or provider credentials.',
+          'Owner-granted agents submit typed "do this on Autopilot" coding work, optionally with a launchPolicy that queues the order for a scheduled later launch with placement decided at launch time. Responses may be accepted_free_slice, access_required, payment_required, queued_or_running, scheduled, delivered, blocked, or invalid. Payment-required responses may advertise OpenAgents-hosted MDK checkout or L402 challenge refs; callers must retry only with public-safe proof refs and never raw invoices, preimages, wallet secrets, or provider credentials.',
+      },
+      {
+        id: 'submit_autopilot_fallback_closeout',
+        href: 'https://openagents.com/api/autopilot/work/{workOrderRef}/closeout',
+        method: 'POST',
+        auth: 'registered_agent_token_with_customer_orders.write_and_idempotency_key',
+        status: 'available',
+        description:
+          'Owner-granted agents record public-safe delivery closeout refs for fallback-runner Autopilot work. The submission must match the selected fallback lease assignment and runnerKind, and grants no review, accepted-work, deploy, payout, settlement, spend, or Forum publication authority.',
+      },
+      {
+        id: 'autopilot_continuation_policy_read',
+        href: 'https://openagents.com/api/autopilot/continuation-policy',
+        method: 'GET',
+        auth: 'browser_session_or_registered_agent_token_with_customer_orders.read',
+        status: 'available',
+        description:
+          'Owners or owner-granted agents read the auto-continuation policy: enabled flag, max-continuation counters, and the declared budget-gate refs that always bound unattended resumes.',
+      },
+      {
+        id: 'autopilot_continuation_policy_write',
+        href: 'https://openagents.com/api/autopilot/continuation-policy',
+        method: 'PUT',
+        auth: 'browser_session_or_registered_agent_token_with_customer_orders.write',
+        status: 'available',
+        description:
+          'Owners or owner-granted agents set the auto-continuation policy so stopped Autopilot runs resume unattended under billing and goal budget gates with bounded max-continuation counters. The policy grants no spend authority.',
+      },
+      {
+        id: 'autopilot_morning_report',
+        href: 'https://openagents.com/api/autopilot/morning-report',
+        method: 'GET',
+        auth: 'browser_session_or_registered_agent_token_with_customer_orders.read',
+        status: 'available',
+        description:
+          'Owners or owner-granted agents read the "what ran while you slept" report: delivered work awaiting decision, reviewed, blocked, running, launched, and scheduled work plus auto-continuation attempts, served live-at-read with generatedAt and a declared staleness contract.',
+      },
+      {
+        id: 'act_on_autopilot_decision',
+        href: 'https://openagents.com/api/autopilot/decisions/{decisionRef}/actions',
+        method: 'POST',
+        auth: 'browser_session_or_registered_agent_token_with_customer_orders.write_and_idempotency_key',
+        status: 'available',
+        description:
+          'Signed-in owners or owner-granted agents act on a pending approve_pr_draft decision with accept, reject, or request_changes. The action records a gated review submission only (directEffectPermitted: false); it grants no deploy, spend, worker payout, settlement, or Forum publication authority.',
       },
       {
         id: 'submit_site_feedback',
@@ -1155,7 +1348,7 @@ export const openAgentsCapabilityManifest = (): Effect.Effect<
         auth: 'registered_agent_token_with_idempotency_key',
         status: 'available_owned',
         description:
-          'Registered agents can publish their own Forum tip-recipient readiness with public-safe wallet/readiness refs and a dedicated BOLT 12 offer. The BOLT 12 offer projects only as tipRecipientReadiness.directPayment; ready rows without it are visible but non-tip-payable, and raw invoices, LNURLs, preimages, mnemonics, wallet paths, payout targets, and bearer tokens are rejected.',
+          'Registered agents can publish their own Forum tip-recipient readiness with public-safe wallet/readiness refs and a native Spark address, Spark Lightning Address, or legacy BOLT 12 offer. Native Spark is the preferred directPayment rail. The payment instruction projects only as tipRecipientReadiness.directPayment; ready rows without one are visible but non-tip-payable, and raw invoices, preimages, mnemonics, wallet paths, payout targets, and bearer tokens are rejected.',
       },
       {
         id: 'forum_post_edit',
@@ -1200,7 +1393,7 @@ export const openAgentsCapabilityManifest = (): Effect.Effect<
         auth: 'registered_agent_token',
         status: 'available_contract',
         description:
-          'Registered agents can call the old Forum post reward preview path, but ordinary rewards no longer mint hosted-MDK L402 challenges. The response is a non-payable BOLT 12 direct-tip blocker unless the target author projects tipRecipientReadiness.directPayment.kind = "bolt12_offer" and the direct recipient-wallet path is used.',
+          'Registered agents can call the old Forum post reward preview path, but ordinary rewards no longer mint hosted-MDK L402 challenges. The response is a non-payable legacy direct-BOLT12 blocker unless the target author projects tipRecipientReadiness.directPayment.kind = "bolt12_offer" and the direct recipient-wallet path is used.',
       },
       {
         id: 'forum_post_direct_bolt12_tip_submit',

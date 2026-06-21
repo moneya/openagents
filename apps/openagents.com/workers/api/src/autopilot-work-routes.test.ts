@@ -5,6 +5,12 @@ import {
   AGENT_TOKEN_PREFIX,
   type AgentRegistrationStore,
 } from './agent-registration'
+import { createHostedGeminiExecutorBinding } from './autopilot-hosted-gemini-binding'
+import { makeHostedGeminiExecuteReadyWork } from './autopilot-hosted-gemini-executor-env'
+import {
+  createHostedGeminiWorkExecutor,
+  type HostedGeminiInferenceCaller,
+} from './autopilot-hosted-gemini-executor'
 import {
   OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES,
 } from './autopilot-work-request'
@@ -12,16 +18,24 @@ import {
   type OpenAgentsL402CredentialPayload,
   makeOpenAgentsL402HmacSigningBoundary,
 } from './l402-credential-service'
+import {
+  InferenceAdapterError,
+  type InferenceProviderAdapter,
+  type InferenceRequest,
+  type InferenceResult,
+} from './inference/provider-adapter'
 import { formatOpenAgentsPaymentCredentialPair } from './l402-payment-headers'
 import {
   type AutopilotWorkExecutor,
   type AutopilotWorkExecutionCloseoutRecord,
   type AutopilotWorkL402PaymentVerificationInput,
   type AutopilotWorkL402PaymentVerificationResult,
+  type AutopilotWorkOrderProjection,
   type AutopilotWorkOrderRecord,
   type AutopilotWorkReviewDecisionRecord,
   type AutopilotWorkStore,
   AutopilotWorkStoreError,
+  dispatchDueScheduledAutopilotWork,
   makeAutopilotWorkRoutes,
   recordAutopilotWorkerCloseoutFromPylon,
   verifyAutopilotL402PaymentProofFromBuyerLedger,
@@ -39,10 +53,14 @@ import type {
 import type {
   PylonApiAssignmentRecord,
   PylonApiEventRecord,
+  PylonApiProviderJobLifecycleRecord,
   PylonApiRegistrationRecord,
   PylonApiStore,
 } from './pylon-api'
-import { PylonApiStoreError } from './pylon-api'
+import {
+  PylonApiStoreError,
+  providerJobLifecycleRecordFromAssignment,
+} from './pylon-api'
 import { makePylonApiRoutes } from './pylon-api-routes'
 
 class MemoryAutopilotWorkStore implements AutopilotWorkStore {
@@ -209,6 +227,48 @@ class MemoryAutopilotWorkStore implements AutopilotWorkStore {
     ownerUserId: string,
     idempotencyKeyHash: string,
   ) => this.recordsByOwnerIdempotency.get(`${ownerUserId}:${idempotencyKeyHash}`)
+
+  listPendingScheduledWorkOrders = async (
+    input: Readonly<{ limit: number }>,
+  ) =>
+    [...this.records.values()]
+      .filter(record =>
+        record.scheduledLaunch !== null &&
+        record.scheduledLaunch.dispatchedAt === null &&
+        record.scheduledLaunch.expiredAt === null
+      )
+      .slice(0, input.limit)
+
+  recordScheduledLaunchTransition = async (input: Readonly<{
+    ownerUserId: string
+    scheduledLaunch: NonNullable<AutopilotWorkOrderRecord['scheduledLaunch']>
+    state: AutopilotWorkOrderRecord['state']
+    updatedAt: string
+    workOrderRef: string
+  }>) => {
+    const existing = this.records.get(input.workOrderRef)
+
+    if (
+      existing === undefined ||
+      existing.ownerUserId !== input.ownerUserId ||
+      existing.scheduledLaunch === null
+    ) {
+      return undefined
+    }
+
+    const updated = {
+      ...existing,
+      scheduledLaunch: input.scheduledLaunch,
+      state: input.state,
+      updatedAt: input.updatedAt,
+    }
+    const key = `${existing.ownerUserId}:${existing.idempotencyKeyHash}`
+
+    this.records.set(existing.workOrderRef, updated)
+    this.recordsByOwnerIdempotency.set(key, updated)
+
+    return updated
+  }
 }
 
 class MemoryPylonApiStore implements PylonApiStore {
@@ -216,6 +276,10 @@ class MemoryPylonApiStore implements PylonApiStore {
   readonly assignmentsByIdempotency = new Map<string, PylonApiAssignmentRecord>()
   readonly events = new Map<string, PylonApiEventRecord>()
   readonly eventsByIdempotency = new Map<string, PylonApiEventRecord>()
+  readonly providerJobLifecycle = new Map<
+    string,
+    PylonApiProviderJobLifecycleRecord
+  >()
   readonly registrations = new Map<string, PylonApiRegistrationRecord>()
 
   constructor(registrations: ReadonlyArray<PylonApiRegistrationRecord>) {
@@ -235,6 +299,10 @@ class MemoryPylonApiStore implements PylonApiStore {
 
     this.assignments.set(record.assignmentRef, record)
     this.assignmentsByIdempotency.set(record.idempotencyKeyHash, record)
+    this.providerJobLifecycle.set(
+      record.assignmentRef,
+      providerJobLifecycleRecordFromAssignment(record),
+    )
 
     return { idempotent: false, record }
   }
@@ -270,6 +338,14 @@ class MemoryPylonApiStore implements PylonApiStore {
   listRegistrations = async (limit: number) =>
     Array.from(this.registrations.values()).slice(0, limit)
 
+  listProviderJobLifecycleForPylons = async (
+    pylonRefs: ReadonlyArray<string>,
+    limit: number,
+  ) =>
+    Array.from(this.providerJobLifecycle.values())
+      .filter(record => pylonRefs.includes(record.pylonRef))
+      .slice(0, limit)
+
   readAssignment = async (assignmentRef: string) =>
     this.assignments.get(assignmentRef)
 
@@ -285,6 +361,18 @@ class MemoryPylonApiStore implements PylonApiStore {
   updateAssignment = async (record: PylonApiAssignmentRecord) => {
     this.assignments.set(record.assignmentRef, record)
     this.assignmentsByIdempotency.set(record.idempotencyKeyHash, record)
+    this.providerJobLifecycle.set(
+      record.assignmentRef,
+      providerJobLifecycleRecordFromAssignment(record),
+    )
+
+    return record
+  }
+
+  upsertProviderJobLifecycle = async (
+    record: PylonApiProviderJobLifecycleRecord,
+  ) => {
+    this.providerJobLifecycle.set(record.assignmentRef, record)
 
     return record
   }
@@ -557,6 +645,7 @@ const agentStoreForScopes = (
       },
     }),
   touchAgentCredential: () => Promise.resolve(),
+  updateAgentDisplayName: () => Promise.resolve(0),
 })
 
 const pylonRegistration = (
@@ -564,7 +653,7 @@ const pylonRegistration = (
 ): PylonApiRegistrationRecord => ({
   capabilityRefs: [
     'capability.pylon.assignment_ready',
-    'capability.pylon.local_codex',
+    'capability.pylon.local_claude_agent',
   ],
   clientProtocolVersion: '0.2.5',
   clientVersion: '0.2.5',
@@ -580,6 +669,10 @@ const pylonRegistration = (
   ownerAgentCredentialId: 'agent_credential_autopilot_work_test',
   ownerAgentTokenPrefix: 'oa_agent',
   ownerAgentUserId: 'agent_user_autopilot_work',
+  providerMarketRelayRefs: [],
+  providerNip90LaneRefs: [],
+  providerNostrNpub: null,
+  providerNostrPubkey: null,
   publicProjectionJson: '{}',
   pylonRef: 'pylon.local.docs_agent',
   resourceMode: 'balanced',
@@ -606,6 +699,7 @@ const route = async (
     pylonStoreRegistrations?: ReadonlyArray<PylonApiRegistrationRecord>
     ownerUserId?: string
     scopes?: ReadonlyArray<string>
+    sessionUserId?: string
     token?: string
     verifyL402PaymentProof?: (
       input: AutopilotWorkL402PaymentVerificationInput,
@@ -632,6 +726,14 @@ const route = async (
     ) =>
       options.verifyL402PaymentProof?.(input) ??
       verifyAutopilotL402PaymentProof(input),
+    ...(options.sessionUserId === undefined
+      ? {}
+      : {
+          requireBrowserSession: () =>
+            Promise.resolve({
+              user: { userId: options.sessionUserId ?? 'github:browser-user' },
+            }),
+        }),
     ...(options.executeReadyWork === undefined
       ? {}
       : {
@@ -682,7 +784,11 @@ const route = async (
     },
     method: options.method ?? (options.body === undefined ? 'GET' : 'POST'),
   })
-  const response = routes.routeAutopilotWorkRequest(request, {})
+  const response = routes.routeAutopilotWorkRequest(
+    request,
+    {},
+    {} as ExecutionContext,
+  )
 
   if (response === undefined) {
     throw new Error(`No Autopilot work route matched ${path}`)
@@ -803,6 +909,22 @@ const responseJson = async (response: Response) =>
     briefing?: Readonly<{
       briefingRef: string
       drilldown: ReadonlyArray<Readonly<{ kind: string; refs: ReadonlyArray<string> }>>
+      receipts: Readonly<{
+        authorityReceiptRefs: ReadonlyArray<string>
+        buyerPaymentProofRef: string | null
+        proofRefs: ReadonlyArray<string>
+        settlementEligible: boolean
+        verificationRefs: ReadonlyArray<string>
+      }>
+      risk: Readonly<{
+        blockerCount: number
+        changeCaptureStatus: string | null
+        deliveryReadinessStatus: string | null
+        level: string
+        reviewCaveatRefs: ReadonlyArray<string>
+        settlementBlockedReasonRef: string
+        worktreeIdentityStatus: string | null
+      }>
       whatHappened: ReadonlyArray<Readonly<{ eventKind: string; sequence: number }>>
     }>
     error?: string
@@ -1080,6 +1202,175 @@ describe('Autopilot work routes', () => {
     expect(detailJson.work).toEqual(firstJson.work)
   })
 
+  test('creates browser-session work orders for own Pylon and metered SHC fallback', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const browserUserId = 'github:browser-autopilot-owner'
+    const promiseRef = {
+      blockerRefs: [],
+      promiseId: 'autopilot.mission_briefing.v1',
+      registryVersion: '2026-06-11.1',
+    }
+    const ownPylon = new MemoryPylonApiStore([
+      pylonRegistration({
+        ownerAgentCredentialId: 'browser_session.github_browser-autopilot-owner',
+        ownerAgentUserId: browserUserId,
+      }),
+    ])
+    const ownPylonRequest = {
+      ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[0],
+      caller: { kind: 'browser_session', ownerRef: 'owner_ref.browser' },
+      clientRequestRef: 'client.browser.20260611.own_pylon',
+      promiseRef,
+      tasks: [
+        {
+          ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[0].tasks[0],
+          accessRequests: [],
+          taskRef: 'task.autopilot_coder.browser_own_pylon',
+        },
+      ],
+    }
+    const fallbackRequest = {
+      ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[1],
+      caller: { kind: 'browser_session', ownerRef: 'owner_ref.browser' },
+      clientRequestRef: 'client.browser.20260611.shc_metered',
+      promiseRef,
+      tasks: [
+        {
+          ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[1].tasks[0],
+          taskRef: 'task.autopilot_coder.browser_shc_metered',
+        },
+      ],
+    }
+
+    const ownPylonResponse = await route(store, '/api/autopilot/work', {
+      body: ownPylonRequest,
+      idempotencyKey: 'browser-own-pylon',
+      pylonApiStore: ownPylon,
+      sessionUserId: browserUserId,
+      token: '',
+    })
+    const ownPylonListResponse = await route(
+      store,
+      '/api/autopilot/work?promiseId=autopilot.mission_briefing.v1',
+      {
+        pylonApiStore: ownPylon,
+        sessionUserId: browserUserId,
+        token: '',
+      },
+    )
+    const fallbackResponse = await route(store, '/api/autopilot/work', {
+      body: fallbackRequest,
+      idempotencyKey: 'browser-shc-metered',
+      sessionUserId: browserUserId,
+      token: '',
+    })
+    const fallbackListResponse = await route(
+      store,
+      '/api/autopilot/work?promiseId=autopilot.mission_briefing.v1',
+      {
+        pylonApiStore: ownPylon,
+        sessionUserId: browserUserId,
+        token: '',
+      },
+    )
+    const ownPylonJson = await responseJson(ownPylonResponse)
+    const fallbackJson = await responseJson(fallbackResponse)
+    const ownPylonWork =
+      ownPylonJson.work as AutopilotWorkOrderProjection | undefined
+    const fallbackWork =
+      fallbackJson.work as AutopilotWorkOrderProjection | undefined
+    type ListedAutopilotWorkOrder = Readonly<{
+      routing: Readonly<{
+        availabilityState: string
+        buyerDebitRequired: boolean
+        fallbackLeaseIntentCount: number
+        fallbackRunnerKind: string | null
+        laneRef: string | null
+        meterKind: string | null
+        pylonAssignmentIntentCount: number
+        selectedRunnerKind: string | null
+        source: string
+      }>
+      workOrderRef: string
+    }>
+    const ownPylonListJson = (await ownPylonListResponse.json()) as Readonly<{
+      workOrders: ReadonlyArray<ListedAutopilotWorkOrder>
+    }>
+    const fallbackListJson = (await fallbackListResponse.json()) as Readonly<{
+      workOrders: ReadonlyArray<ListedAutopilotWorkOrder>
+    }>
+    const listedOwnPylon = ownPylonListJson.workOrders.find(
+      order => order.workOrderRef === ownPylonWork?.workOrderRef,
+    )
+    const listedFallback = fallbackListJson.workOrders.find(
+      order => order.workOrderRef === fallbackWork?.workOrderRef,
+    )
+
+    expect(ownPylonResponse.status).toBe(202)
+    expect(ownPylonWork?.state).toBe('queued_or_running')
+    expect(ownPylonWork?.placementDecision?.selectedRunnerKind).toBe(
+      'requester_pylon',
+    )
+    expect(ownPylonWork?.placementDecision?.reasonRefs).toEqual([
+      'placement.selected.requester_pylon',
+      'placement.pylon.preferred_before_fallback',
+      'pricing.autopilot_work.own_pylon_free',
+      'placement.reason.placed_on_your_pylon_free',
+    ])
+    expect(ownPylonWork?.pricingPolicy.activeLane).toMatchObject({
+      buyerDebitRequired: false,
+      laneRef: 'lane.autopilot_work.requester_pylon_own_job',
+      meterKind: 'none',
+      runnerKind: 'requester_pylon',
+      unitAmountCents: 0,
+    })
+    expect([...ownPylon.assignments.values()]).toHaveLength(1)
+    expect(fallbackResponse.status).toBe(402)
+    expect(fallbackWork?.state).toBe('payment_required')
+    expect(
+      fallbackWork?.placementDecision?.fallbackRunnerKind ??
+        fallbackWork?.placementDecision?.selectedRunnerKind,
+    ).toBe('openagents_shc')
+    expect(fallbackWork?.placementDecision?.reasonRefs).toEqual([
+      'placement.selected.fallback',
+      'placement.fallback.openagents_shc',
+      'pricing.autopilot_work.hosted_runner_metered',
+      'placement.reason.your_pylon_unavailable_hosted_metered',
+    ])
+    expect(fallbackWork?.pricingPolicy.activeLane).toMatchObject({
+      buyerDebitRequired: true,
+      laneRef: 'lane.autopilot_work.openagents_shc_fallback',
+      meterKind: 'usd_credits',
+      runnerKind: 'openagents_shc',
+    })
+    expect(
+      ownPylonListJson.workOrders.map(order => order.workOrderRef),
+    ).toContain(ownPylonJson.work?.workOrderRef)
+    expect(
+      fallbackListJson.workOrders.map(order => order.workOrderRef),
+    ).toContain(fallbackJson.work?.workOrderRef)
+    expect(listedOwnPylon?.routing).toMatchObject({
+      availabilityState: 'selected',
+      buyerDebitRequired: false,
+      fallbackLeaseIntentCount: 0,
+      fallbackRunnerKind: 'openagents_shc',
+      laneRef: 'lane.autopilot_work.requester_pylon_own_job',
+      meterKind: 'none',
+      pylonAssignmentIntentCount: 0,
+      selectedRunnerKind: 'requester_pylon',
+      source: 'requester_pylon',
+    })
+    expect(listedFallback?.routing).toMatchObject({
+      availabilityState: 'selected',
+      buyerDebitRequired: true,
+      fallbackRunnerKind: 'openagents_shc',
+      laneRef: 'lane.autopilot_work.openagents_shc_fallback',
+      meterKind: 'usd_credits',
+      selectedRunnerKind: 'openagents_shc',
+      source: 'fallback',
+    })
+  })
+
   test('carries promiseRef through projections, briefing, and the list filter', async () => {
     const store = new MemoryAutopilotWorkStore()
     const request = {
@@ -1301,6 +1592,8 @@ describe('Autopilot work routes', () => {
       reasonRefs: [
         'placement.selected.requester_pylon',
         'placement.pylon.preferred_before_fallback',
+        'pricing.autopilot_work.own_pylon_free',
+        'placement.reason.placed_on_your_pylon_free',
       ],
       selectedPylonRef: 'pylon.local.docs_agent',
       selectedRunnerKind: 'requester_pylon',
@@ -1330,8 +1623,7 @@ describe('Autopilot work routes', () => {
         pylonRef: 'pylon.local.docs_agent',
         requiredCapabilityRefs: [
           'capability.pylon.assignment_ready',
-          'capability.pylon.local_codex',
-          'capability.pylon.local_coding_agent',
+          'capability.pylon.local_claude_agent',
         ],
         spendCapRefs: ['spend_cap.no_spend.autopilot_pylon_assignment'],
         taskRef: 'task.autopilot_coder.docs_contract',
@@ -1388,8 +1680,9 @@ describe('Autopilot work routes', () => {
     ])
   })
 
-  test('creates one durable no-spend Pylon assignment lease for requester Pylon work', async () => {
+  test('creates one durable no-spend Pylon claude_agent_task git_checkout lease for requester Pylon work', async () => {
     const store = new MemoryAutopilotWorkStore()
+    const buyerPaymentLedgerStore = new MemoryBuyerPaymentLedgerStore()
     const pylonApiStore = new MemoryPylonApiStore([
       pylonRegistration({
         pylonRef: 'pylon.production.docs_agent',
@@ -1397,6 +1690,7 @@ describe('Autopilot work routes', () => {
     ])
     const create = await route(store, '/api/autopilot/work', {
       body: OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[0],
+      buyerPaymentLedgerStore,
       idempotencyKey: 'idem-autopilot-work-pylon-lease',
       pylonApiStore,
     })
@@ -1438,13 +1732,35 @@ describe('Autopilot work routes', () => {
         }),
       ],
       placementDecision: {
+        reasonRefs: [
+          'placement.selected.requester_pylon',
+          'placement.pylon.preferred_before_fallback',
+          'pricing.autopilot_work.own_pylon_free',
+          'placement.reason.placed_on_your_pylon_free',
+        ],
         selectedPylonRef: 'pylon.production.docs_agent',
         selectedRunnerKind: 'requester_pylon',
         source: 'requester_pylon',
       },
+      pricingPolicy: {
+        activeLane: {
+          buyerDebitRequired: false,
+          laneRef: 'lane.autopilot_work.requester_pylon_own_job',
+          meterKind: 'none',
+          runnerKind: 'requester_pylon',
+          unitAmountCents: 0,
+        },
+        policyRef: 'pricing_policy.autopilot_work.v0_3.lane_meter_mapping',
+      },
       pylonAssignmentIntents: [],
       state: 'queued_or_running',
     })
+    expect(createJson.work?.paymentChallengeRef).toBeNull()
+    expect(createJson.work?.funding).toMatchObject({
+      buyerFundingState: 'not_required',
+      fundedAmountCents: 0,
+    })
+    expect(buyerPaymentLedgerStore.creditDebits.size).toBe(0)
     expect(pylonApiStore.assignments.size).toBe(1)
     expect(replay.status).toBe(200)
     expect(replayJson.work?.state).toBe('queued_or_running')
@@ -1459,10 +1775,21 @@ describe('Autopilot work routes', () => {
             paymentMode: 'unpaid_smoke',
             workerPayoutAuthority: false,
           }),
+          claudeAgent: expect.objectContaining({
+            agentKind: 'claude_agent_sdk',
+            schema: 'openagents.pylon.claude_agent_task.v0.3',
+          }),
           closeoutSchema: expect.objectContaining({
             acceptedWorkAuthority: false,
           }),
+          objective: expect.objectContaining({
+            publicSummary: 'Add public-safe Autopilot coder contract docs.',
+          }),
           publicSafe: true,
+          requiredCapabilityRefs: [
+            'capability.pylon.assignment_ready',
+            'capability.pylon.local_claude_agent',
+          ],
           runnerKind: 'requester_pylon',
           schema: 'openagents.autopilot_coding_assignment.v1',
           tracePolicy: expect.objectContaining({
@@ -1471,7 +1798,20 @@ describe('Autopilot work routes', () => {
             rawRunnerLogAllowed: false,
             rawSourceArchiveAllowed: false,
           }),
+          workspace: expect.objectContaining({
+            kind: 'git_checkout',
+            repository: expect.objectContaining({
+              commitSha: '1745cd4b54b8a12a50922f80b5d345314c91d70d',
+              fullName: 'OpenAgentsInc/openagents',
+              visibility: 'public',
+            }),
+            verificationCommand: {
+              args: ['bun', 'test'],
+              commandRef: 'command.public.autopilot_coder.bun_test',
+            },
+          }),
         }),
+        jobKind: 'claude_agent_task',
         leaseState: 'active',
         state: 'offered',
         taskRefs: [
@@ -1523,15 +1863,32 @@ describe('Autopilot work routes', () => {
       {
         body: {
           artifactRefs: ['artifact.public.autopilot_docs.patch_summary'],
+          authorityReceiptRefs: ['authority.public.autopilot_docs.writeback_ready'],
           blockerRefs: [],
           buildRefs: ['build.public.autopilot_docs.not_required'],
+          changeCaptureRefs: ['change-capture.public.autopilot_docs.pack_c'],
+          changeCaptureStatus: 'review_ready',
           closeoutRefs: ['closeout.public.autopilot_docs.worker_summary'],
+          deliveryReadinessFreshness: 'fresh',
+          deliveryReadinessRefs: ['delivery.public.autopilot_docs.ready'],
+          deliveryReadinessStatus: 'ready',
+          fileCount: 2,
+          addedLineCount: 18,
+          patchDigestRef: 'patch-digest.public.autopilot_docs.sha256_abc123',
           previewRefs: ['preview.public.autopilot_docs.not_required'],
           proofRefs: ['proof.public.autopilot_docs.worker_closeout'],
-          resultRefs: ['result.public.autopilot_docs.delivered'],
+          removedLineCount: 4,
+          resultRefs: [
+            'result.public.autopilot_docs.delivered',
+            'result.public.pylon.claude_agent_task.git_checkout_verified_passed',
+          ],
+          reviewCaveatRefs: ['review-caveat.public.autopilot_docs.summary_only'],
           status: 'closeout_submitted',
           summaryRefs: ['summary.public.autopilot_docs.customer_safe'],
           testRefs: ['test.public.autopilot_docs.not_required'],
+          verificationRefs: ['verification.public.autopilot_docs.bun_test'],
+          worktreeIdentityStatus: 'ready',
+          writebackRequired: true,
         },
         idempotencyKey: 'worker-closeout-autopilot-pylon',
         method: 'POST',
@@ -1574,17 +1931,34 @@ describe('Autopilot work routes', () => {
       executionCloseout: {
         acceptedWorkAuthority: false,
         artifactRefs: ['artifact.public.autopilot_docs.patch_summary'],
+        authorityReceiptRefs: ['authority.public.autopilot_docs.writeback_ready'],
         blockerRefs: [],
         buildRefs: ['build.public.autopilot_docs.not_required'],
+        changeCaptureRefs: ['change-capture.public.autopilot_docs.pack_c'],
+        changeCaptureStatus: 'review_ready',
         closeoutRefs: ['closeout.public.autopilot_docs.worker_summary'],
+        deliveryReadinessFreshness: 'fresh',
+        deliveryReadinessRefs: ['delivery.public.autopilot_docs.ready'],
+        deliveryReadinessStatus: 'ready',
+        fileCount: 2,
         forumAutoPublishAllowed: false,
+        addedLineCount: 18,
+        patchDigestRef: 'patch-digest.public.autopilot_docs.sha256_abc123',
         previewRefs: ['preview.public.autopilot_docs.not_required'],
         proofRefs: ['proof.public.autopilot_docs.worker_closeout'],
         publicSafe: true,
-        resultRefs: ['result.public.autopilot_docs.delivered'],
+        removedLineCount: 4,
+        resultRefs: [
+          'result.public.autopilot_docs.delivered',
+          'result.public.pylon.claude_agent_task.git_checkout_verified_passed',
+        ],
+        reviewCaveatRefs: ['review-caveat.public.autopilot_docs.summary_only'],
         runnerKind: 'requester_pylon',
         summaryRefs: ['summary.public.autopilot_docs.customer_safe'],
         testRefs: ['test.public.autopilot_docs.not_required'],
+        verificationRefs: ['verification.public.autopilot_docs.bun_test'],
+        worktreeIdentityStatus: 'ready',
+        writebackRequired: true,
         workerPayoutAuthority: false,
       },
       nextAction: {
@@ -1626,7 +2000,10 @@ describe('Autopilot work routes', () => {
       state: 'delivered',
       whatChanged: {
         artifactRefs: ['artifact.public.autopilot_docs.patch_summary'],
-        resultRefs: ['result.public.autopilot_docs.delivered'],
+        resultRefs: [
+          'result.public.autopilot_docs.delivered',
+          'result.public.pylon.claude_agent_task.git_checkout_verified_passed',
+        ],
         runnerKind: 'requester_pylon',
         summaryRefs: ['summary.public.autopilot_docs.customer_safe'],
       },
@@ -1658,6 +2035,22 @@ describe('Autopilot work routes', () => {
       'summary',
       'test',
     ])
+    expect(briefingJson.briefing?.receipts).toEqual({
+      authorityReceiptRefs: ['authority.public.autopilot_docs.writeback_ready'],
+      buyerPaymentProofRef: null,
+      proofRefs: ['proof.public.autopilot_docs.worker_closeout'],
+      settlementEligible: false,
+      verificationRefs: ['verification.public.autopilot_docs.bun_test'],
+    })
+    expect(briefingJson.briefing?.risk).toEqual({
+      blockerCount: 0,
+      changeCaptureStatus: 'review_ready',
+      deliveryReadinessStatus: 'ready',
+      level: 'attention',
+      reviewCaveatRefs: ['review-caveat.public.autopilot_docs.summary_only'],
+      settlementBlockedReasonRef: 'settlement.no_worker_payout_mode',
+      worktreeIdentityStatus: 'ready',
+    })
     expect(JSON.stringify(briefingJson)).not.toMatch(
       /mnemonic|invoice|preimage|\/Users\//,
     )
@@ -1708,7 +2101,8 @@ describe('Autopilot work routes', () => {
       `/api/pylons/pylon.production.docs_agent/assignments/${assignmentRef}/closeout`,
       {
         body: {
-          artifactRefs: ['artifact.public./Users/christopher/raw.patch'],
+          artifactRefs: ['artifact.public.autopilot_docs.patch_summary'],
+          changeCaptureRefs: ['diff --git a/private.ts b/private.ts'],
           closeoutRefs: ['closeout.public.autopilot_docs.worker_summary'],
           proofRefs: ['proof.public.autopilot_docs.worker_closeout'],
           resultRefs: ['result.public.autopilot_docs.delivered'],
@@ -1735,6 +2129,200 @@ describe('Autopilot work routes', () => {
     expect(recoveredJson.work).toMatchObject({
       executionCloseout: null,
       state: 'queued_or_running',
+    })
+  })
+
+  test('records SHC fallback closeout refs and keeps review as a separate gate', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const request = {
+      ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[0],
+      clientRequestRef: 'client.example.20260609.shc_closeout',
+      placementPolicy: {
+        ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[0].placementPolicy,
+        allowedRunnerKinds: ['openagents_shc'] as const,
+        preferredRunnerKinds: ['openagents_shc'] as const,
+        privacyTier: 'openagents_shc' as const,
+        publicTraceAllowed: false,
+      },
+      tasks: [
+        {
+          ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[0].tasks[0],
+          accessRequests: [],
+        },
+      ],
+    }
+    const create = await route(store, '/api/autopilot/work', {
+      body: request,
+      idempotencyKey: 'idem-autopilot-work-shc-closeout',
+      pylonRegistrations: [],
+    })
+    const createJson = await responseJson(create)
+    const workOrderRef = createJson.work?.workOrderRef
+    const assignmentRef =
+      createJson.work?.fallbackLeaseIntents?.[0]?.assignmentRef
+
+    if (workOrderRef === undefined || assignmentRef === undefined) {
+      throw new Error('Expected SHC fallback work and assignment refs.')
+    }
+
+    expect(create.status).toBe(202)
+    expect(createJson.work).toMatchObject({
+      fallbackLeaseIntents: [
+        expect.objectContaining({
+          assignmentRef:
+            'fallback_assignment.autopilot_work_order.test_1.task.autopilot_coder.docs_contract',
+          runnerKind: 'openagents_shc',
+          workerPayoutAuthority: false,
+        }),
+      ],
+      placementDecision: {
+        selectedRunnerKind: 'openagents_shc',
+        source: 'fallback',
+      },
+      state: 'accepted_free_slice',
+    })
+
+    const closeoutBody = {
+      artifactRefs: ['artifact.public.autopilot_shc.patch_summary'],
+      assignmentRefs: [assignmentRef],
+      buildRefs: ['build.public.autopilot_shc.not_required'],
+      closeoutRefs: ['closeout.public.autopilot_shc.worker_summary'],
+      previewRefs: ['preview.public.autopilot_shc.not_required'],
+      proofRefs: ['proof.public.autopilot_shc.worker_closeout'],
+      resultRefs: ['result.public.autopilot_shc.delivered'],
+      runnerKind: 'openagents_shc',
+      summaryRefs: ['summary.public.autopilot_shc.customer_safe'],
+      testRefs: ['test.public.autopilot_shc.bun_passed'],
+    }
+    const closeout = await route(store, `/api/autopilot/work/${workOrderRef}/closeout`, {
+      body: closeoutBody,
+      idempotencyKey: 'closeout-autopilot-work-shc',
+      method: 'POST',
+      pylonRegistrations: [],
+    })
+    const replay = await route(store, `/api/autopilot/work/${workOrderRef}/closeout`, {
+      body: closeoutBody,
+      idempotencyKey: 'closeout-autopilot-work-shc',
+      method: 'POST',
+      pylonRegistrations: [],
+    })
+    const review = await route(store, `/api/autopilot/work/${workOrderRef}/review`, {
+      body: {
+        action: 'accept',
+        decisionRefs: ['review.public.autopilot_shc.customer_accepts'],
+      },
+      idempotencyKey: 'review-autopilot-work-shc',
+      method: 'POST',
+      pylonRegistrations: [],
+    })
+    const closeoutJson = await responseJson(closeout)
+    const replayJson = await responseJson(replay)
+    const reviewJson = await responseJson(review)
+
+    expect(closeout.status).toBe(201)
+    expect(closeoutJson.work).toMatchObject({
+      executionCloseout: {
+        acceptedWorkAuthority: false,
+        artifactRefs: ['artifact.public.autopilot_shc.patch_summary'],
+        assignmentRefs: [assignmentRef],
+        closeoutRefs: ['closeout.public.autopilot_shc.worker_summary'],
+        forumAutoPublishAllowed: false,
+        proofRefs: ['proof.public.autopilot_shc.worker_closeout'],
+        publicSafe: true,
+        resultRefs: ['result.public.autopilot_shc.delivered'],
+        runnerKind: 'openagents_shc',
+        workerPayoutAuthority: false,
+      },
+      nextAction: {
+        reasonRefs: ['next_action.review_delivered_work'],
+        state: 'delivered',
+      },
+      state: 'delivered',
+    })
+    expect(replay.status).toBe(200)
+    expect(replayJson.idempotent).toBe(true)
+    expect(review.status).toBe(201)
+    expect(reviewJson.work).toMatchObject({
+      reviewDecision: {
+        action: 'accept',
+        acceptedWorkAuthority: false,
+        deployAuthority: false,
+        forumAutoPublishAllowed: false,
+        settlementAuthority: false,
+        workerPayoutAuthority: false,
+      },
+      state: 'accepted',
+    })
+  })
+
+  test('rejects unsafe or mismatched SHC fallback closeout refs before delivery persistence', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const request = {
+      ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[0],
+      clientRequestRef: 'client.example.20260609.shc_closeout_reject',
+      placementPolicy: {
+        ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[0].placementPolicy,
+        allowedRunnerKinds: ['openagents_shc'] as const,
+        preferredRunnerKinds: ['openagents_shc'] as const,
+        privacyTier: 'openagents_shc' as const,
+        publicTraceAllowed: false,
+      },
+      tasks: [
+        {
+          ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[0].tasks[0],
+          accessRequests: [],
+        },
+      ],
+    }
+    const create = await route(store, '/api/autopilot/work', {
+      body: request,
+      idempotencyKey: 'idem-autopilot-work-shc-closeout-reject',
+      pylonRegistrations: [],
+    })
+    const createJson = await responseJson(create)
+    const workOrderRef = createJson.work?.workOrderRef
+    const assignmentRef =
+      createJson.work?.fallbackLeaseIntents?.[0]?.assignmentRef
+
+    if (workOrderRef === undefined || assignmentRef === undefined) {
+      throw new Error('Expected SHC fallback work and assignment refs.')
+    }
+
+    const unsafe = await route(store, `/api/autopilot/work/${workOrderRef}/closeout`, {
+      body: {
+        assignmentRefs: [assignmentRef],
+        closeoutRefs: ['closeout.public.autopilot_shc.worker_summary'],
+        proofRefs: ['proof.public./Users/christopher/raw_runner_log'],
+        resultRefs: ['result.public.autopilot_shc.delivered'],
+        runnerKind: 'openagents_shc',
+      },
+      idempotencyKey: 'closeout-autopilot-work-shc-unsafe',
+      method: 'POST',
+      pylonRegistrations: [],
+    })
+    const mismatch = await route(store, `/api/autopilot/work/${workOrderRef}/closeout`, {
+      body: {
+        assignmentRefs: [assignmentRef],
+        closeoutRefs: ['closeout.public.autopilot_shc.worker_summary'],
+        proofRefs: ['proof.public.autopilot_shc.worker_closeout'],
+        resultRefs: ['result.public.autopilot_shc.delivered'],
+        runnerKind: 'cloud_sandbox',
+      },
+      idempotencyKey: 'closeout-autopilot-work-shc-mismatch',
+      method: 'POST',
+      pylonRegistrations: [],
+    })
+    const detail = await route(store, `/api/autopilot/work/${workOrderRef}`, {
+      method: 'GET',
+      pylonRegistrations: [],
+    })
+    const detailJson = await responseJson(detail)
+
+    expect(unsafe.status).toBe(400)
+    expect(mismatch.status).toBe(400)
+    expect(detailJson.work).toMatchObject({
+      executionCloseout: null,
+      state: 'accepted_free_slice',
     })
   })
 
@@ -2976,6 +3564,391 @@ describe('Autopilot work routes', () => {
     ])
   })
 
+  const hostedGeminiClosateRequest = () => ({
+    ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[1],
+    clientRequestRef: 'client.example.20260620.hosted_gemini_binding',
+    paymentPolicy: {
+      ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[1].paymentPolicy,
+      maxSpendCents: 5000,
+      quoteRef: null,
+      quotedAmountCents: null,
+    },
+    placementPolicy: {
+      ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[1].placementPolicy,
+      allowedRunnerKinds: ['hosted_gemini'] as const,
+      preferredRunnerKinds: ['hosted_gemini'] as const,
+      privacyTier: 'cloud_allowed' as const,
+      publicTraceAllowed: true,
+    },
+    tasks: [
+      {
+        ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[1].tasks[0],
+        acceptanceCriteriaRefs: [
+          'acceptance.audit.updated_with_hosted_gemini_binding',
+        ],
+        kind: 'research_and_patch' as const,
+        objective:
+          'Audit the hosted Gemini product promise and return a public-safe closeout.',
+        taskRef: 'task.product_promise_docs_hosted_gemini_binding',
+      },
+    ],
+  })
+
+  const driveHostedGeminiBinding = async (
+    store: MemoryAutopilotWorkStore,
+    executeReadyWork: AutopilotWorkExecutor,
+    idempotencyKey: string,
+    paidProofRef: string,
+  ) => {
+    const first = await route(store, '/api/autopilot/work', {
+      body: hostedGeminiClosateRequest(),
+      executeReadyWork,
+      idempotencyKey,
+      pylonRegistrations: [],
+    })
+    verifiedAutopilotProofRefs.add(paidProofRef)
+    const paid = await route(store, '/api/autopilot/work', {
+      body: { ignored: 'paid retry does not replace stored request' },
+      executeReadyWork,
+      headers: {
+        'X-OpenAgents-L402': authorizeAutopilotL402(
+          first.headers.get('x-openagents-l402-credential'),
+          paidProofRef,
+        ),
+      },
+      idempotencyKey,
+      pylonRegistrations: [],
+    })
+    return { paid, paidJson: await responseJson(paid) }
+  }
+
+  test('production hosted Gemini executor binding delivers a paid work order through the route harness when armed', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const inferenceCaller: HostedGeminiInferenceCaller = async ({
+      assignmentRef,
+    }) => ({
+      modelRef: 'model.hosted_gemini.gemini-2.5-flash',
+      responseDigestRef: `digest.${assignmentRef}.sha256.deadbeef`,
+      usageRef: `usage.${assignmentRef}.io_units`,
+    })
+    const { paid, paidJson } = await driveHostedGeminiBinding(
+      store,
+      createHostedGeminiWorkExecutor({ enabled: true, inferenceCaller }),
+      'idem-autopilot-work-hosted-gemini-binding',
+      'payment_proof.autopilot_work.hosted_gemini_binding',
+    )
+
+    const assignmentRef =
+      'fallback_assignment.autopilot_work_order.test_1.task.product_promise_docs_hosted_gemini_binding'
+    expect(paid.status).toBe(200)
+    expect(paidJson.work?.state).toBe('delivered')
+    expect(paidJson.work?.executionCloseout).toMatchObject({
+      assignmentRefs: [assignmentRef],
+      proofRefs: [
+        `proof.${assignmentRef}.hosted_gemini_executor`,
+        'model.hosted_gemini.gemini-2.5-flash',
+        `digest.${assignmentRef}.sha256.deadbeef`,
+      ],
+      publicSafe: true,
+      runnerKind: 'hosted_gemini',
+      summaryRefs: [`summary.${assignmentRef}.hosted_gemini_closeout`],
+      verificationRefs: [`usage.${assignmentRef}.io_units`],
+    })
+  })
+
+  test('production hosted Gemini executor binding stays INERT (no delivery) when not armed', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const inferenceCaller: HostedGeminiInferenceCaller = async () => {
+      throw new Error('inert binding must never call the provider')
+    }
+    const { paid, paidJson } = await driveHostedGeminiBinding(
+      store,
+      createHostedGeminiWorkExecutor({ enabled: false, inferenceCaller }),
+      'idem-autopilot-work-hosted-gemini-inert',
+      'payment_proof.autopilot_work.hosted_gemini_inert',
+    )
+
+    expect(paid.status).toBe(200)
+    expect(paidJson.work?.state).toBe('paid_ready')
+    expect(paidJson.work?.executionCloseout).toBeNull()
+  })
+
+  test('production hosted Gemini executor binding refuses to deliver when an inference ref is not public-safe', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const inferenceCaller: HostedGeminiInferenceCaller = async ({
+      assignmentRef,
+    }) => ({
+      modelRef: 'model.hosted_gemini.gemini-2.5-flash',
+      responseDigestRef: `digest.${assignmentRef}.access_token.leak`,
+    })
+    const { paid, paidJson } = await driveHostedGeminiBinding(
+      store,
+      createHostedGeminiWorkExecutor({ enabled: true, inferenceCaller }),
+      'idem-autopilot-work-hosted-gemini-unsafe',
+      'payment_proof.autopilot_work.hosted_gemini_unsafe',
+    )
+
+    expect(paid.status).toBe(200)
+    expect(paidJson.work?.state).toBe('paid_ready')
+    expect(paidJson.work?.executionCloseout).toBeNull()
+  })
+
+  // A spy provider adapter for the composed binding: `complete` succeeds with a
+  // fixed receipt-first result and records the request it was handed.
+  const hostedGeminiSpyAdapter = (
+    result: InferenceResult,
+  ): {
+    adapter: InferenceProviderAdapter
+    requests: Array<InferenceRequest>
+  } => {
+    const requests: Array<InferenceRequest> = []
+    return {
+      adapter: {
+        complete: (request: InferenceRequest) => {
+          requests.push(request)
+          return Effect.succeed(result)
+        },
+        id: 'vertex-gemini',
+        stream: () => Effect.succeed([]),
+      },
+      requests,
+    }
+  }
+
+  test('composed hosted Gemini binding delivers a paid work order end-to-end from a single injected adapter when armed', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const { adapter, requests } = hostedGeminiSpyAdapter({
+      content: 'public-safe hosted Gemini closeout summary',
+      finishReason: 'stop',
+      servedModel: 'gemini-3.5-flash',
+      usage: { completionTokens: 7, promptTokens: 11, totalTokens: 18 },
+    })
+    const { paid, paidJson } = await driveHostedGeminiBinding(
+      store,
+      createHostedGeminiExecutorBinding({ adapter, enabled: true }),
+      'idem-autopilot-work-hosted-gemini-composed',
+      'payment_proof.autopilot_work.hosted_gemini_composed',
+    )
+
+    const assignmentRef =
+      'fallback_assignment.autopilot_work_order.test_1.task.product_promise_docs_hosted_gemini_binding'
+    expect(paid.status).toBe(200)
+    expect(paidJson.work?.state).toBe('delivered')
+    expect(paidJson.work?.executionCloseout).toMatchObject({
+      assignmentRefs: [assignmentRef],
+      publicSafe: true,
+      runnerKind: 'hosted_gemini',
+      verificationRefs: ['usage.hosted_gemini.prompt_11.completion_7.total_18'],
+    })
+    // The closeout proof refs are PROJECTED from the real adapter result: the
+    // served model and a SHA-256 digest of the completion (never the raw text).
+    const proofRefs = paidJson.work?.executionCloseout?.proofRefs ?? []
+    expect(proofRefs).toContain('model.hosted_gemini.gemini-3.5-flash')
+    expect(
+      proofRefs.some(ref =>
+        /^proof\.hosted_gemini\.response_digest\.sha256\.[0-9a-f]{64}$/u.test(ref),
+      ),
+    ).toBe(true)
+    // The raw completion text never appears in any persisted ref.
+    expect(JSON.stringify(paidJson.work?.executionCloseout)).not.toContain(
+      'public-safe hosted Gemini closeout summary',
+    )
+    // The request the adapter saw is non-streaming and refs-only.
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.stream).toBe(false)
+    expect(requests[0]?.messages[1]?.content).toContain(
+      'task=task.product_promise_docs_hosted_gemini_binding',
+    )
+  })
+
+  test('composed hosted Gemini binding threads an injected ref-resolver into the adapter prompt', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const { adapter, requests } = hostedGeminiSpyAdapter({
+      content: 'public-safe hosted Gemini closeout summary',
+      finishReason: 'stop',
+      servedModel: 'gemini-3.5-flash',
+      usage: { completionTokens: 7, promptTokens: 11, totalTokens: 18 },
+    })
+    const resolvedRefs: Array<string> = []
+    const { paid, paidJson } = await driveHostedGeminiBinding(
+      store,
+      createHostedGeminiExecutorBinding({
+        adapter,
+        enabled: true,
+        // A datastore-backed resolver shape: dereference the task ref to real,
+        // public-safe content the live adapter should act on.
+        resolveRefContent: async (ref: string) => {
+          resolvedRefs.push(ref)
+          return ref === 'task.product_promise_docs_hosted_gemini_binding'
+            ? 'Document the hosted Gemini binding seam in the launch worklog.'
+            : undefined
+        },
+      }),
+      'idem-autopilot-work-hosted-gemini-composed-resolver',
+      'payment_proof.autopilot_work.hosted_gemini_composed_resolver',
+    )
+
+    expect(paid.status).toBe(200)
+    expect(paidJson.work?.state).toBe('delivered')
+    // The injected resolver was consulted for the task ref...
+    expect(resolvedRefs).toContain(
+      'task.product_promise_docs_hosted_gemini_binding',
+    )
+    // ...and its resolved (public-safe) content reached the adapter prompt,
+    // proving the resolver threads through the single composition root rather
+    // than the request staying refs-only.
+    expect(requests).toHaveLength(1)
+    const userContent = requests[0]?.messages[1]?.content ?? ''
+    expect(userContent).toContain(
+      'task_content: Document the hosted Gemini binding seam in the launch worklog.',
+    )
+  })
+
+  test('composed hosted Gemini binding stays INERT (no delivery, adapter untouched) when the single flag is off', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const { adapter, requests } = hostedGeminiSpyAdapter({
+      content: 'must never run',
+      finishReason: 'stop',
+      servedModel: 'gemini-3.5-flash',
+      usage: { completionTokens: 1, promptTokens: 1, totalTokens: 2 },
+    })
+    const { paid, paidJson } = await driveHostedGeminiBinding(
+      store,
+      createHostedGeminiExecutorBinding({ adapter, enabled: false }),
+      'idem-autopilot-work-hosted-gemini-composed-inert',
+      'payment_proof.autopilot_work.hosted_gemini_composed_inert',
+    )
+
+    expect(paid.status).toBe(200)
+    expect(paidJson.work?.state).toBe('paid_ready')
+    expect(paidJson.work?.executionCloseout).toBeNull()
+    expect(requests).toHaveLength(0)
+  })
+
+  test('composed hosted Gemini binding declines to deliver when the provider adapter fails', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const adapter: InferenceProviderAdapter = {
+      complete: () =>
+        Effect.fail(
+          new InferenceAdapterError({
+            adapterId: 'vertex-gemini',
+            reason: 'quota exhausted',
+            retryable: true,
+          }),
+        ),
+      id: 'vertex-gemini',
+      stream: () =>
+        Effect.fail(
+          new InferenceAdapterError({
+            adapterId: 'vertex-gemini',
+            reason: 'quota exhausted',
+            retryable: true,
+          }),
+        ),
+    }
+    const { paid, paidJson } = await driveHostedGeminiBinding(
+      store,
+      createHostedGeminiExecutorBinding({ adapter, enabled: true }),
+      'idem-autopilot-work-hosted-gemini-composed-fail',
+      'payment_proof.autopilot_work.hosted_gemini_composed_fail',
+    )
+
+    expect(paid.status).toBe(200)
+    expect(paidJson.work?.state).toBe('paid_ready')
+    expect(paidJson.work?.executionCloseout).toBeNull()
+  })
+
+  test('env-gated hosted Gemini executor delivers end-to-end through the route harness when the env is armed', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const { adapter, requests } = hostedGeminiSpyAdapter({
+      content: 'public-safe hosted Gemini closeout summary',
+      finishReason: 'stop',
+      servedModel: 'gemini-3.5-flash',
+      usage: { completionTokens: 7, promptTokens: 11, totalTokens: 18 },
+    })
+    // Drive the SAME env seam that index.ts wires, with the live env armed
+    // (flag on + secret present) and a spy adapter injected for the test.
+    const resolve = makeHostedGeminiExecuteReadyWork({ buildAdapter: () => adapter })
+    const armedEnv = {
+      HOSTED_GEMINI_EXECUTOR_ENABLED: 'true',
+      VERTEX_SA_KEY: '{"client_email":"x"}',
+    }
+    const { paid, paidJson } = await driveHostedGeminiBinding(
+      store,
+      input => resolve(armedEnv, input),
+      'idem-autopilot-work-hosted-gemini-env-armed',
+      'payment_proof.autopilot_work.hosted_gemini_env_armed',
+    )
+
+    expect(paid.status).toBe(200)
+    expect(paidJson.work?.state).toBe('delivered')
+    expect(paidJson.work?.executionCloseout).toMatchObject({
+      publicSafe: true,
+      runnerKind: 'hosted_gemini',
+    })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.stream).toBe(false)
+  })
+
+  test('env-gated hosted Gemini executor threads an injected ref-resolver into the adapter prompt when armed', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const { adapter, requests } = hostedGeminiSpyAdapter({
+      content: 'public-safe hosted Gemini closeout summary',
+      finishReason: 'stop',
+      servedModel: 'gemini-3.5-flash',
+      usage: { completionTokens: 7, promptTokens: 11, totalTokens: 18 },
+    })
+    // A deployment provisions a datastore-backed resolver via the env seam deps.
+    const resolve = makeHostedGeminiExecuteReadyWork({
+      buildAdapter: () => adapter,
+      resolveRefContent: async (ref: string) =>
+        ref === 'task.product_promise_docs_hosted_gemini_binding'
+          ? 'Resolve the env-seam task content for the live adapter.'
+          : undefined,
+    })
+    const armedEnv = {
+      HOSTED_GEMINI_EXECUTOR_ENABLED: 'true',
+      VERTEX_SA_KEY: '{"client_email":"x"}',
+    }
+    const { paid, paidJson } = await driveHostedGeminiBinding(
+      store,
+      input => resolve(armedEnv, input),
+      'idem-autopilot-work-hosted-gemini-env-resolver',
+      'payment_proof.autopilot_work.hosted_gemini_env_resolver',
+    )
+
+    expect(paid.status).toBe(200)
+    expect(paidJson.work?.state).toBe('delivered')
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.messages[1]?.content ?? '').toContain(
+      'task_content: Resolve the env-seam task content for the live adapter.',
+    )
+  })
+
+  test('env-gated hosted Gemini executor stays INERT (no delivery, adapter untouched) when the flag is off', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const { adapter, requests } = hostedGeminiSpyAdapter({
+      content: 'must never run',
+      finishReason: 'stop',
+      servedModel: 'gemini-3.5-flash',
+      usage: { completionTokens: 1, promptTokens: 1, totalTokens: 2 },
+    })
+    const resolve = makeHostedGeminiExecuteReadyWork({ buildAdapter: () => adapter })
+    // Secret present but the flag is OFF: the seam stays INERT (the prod default).
+    const inertEnv = { VERTEX_SA_KEY: '{"client_email":"x"}' }
+    const { paid, paidJson } = await driveHostedGeminiBinding(
+      store,
+      input => resolve(inertEnv, input),
+      'idem-autopilot-work-hosted-gemini-env-inert',
+      'payment_proof.autopilot_work.hosted_gemini_env_inert',
+    )
+
+    expect(paid.status).toBe(200)
+    expect(paidJson.work?.state).toBe('paid_ready')
+    expect(paidJson.work?.executionCloseout).toBeNull()
+    expect(requests).toHaveLength(0)
+  })
+
   test('keeps MDK checkout proof retries payment-required until checkout verification is wired', async () => {
     const store = new MemoryAutopilotWorkStore()
     const request = {
@@ -3337,5 +4310,199 @@ describe('Autopilot work routes', () => {
     )
 
     expect(events.status).toBe(401)
+  })
+})
+
+describe('Autopilot scheduled launches (M6)', () => {
+  const scheduledLaunchFixture = (launchAt: string, windowMinutes?: number) => ({
+    ...OPENAGENTS_AUTOPILOT_WORK_REQUEST_FIXTURES[0],
+    launchPolicy: {
+      kind: 'scheduled' as const,
+      launchAt,
+      ...(windowMinutes === undefined
+        ? {}
+        : { launchWindowMinutes: windowMinutes }),
+    },
+  })
+
+  const scheduledJson = async (response: Response) =>
+    response.json() as Promise<Readonly<{
+      error?: string
+      reason?: string
+      work?: Readonly<{
+        nextAction?: Readonly<{
+          reasonRefs: ReadonlyArray<string>
+          retryAfterSeconds: number | null
+          state: string
+        }>
+        pylonAssignmentIntents?: ReadonlyArray<unknown>
+        scheduledLaunch?: Readonly<{
+          dispatchedAt: string | null
+          expiredAt: string | null
+          launchAt: string
+          launchState: string
+          windowMinutes: number
+        }> | null
+        state?: string
+        workOrderRef?: string
+      }>
+    }>>
+
+  let scheduledDispatchCounter = 0
+
+  const runScheduledDispatch = (
+    store: MemoryAutopilotWorkStore,
+    pylonApiStore: PylonApiStore,
+    nowIso: string,
+  ) =>
+    Effect.runPromise(
+      dispatchDueScheduledAutopilotWork<Record<string, unknown>>(
+        {
+          agentStore: () => agentStoreForScopes(),
+          makeId: () => `scheduled_dispatch_${++scheduledDispatchCounter}`,
+          makePylonApiStore: () => pylonApiStore,
+          makeStore: () => store,
+          nowIso: () => nowIso,
+        },
+        {},
+        { nowIso },
+      ),
+    )
+
+  test('a scheduled order holds placement and dispatch until launch time', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const pylonApiStore = new MemoryPylonApiStore([pylonRegistration()])
+    const created = await route(store, '/api/autopilot/work', {
+      body: scheduledLaunchFixture('2026-06-10T03:00:00Z'),
+      idempotencyKey: 'idem-scheduled-launch-holds',
+      pylonApiStore,
+    })
+    const createdJson = await scheduledJson(created)
+
+    expect(created.status).toBe(202)
+    expect(createdJson.work?.state).toBe('scheduled')
+    expect(createdJson.work?.scheduledLaunch?.launchState).toBe('pending')
+    expect(createdJson.work?.nextAction?.state).toBe('retry_later')
+    expect(createdJson.work?.nextAction?.reasonRefs).toContain(
+      'next_action.scheduled_launch_pending',
+    )
+    expect(createdJson.work?.pylonAssignmentIntents).toEqual([])
+    expect(pylonApiStore.assignments.size).toBe(0)
+
+    const earlyReport = await runScheduledDispatch(
+      store,
+      pylonApiStore,
+      '2026-06-10T02:00:00.000Z',
+    )
+
+    expect(earlyReport.dispatchedWorkOrderRefs).toEqual([])
+    expect(pylonApiStore.assignments.size).toBe(0)
+
+    await pylonApiStore.upsertRegistration(
+      pylonRegistration({
+        latestHeartbeatAt: '2026-06-10T03:04:30.000Z',
+        updatedAt: '2026-06-10T03:04:30.000Z',
+      }),
+    )
+
+    const dueReport = await runScheduledDispatch(
+      store,
+      pylonApiStore,
+      '2026-06-10T03:05:00.000Z',
+    )
+    const workOrderRef = createdJson.work?.workOrderRef ?? ''
+    const released = await store.readWorkOrder(workOrderRef)
+
+    expect(dueReport.dispatchedWorkOrderRefs).toEqual([workOrderRef])
+    expect(released?.state).toBe('queued_or_running')
+    expect(released?.scheduledLaunch?.dispatchedAt).toBe(
+      '2026-06-10T03:05:00.000Z',
+    )
+    expect(pylonApiStore.assignments.size).toBe(1)
+  })
+
+  test('a missed launch window expires to blocked instead of launching late', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const pylonApiStore = new MemoryPylonApiStore([pylonRegistration()])
+    const created = await route(store, '/api/autopilot/work', {
+      body: scheduledLaunchFixture('2026-06-10T03:00:00Z', 30),
+      idempotencyKey: 'idem-scheduled-launch-expires',
+      pylonApiStore,
+    })
+    const createdJson = await scheduledJson(created)
+    const workOrderRef = createdJson.work?.workOrderRef ?? ''
+    const report = await runScheduledDispatch(
+      store,
+      pylonApiStore,
+      '2026-06-10T04:00:00.000Z',
+    )
+    const expired = await store.readWorkOrder(workOrderRef)
+
+    expect(report.expiredWorkOrderRefs).toEqual([workOrderRef])
+    expect(report.dispatchedWorkOrderRefs).toEqual([])
+    expect(expired?.state).toBe('blocked')
+    expect(expired?.scheduledLaunch?.expiredAt).toBe('2026-06-10T04:00:00.000Z')
+    expect(pylonApiStore.assignments.size).toBe(0)
+  })
+
+  test('scheduled dispatch is idempotent after release', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const pylonApiStore = new MemoryPylonApiStore([pylonRegistration()])
+    const created = await route(store, '/api/autopilot/work', {
+      body: scheduledLaunchFixture('2026-06-10T03:00:00Z'),
+      idempotencyKey: 'idem-scheduled-launch-idempotent',
+      pylonApiStore,
+    })
+    const createdJson = await scheduledJson(created)
+    const workOrderRef = createdJson.work?.workOrderRef ?? ''
+
+    await pylonApiStore.upsertRegistration(
+      pylonRegistration({
+        latestHeartbeatAt: '2026-06-10T03:04:30.000Z',
+        updatedAt: '2026-06-10T03:04:30.000Z',
+      }),
+    )
+    await runScheduledDispatch(store, pylonApiStore, '2026-06-10T03:05:00.000Z')
+
+    const repeatReport = await runScheduledDispatch(
+      store,
+      pylonApiStore,
+      '2026-06-10T03:10:00.000Z',
+    )
+
+    expect(repeatReport.dispatchedWorkOrderRefs).toEqual([])
+    expect(repeatReport.expiredWorkOrderRefs).toEqual([])
+    expect(pylonApiStore.assignments.size).toBe(1)
+    expect((await store.readWorkOrder(workOrderRef))?.state).toBe(
+      'queued_or_running',
+    )
+  })
+
+  test('a launchAt past the seven-day horizon is rejected', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const created = await route(store, '/api/autopilot/work', {
+      body: scheduledLaunchFixture('2026-06-30T03:00:00Z'),
+      idempotencyKey: 'idem-scheduled-launch-horizon',
+    })
+    const createdJson = await scheduledJson(created)
+
+    expect(created.status).toBe(400)
+    expect(createdJson.error).toBe('autopilot_work_validation_error')
+    expect(createdJson.reason).toContain('7 days')
+  })
+
+  test('a past launchAt launches immediately', async () => {
+    const store = new MemoryAutopilotWorkStore()
+    const pylonApiStore = new MemoryPylonApiStore([pylonRegistration()])
+    const created = await route(store, '/api/autopilot/work', {
+      body: scheduledLaunchFixture('2026-06-09T17:00:00Z'),
+      idempotencyKey: 'idem-scheduled-launch-immediate',
+      pylonApiStore,
+    })
+    const createdJson = await scheduledJson(created)
+
+    expect(createdJson.work?.state).toBe('queued_or_running')
+    expect(createdJson.work?.scheduledLaunch?.launchState).toBe('dispatched')
+    expect(pylonApiStore.assignments.size).toBe(1)
   })
 })

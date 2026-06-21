@@ -181,7 +181,9 @@ type ReceiptRow = Readonly<{
 type TipRecipientWalletRow = Readonly<{
   actor_ref: string
   archived_at: string | null
+  spark_address: string | null
   bolt12_offer: string | null
+  lightning_address: string | null
   caveat_refs_json: string
   claim_policy_refs_json: string
   created_at: string
@@ -319,6 +321,41 @@ class ForumRepositoryStore {
   contextLinks: Array<ContextLinkRow> = []
 }
 
+const forumTopicPinRank = (pinState: TopicRow['pin_state']): number =>
+  pinState === 'announcement' ? 0 : pinState === 'sticky' ? 1 : 2
+
+const forumTopicActivityIso = (
+  store: ForumRepositoryStore,
+  topic: TopicRow,
+): string => {
+  const latestPost = store.posts.find(
+    post =>
+      post.id === topic.latest_post_id &&
+      post.topic_id === topic.id &&
+      post.archived_at === null &&
+      (post.state === 'visible' ||
+        post.state === 'edited' ||
+        post.state === 'tombstoned'),
+  )
+
+  return latestPost?.created_at ?? latestPost?.updated_at ?? topic.updated_at
+}
+
+const sortForumTopicListRows = (
+  store: ForumRepositoryStore,
+  rows: ReadonlyArray<TopicRow>,
+): Array<TopicRow> =>
+  [...rows].sort(
+    (left, right) =>
+      forumTopicActivityIso(store, right).localeCompare(
+        forumTopicActivityIso(store, left),
+      ) ||
+      forumTopicPinRank(left.pin_state) - forumTopicPinRank(right.pin_state) ||
+      right.updated_at.localeCompare(left.updated_at) ||
+      right.created_at.localeCompare(left.created_at) ||
+      left.id.localeCompare(right.id),
+  )
+
 class ForumRepositoryStatement implements D1PreparedStatement {
   private values: ReadonlyArray<unknown> = []
 
@@ -385,6 +422,18 @@ class ForumRepositoryStatement implements D1PreparedStatement {
       return Promise.resolve(row as T | null)
     }
 
+    if (this.query.includes('COUNT(*) AS live_count')) {
+      const topicId = String(this.values[0])
+      const count = this.store.posts.filter(
+        item =>
+          item.topic_id === topicId &&
+          item.archived_at === null &&
+          (item.state === 'visible' || item.state === 'edited'),
+      ).length
+
+      return Promise.resolve({ live_count: count } as T)
+    }
+
     if (this.query.includes('FROM forum_posts')) {
       const postId = String(this.values[0])
       const row =
@@ -417,25 +466,28 @@ class ForumRepositoryStatement implements D1PreparedStatement {
       const row: TipRecipientWalletRow = {
         actor_ref: actorRef,
         archived_at: null,
-        bolt12_offer: this.values[5] === null ? null : String(this.values[5]),
-        caveat_refs_json: String(this.values[8]),
-        claim_policy_refs_json: String(this.values[10]),
-        created_at: String(this.values[14]),
-        custody_policy_refs_json: String(this.values[9]),
-        disabled_at: this.values[16] === null ? null : String(this.values[16]),
+        spark_address: this.values[5] === null ? null : String(this.values[5]),
+        bolt12_offer: this.values[6] === null ? null : String(this.values[6]),
+        lightning_address:
+          this.values[7] === null ? null : String(this.values[7]),
+        caveat_refs_json: String(this.values[10]),
+        claim_policy_refs_json: String(this.values[12]),
+        created_at: String(this.values[16]),
+        custody_policy_refs_json: String(this.values[11]),
+        disabled_at: this.values[18] === null ? null : String(this.values[18]),
         id: String(this.values[0]),
         payout_target_approval_ref:
-          this.values[6] === null ? null : String(this.values[6]),
+          this.values[8] === null ? null : String(this.values[8]),
         provider_class: this.values[2] as
           | 'external_lightning'
           | 'hosted_mdk'
           | 'mdk_agent_wallet',
-        public_projection_json: String(this.values[13]),
-        readiness_refs_json: String(this.values[7]),
+        public_projection_json: String(this.values[15]),
+        readiness_refs_json: String(this.values[9]),
         receive_capability_ref: String(this.values[4]),
-        source_ref: String(this.values[11]),
-        state: this.values[12] as 'ready' | 'disabled' | 'blocked',
-        updated_at: String(this.values[15]),
+        source_ref: String(this.values[13]),
+        state: this.values[14] as 'ready' | 'disabled' | 'blocked',
+        updated_at: String(this.values[17]),
         wallet_ref: String(this.values[3]),
       }
       const existingIndex = this.store.tipRecipientWallets.findIndex(
@@ -536,40 +588,57 @@ class ForumRepositoryStatement implements D1PreparedStatement {
     }
 
     if (this.query.includes('UPDATE forum_forums')) {
-      const forumId = String(this.values[3])
+      const isDecrement = this.query.includes(
+        'post_count = MAX(0, post_count - 1)',
+      )
+      const forumId = isDecrement
+        ? String(this.values[0])
+        : String(this.values[3])
       const existing = this.store.forums.find(item => item.id === forumId)
 
       if (existing !== undefined) {
-        const forum = {
-          ...existing,
-          latest_post_id: String(this.values[1]),
-          latest_topic_id: String(this.values[0]),
-          post_count: existing.post_count + 1,
-          topic_count: this.query.includes('topic_count = topic_count + 1')
-            ? existing.topic_count + 1
-            : existing.topic_count,
-        }
         const index = this.store.forums.findIndex(item => item.id === forumId)
-
-        this.store.forums[index] = forum
+        this.store.forums[index] = isDecrement
+          ? {
+              ...existing,
+              post_count: Math.max(0, existing.post_count - 1),
+            }
+          : {
+              ...existing,
+              latest_post_id: String(this.values[1]),
+              latest_topic_id: String(this.values[0]),
+              post_count: existing.post_count + 1,
+              topic_count: this.query.includes('topic_count = topic_count + 1')
+                ? existing.topic_count + 1
+                : existing.topic_count,
+            }
       }
 
       return Promise.resolve({ success: true } as D1Result<T>)
     }
 
     if (this.query.includes('UPDATE forum_topics')) {
-      const topicId = String(this.values[2])
+      const isDecrement = this.query.includes(
+        'post_count = MAX(0, post_count - 1)',
+      )
+      const topicId = String(this.values[isDecrement ? 1 : 2])
       const existing = this.store.topics.find(item => item.id === topicId)
 
       if (existing !== undefined) {
         const index = this.store.topics.findIndex(item => item.id === topicId)
 
-        this.store.topics[index] = {
-          ...existing,
-          latest_post_id: String(this.values[0]),
-          post_count: existing.post_count + 1,
-          updated_at: String(this.values[1]),
-        }
+        this.store.topics[index] = isDecrement
+          ? {
+              ...existing,
+              post_count: Math.max(0, existing.post_count - 1),
+              updated_at: String(this.values[0]),
+            }
+          : {
+              ...existing,
+              latest_post_id: String(this.values[0]),
+              post_count: existing.post_count + 1,
+              updated_at: String(this.values[1]),
+            }
       }
 
       return Promise.resolve({ success: true } as D1Result<T>)
@@ -884,12 +953,16 @@ class ForumRepositoryStatement implements D1PreparedStatement {
       }
 
       const forumId = String(this.values[0])
-      const rows = this.store.topics.filter(
-        item =>
-          item.forum_id === forumId &&
-          item.archived_at === null &&
-          (item.state === 'open' || item.state === 'locked'),
-      )
+      const limit = Number(this.values[1] ?? 50)
+      const rows = sortForumTopicListRows(
+        this.store,
+        this.store.topics.filter(
+          item =>
+            item.forum_id === forumId &&
+            item.archived_at === null &&
+            (item.state === 'open' || item.state === 'locked'),
+        ),
+      ).slice(0, limit)
 
       return Promise.resolve({ results: rows } as unknown as D1Result<T>)
     }
@@ -963,11 +1036,34 @@ class ForumRepositoryStatement implements D1PreparedStatement {
       }
 
       const topicId = String(this.values[0])
-      const rows = this.store.posts.filter(
-        item =>
-          item.topic_id === topicId &&
-          item.archived_at === null &&
-          (item.state === 'visible' || item.state === 'edited'),
+      const descending = this.query.includes(
+        'ORDER BY forum_posts.post_number DESC',
+      )
+      // Mirror production: the topic-detail projection excludes tombstoned
+      // (deleted) posts so a deleted post never renders in the thread.
+      const includeTombstoned = this.query.includes("'tombstoned'")
+      const rows = this.store.posts
+        .filter(
+          item =>
+            item.topic_id === topicId &&
+            item.archived_at === null &&
+            (item.state === 'visible' ||
+              item.state === 'edited' ||
+              (includeTombstoned && item.state === 'tombstoned')),
+        )
+        .sort((left, right) =>
+          descending
+            ? right.post_number - left.post_number
+            : left.post_number - right.post_number,
+        )
+
+      return Promise.resolve({ results: rows } as unknown as D1Result<T>)
+    }
+
+    if (this.query.includes('FROM forum_tip_recipient_wallets')) {
+      const actorRefs = new Set(this.values.map(value => String(value)))
+      const rows = this.store.tipRecipientWallets.filter(
+        item => actorRefs.has(item.actor_ref) && item.archived_at === null,
       )
 
       return Promise.resolve({ results: rows } as unknown as D1Result<T>)
@@ -1156,6 +1252,11 @@ describe('Forum repository foundation', () => {
     const topicDetail = await Effect.runPromise(
       readForumTopicDetail(forumRepositoryDb(store), topic.topicId),
     )
+    const newestFirstTopicDetail = await Effect.runPromise(
+      readForumTopicDetail(forumRepositoryDb(store), topic.topicId, {
+        postSortDirection: 'desc',
+      }),
+    )
     const postDetail = await Effect.runPromise(
       readForumPostDetail(forumRepositoryDb(store), reply.postId),
     )
@@ -1169,6 +1270,9 @@ describe('Forum repository foundation', () => {
       firstPost.postId,
       reply.postId,
     ])
+    expect(
+      newestFirstTopicDetail?.posts.map(post => post.postId),
+    ).toStrictEqual([reply.postId, firstPost.postId])
     expect(postDetail).toMatchObject({
       containingTopicId: topic.topicId,
       post: {
@@ -1179,6 +1283,130 @@ describe('Forum repository foundation', () => {
           tippingAvailable: false,
         },
       },
+    })
+  })
+
+  test('excludes tombstoned posts from the topic-detail projection and reports live counts', async () => {
+    const store = new ForumRepositoryStore()
+    const { firstPost, topic } = await createTopic(store)
+    const reply = await Effect.runPromise(
+      createForumReplyPost(
+        forumRepositoryDb(store),
+        {
+          actor,
+          bodyText: 'Surviving child reply.',
+          contentRef: 'content.forum.topic.reply_survivor',
+          forumId: topic.forumId,
+          idempotencyKey:
+            'forum:reply:44444444-4444-4444-8444-444444444444:actor.ben:survivor',
+          parentPostId: firstPost.postId,
+          postId: '66666666-6666-4666-8666-666666666666',
+          publicProjection,
+          quotePostId: null,
+          topicId: topic.topicId,
+        },
+        runtime,
+      ),
+    )
+
+    // Simulate a deleted (tombstoned) PARENT row that survives for audit.
+    const parentIndex = store.posts.findIndex(
+      item => item.id === firstPost.postId,
+    )
+    store.posts[parentIndex] = {
+      ...store.posts[parentIndex]!,
+      body_text: null,
+      state: 'tombstoned',
+    }
+
+    const topicDetail = await Effect.runPromise(
+      readForumTopicDetail(forumRepositoryDb(store), topic.topicId),
+    )
+
+    // The deleted parent is absent from the thread; only the live child shows.
+    expect(topicDetail?.posts.map(post => post.postId)).toStrictEqual([
+      reply.postId,
+    ])
+    expect(
+      topicDetail?.posts.some(post => post.state === 'tombstoned'),
+    ).toBe(false)
+    // No surviving post carries a null body (which would force the broken
+    // `content.forum.post.<id>` placeholder on the client).
+    expect(topicDetail?.posts.some(post => post.bodyText === null)).toBe(false)
+    // The surviving child still references its (now hidden) parent: no orphan.
+    expect(topicDetail?.posts[0]?.parentPostId).toBe(firstPost.postId)
+    // Counts reflect exactly one live post.
+    expect(topicDetail?.topic.postCount).toBe(1)
+    expect(topicDetail?.topic.replyCount).toBe(0)
+  })
+
+  test('orders forum topic lists by newest visible post activity before pin state', async () => {
+    const store = new ForumRepositoryStore()
+    const announcement = await createTopic(store, {
+      firstPostId: 'aaaaaaaa-1000-4000-8000-aaaaaaaa1000',
+      idempotencyKey: 'forum:topic:activity-order:announcement',
+      slug: 'older-announcement',
+      title: 'Older announcement',
+      topicId: 'aaaaaaaa-2000-4000-8000-aaaaaaaa2000',
+    })
+    const sticky = await createTopic(store, {
+      firstPostId: 'bbbbbbbb-1000-4000-8000-bbbbbbbb1000',
+      idempotencyKey: 'forum:topic:activity-order:sticky',
+      slug: 'newer-sticky',
+      title: 'Newer sticky',
+      topicId: 'bbbbbbbb-2000-4000-8000-bbbbbbbb2000',
+    })
+    const announcementIndex = store.topics.findIndex(
+      item => item.id === announcement.topic.topicId,
+    )
+    const stickyIndex = store.topics.findIndex(
+      item => item.id === sticky.topic.topicId,
+    )
+
+    store.topics[announcementIndex] = {
+      ...store.topics[announcementIndex]!,
+      pin_state: 'announcement',
+      updated_at: '2026-06-15T12:00:00.000Z',
+    }
+    store.posts.push({
+      actor_json: JSON.stringify(actor),
+      actor_ref: actor.actorRef,
+      archived_at: null,
+      body_text: 'Reply that should control recency.',
+      content_ref: 'content.forum.topic.activity_order.reply',
+      created_at: '2026-06-16T12:00:00.000Z',
+      forum_id: sticky.topic.forumId,
+      id: 'bbbbbbbb-3000-4000-8000-bbbbbbbb3000',
+      idempotency_key: 'forum:post:activity-order:sticky-reply',
+      parent_post_id: sticky.firstPost.postId,
+      post_number: 2,
+      public_projection_json: publicProjectionJson,
+      quote_post_id: null,
+      receipt_refs_json: '[]',
+      revision_ref: null,
+      state: 'visible',
+      topic_id: sticky.topic.topicId,
+      updated_at: '2026-06-16T12:00:00.000Z',
+    })
+    store.topics[stickyIndex] = {
+      ...store.topics[stickyIndex]!,
+      latest_post_id: 'bbbbbbbb-3000-4000-8000-bbbbbbbb3000',
+      pin_state: 'sticky',
+      post_count: 2,
+      updated_at: '2026-06-10T12:00:00.000Z',
+    }
+
+    const topicList = await Effect.runPromise(
+      readForumTopicList(forumRepositoryDb(store), sticky.topic.forumId),
+    )
+
+    expect(topicList?.topics.map(topic => topic.title)).toStrictEqual([
+      'Newer sticky',
+      'Older announcement',
+    ])
+    expect(topicList?.topics[0]?.lastPost).toMatchObject({
+      createdAt: '2026-06-16T12:00:00.000Z',
+      postId: 'bbbbbbbb-3000-4000-8000-bbbbbbbb3000',
     })
   })
 
@@ -1290,7 +1518,7 @@ describe('Forum repository foundation', () => {
     )
   })
 
-  test('keeps ready recipient rows without BOLT 12 offers visible but not tip-payable', async () => {
+  test('keeps ready recipient rows without payment destinations visible but not tip-payable', async () => {
     const store = new ForumRepositoryStore()
     const readiness = await Effect.runPromise(
       upsertForumTipRecipientWallet(
@@ -1301,9 +1529,10 @@ describe('Forum repository foundation', () => {
     )
 
     expect(readiness).toMatchObject({
-      blockerRef: 'blocker.public.forum_tip_recipient.bolt12_offer_missing',
+      blockerRef:
+        'blocker.public.forum_tip_recipient.payment_instruction_missing',
       caveatRefs: expect.arrayContaining([
-        'caveat.public.forum_tip_recipient.bolt12_offer_missing',
+        'caveat.public.forum_tip_recipient.payment_instruction_missing',
       ]),
       directPayment: null,
       state: 'ready',

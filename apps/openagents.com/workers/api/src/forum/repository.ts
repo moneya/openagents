@@ -1,6 +1,10 @@
 import { Effect, Schema as S } from 'effect'
 
 import { parseJsonRecord, parseJsonStringArray } from '../json-boundary'
+import {
+  type PublicProjectionStalenessContract,
+  liveAtReadStaleness,
+} from '../public-projection-staleness'
 import { currentIsoTimestamp, randomUuid } from '../runtime-primitives'
 import {
   type ForumTipRecipientWalletRecord,
@@ -21,6 +25,8 @@ import {
   type ForumAgentNotificationSummary,
   type ForumAgentNotificationsResponse,
   ForumAgentNotificationsResponse as ForumAgentNotificationsResponseSchema,
+  type ForumAgentProfileActivityItem,
+  ForumAgentProfileActivityItem as ForumAgentProfileActivityItemSchema,
   type ForumAgentPublicProfile,
   ForumAgentPublicProfileResponse as ForumAgentPublicProfileResponseSchema,
   type ForumBoardIndexResponse,
@@ -69,6 +75,9 @@ const decodeForumAgentNotificationsResponse = S.decodeUnknownSync(
 )
 const decodeForumAgentNotificationReadWriteResponse = S.decodeUnknownSync(
   ForumAgentNotificationReadWriteResponseSchema,
+)
+const decodeForumAgentProfileActivityItem = S.decodeUnknownSync(
+  ForumAgentProfileActivityItemSchema,
 )
 const decodeForumAgentPublicProfileResponse = S.decodeUnknownSync(
   ForumAgentPublicProfileResponseSchema,
@@ -429,6 +438,27 @@ type ForumContextLinkRow = Readonly<{
   topic_id: string | null
 }>
 
+type ForumAgentActivityTopicRow = Readonly<{
+  activity_id: string
+  created_at: string
+  first_post_receipt_refs_json: string
+  state: 'open' | 'locked'
+  title: string
+  topic_id: string
+  updated_at: string
+}>
+
+type ForumAgentActivityPostRow = Readonly<{
+  activity_id: string
+  created_at: string
+  post_id: string
+  receipt_refs_json: string
+  state: 'visible' | 'edited'
+  title: string
+  topic_id: string
+  updated_at: string
+}>
+
 type PrivateMessageRow = Readonly<{
   archived_at: string | null
   content_ref: string
@@ -449,10 +479,28 @@ type AgentProfileRow = Readonly<{
   user_id: string
 }>
 
+type AgentProfileOwnerClaimRow = Readonly<{
+  decided_at: string | null
+  id: string
+  owner_user_id: string
+  receipt_ref: string
+  updated_at: string
+}>
+
+type AgentProfileXChallengeRow = Readonly<{
+  id: string
+  receipt_ref: string | null
+  state: string
+  updated_at: string | null
+  verified_at: string | null
+}>
+
 type ForumTipRecipientWalletRow = Readonly<{
   actor_ref: string
   archived_at: string | null
+  spark_address: string | null
   bolt12_offer: string | null
+  lightning_address: string | null
   caveat_refs_json: string
   claim_policy_refs_json: string
   created_at: string
@@ -556,10 +604,21 @@ type ForumNotificationReceiptRow = Readonly<{
 }>
 
 type ForumPostTipStats = Readonly<{
+  staleness: PublicProjectionStalenessContract
   tipCount: number
+  totalCreditedSats: number
   totalPaidSats: number
   totalSettledSats: number
 }>
+
+// Post tip stats compose live at read (epic #4751, the #4753
+// remainder): the block declares its own staleness contract so paid /
+// settled / credited totals never imply a frozen snapshot.
+const forumPostTipStatsStaleness = liveAtReadStaleness([
+  'forum_payment_event_confirmed',
+  'forum_tip_settlement_claimed',
+  'tip_ladder_pay_in_paid',
+])
 
 type ForumPostTipStatsRow = Readonly<{
   post_id: string
@@ -572,6 +631,8 @@ type ForumPostListCursor = Readonly<{
   createdAt: string
   postId: string
 }>
+
+type ForumTopicPostSortDirection = 'asc' | 'desc'
 
 type ForumPostListRow = PostRow &
   Readonly<{
@@ -637,7 +698,9 @@ export type ForumRepositoryError =
 
 export type ForumTipRecipientWalletInput = Readonly<{
   actorRef: string
+  sparkAddress?: string | null | undefined
   bolt12Offer?: string | null | undefined
+  lightningAddress?: string | null | undefined
   caveatRefs?: ReadonlyArray<string> | undefined
   claimPolicyRefs?: ReadonlyArray<string> | undefined
   custodyPolicyRefs?: ReadonlyArray<string> | undefined
@@ -798,7 +861,9 @@ const tipRecipientWalletRecordFromRow = (
   row: ForumTipRecipientWalletRow,
 ): ForumTipRecipientWalletRecord => ({
   actorRef: row.actor_ref,
+  sparkAddress: row.spark_address,
   bolt12Offer: row.bolt12_offer,
+  lightningAddress: row.lightning_address,
   caveatRefs: parseJsonStringArray(row.caveat_refs_json),
   claimPolicyRefs: parseJsonStringArray(row.claim_policy_refs_json),
   custodyPolicyRefs: parseJsonStringArray(row.custody_policy_refs_json),
@@ -817,7 +882,9 @@ const tipRecipientWalletInputToRecord = (
   input: ForumTipRecipientWalletInput,
 ): ForumTipRecipientWalletRecord => ({
   actorRef: input.actorRef,
+  sparkAddress: input.sparkAddress ?? null,
   bolt12Offer: input.bolt12Offer ?? null,
+  lightningAddress: input.lightningAddress ?? null,
   caveatRefs: input.caveatRefs ?? [],
   claimPolicyRefs: input.claimPolicyRefs ?? [],
   custodyPolicyRefs: input.custodyPolicyRefs ?? [],
@@ -1021,19 +1088,94 @@ const agentOwnerHandoff = {
   agentTokenStatus: 'created' as const,
   claimEndpoint: 'https://openagents.com/api/agents/claims',
   claimPageTemplate: 'https://openagents.com/agents/claims/{claimId}',
+  claimReceiptRefs: [],
+  claimRef: null,
   humanLoginStatus: 'owner_claim_required' as const,
   instruction:
     'An agent bearer token exists, but no human owner login account has been created for this agent unless an owner claim is approved. Create a pending owner claim, give the human owner the returned claimUrl, and tell them to sign in through the ownerLoginTemplate URL with the concrete claimId.',
   ownerLoginTemplate:
     'https://openagents.com/login/github?returnTo=/agents/claims/{claimId}',
+  ownerUserRef: null,
 }
+
+const agentOwnerHandoffForClaim = (
+  claim: AgentProfileOwnerClaimRow | null,
+) =>
+  claim === null
+    ? agentOwnerHandoff
+    : {
+        agentTokenStatus: 'created' as const,
+        claimEndpoint: 'https://openagents.com/api/agents/claims',
+        claimPageTemplate: 'https://openagents.com/agents/claims/{claimId}',
+        claimReceiptRefs: [claim.receipt_ref],
+        claimRef: claim.id,
+        humanLoginStatus: 'owner_claim_approved' as const,
+        instruction:
+          'A human owner claim has been approved for this agent. Public profile projection exposes only the owner ref, claim ref, and claim receipt ref; private owner account details remain hidden.',
+        ownerLoginTemplate:
+          'https://openagents.com/login/github?returnTo=/agents/claims/{claimId}',
+        ownerUserRef: `owner:${claim.owner_user_id}`,
+      }
+
+const latestIso = (values: ReadonlyArray<string | null>): string =>
+  values
+    .filter((value): value is string => value !== null)
+    .sort((left, right) => right.localeCompare(left))[0] ?? ''
+
+const topicActivityFromRow = (
+  row: ForumAgentActivityTopicRow,
+): ForumAgentProfileActivityItem =>
+  decodeForumAgentProfileActivityItem({
+    activityId: row.activity_id,
+    createdAt: row.created_at,
+    href: forumTopicPublicUrl(row.topic_id),
+    kind: 'topic',
+    postId: null,
+    receiptRefs: parseJsonStringArray(row.first_post_receipt_refs_json),
+    state: row.state,
+    title: row.title,
+    topicId: row.topic_id,
+    updatedAt: row.updated_at,
+  })
+
+const postActivityFromRow = (
+  row: ForumAgentActivityPostRow,
+): ForumAgentProfileActivityItem =>
+  decodeForumAgentProfileActivityItem({
+    activityId: row.activity_id,
+    createdAt: row.created_at,
+    href: forumPostPublicUrl(row.topic_id, row.post_id),
+    kind: 'post',
+    postId: row.post_id,
+    receiptRefs: parseJsonStringArray(row.receipt_refs_json),
+    state: row.state,
+    title: row.title,
+    topicId: row.topic_id,
+    updatedAt: row.updated_at,
+  })
 
 const agentProfileFromRow = (
   row: AgentProfileRow,
+  ownerClaim: AgentProfileOwnerClaimRow | null,
+  xChallenge: AgentProfileXChallengeRow | null,
   stats: typeof actorStatsDefault,
-): ForumAgentPublicProfile =>
-  decodeForumAgentPublicProfileResponse({
+  activity: ReadonlyArray<ForumAgentProfileActivityItem>,
+): ForumAgentPublicProfile => {
+  // The verified X proof only outranks an approved owner claim — the
+  // challenge ladder requires the claim, so a challenge without one is
+  // ignored rather than upgrading an unclaimed profile (#4751 inst. 2).
+  const verifiedXChallenge = ownerClaim === null ? null : xChallenge
+  const updatedAt = latestIso([
+    row.updated_at,
+    ownerClaim?.decided_at ?? null,
+    ownerClaim?.updated_at ?? null,
+    verifiedXChallenge?.verified_at ?? null,
+    verifiedXChallenge?.updated_at ?? null,
+  ])
+
+  return decodeForumAgentPublicProfileResponse({
     profile: {
+      activity,
       actor: {
         actorId: row.user_id,
         actorRef: `agent:${row.user_id}`,
@@ -1044,7 +1186,7 @@ const agentProfileFromRow = (
       },
       avatarUrl: row.avatar_url,
       createdAt: row.created_at,
-      ownerHandoff: agentOwnerHandoff,
+      ownerHandoff: agentOwnerHandoffForClaim(ownerClaim),
       profileRef: `agent_profile:${row.user_id}`,
       publicProjection: decodeForumPublicProjection({
         classificationCaveatRef: 'classification.public_agent_profile',
@@ -1053,9 +1195,18 @@ const agentProfileFromRow = (
         excludedPrivateRefs: ['primary_email', 'credential', 'metadata_json'],
         publicSafe: true,
         redactionPolicyRef: 'redaction.agent_profile.public.v1',
-        safeArtifactRefs: [`agent_profile:${row.user_id}`],
-        safeReceiptRefs: [],
-        trustTier: 'reviewed',
+        safeArtifactRefs: [
+          `agent_profile:${row.user_id}`,
+          ...(ownerClaim === null ? [] : [ownerClaim.id]),
+          ...(verifiedXChallenge === null ? [] : [verifiedXChallenge.id]),
+        ],
+        safeReceiptRefs: [
+          ...(ownerClaim === null ? [] : [ownerClaim.receipt_ref]),
+          ...(verifiedXChallenge?.receipt_ref == null
+            ? []
+            : [verifiedXChallenge.receipt_ref]),
+        ],
+        trustTier: ownerClaim === null ? 'reviewed' : 'verified',
       }),
       publicUrl: publicProfileUrl(
         row.user_id,
@@ -1063,19 +1214,27 @@ const agentProfileFromRow = (
       ),
       source: 'agent_profile',
       stats,
-      updatedAt: row.updated_at,
-      verificationState: 'registered_agent',
+      updatedAt,
+      verificationState:
+        ownerClaim === null
+          ? 'registered_agent'
+          : verifiedXChallenge === null
+            ? 'owner_claimed_agent'
+            : 'x_verified_agent',
     },
   }).profile
+}
 
 const snapshotProfileFromActor = (
   actor: ForumActorSummary,
   createdAt: string,
   updatedAt: string,
   stats: typeof actorStatsDefault,
+  activity: ReadonlyArray<ForumAgentProfileActivityItem>,
 ): ForumAgentPublicProfile =>
   decodeForumAgentPublicProfileResponse({
     profile: {
+      activity,
       actor,
       avatarUrl: null,
       createdAt,
@@ -1243,7 +1402,9 @@ const postWithTipRecipientReadiness = (
   })
 
 const zeroPostTipStats: ForumPostTipStats = {
+  staleness: forumPostTipStatsStaleness,
   tipCount: 0,
+  totalCreditedSats: 0,
   totalPaidSats: 0,
   totalSettledSats: 0,
 }
@@ -1363,6 +1524,20 @@ const topicWithLastPost = (
     lastPost,
   })
 
+// D1 caps bound parameters at 100 per query. Any `IN (...)` over post ids must
+// be chunked, or a thread crossing ~100 posts makes the tip-stats query throw
+// and 500s the ENTIRE topic read (one large thread should never crash). Keep a
+// margin below 100.
+const D1_PARAM_CHUNK = 90
+
+const chunkForD1Params = <T>(items: ReadonlyArray<T>): T[][] => {
+  const chunks: T[][] = []
+  for (let index = 0; index < items.length; index += D1_PARAM_CHUNK) {
+    chunks.push(items.slice(index, index + D1_PARAM_CHUNK))
+  }
+  return chunks
+}
+
 const readForumPostTipStats = (
   db: D1Database,
   postIds: ReadonlyArray<string>,
@@ -1373,12 +1548,13 @@ const readForumPostTipStats = (
     return Effect.succeed(new Map())
   }
 
-  const placeholders = uniquePostIds.map(() => '?').join(', ')
-
-  return d1Effect('forum.readPostTipStats', () =>
-    db
-      .prepare(
-        `SELECT ma.target_post_id AS post_id,
+  return Effect.forEach(
+    chunkForD1Params(uniquePostIds),
+    batch =>
+      d1Effect('forum.readPostTipStats', () =>
+        db
+          .prepare(
+            `SELECT ma.target_post_id AS post_id,
                 COUNT(CASE
                   WHEN json_extract(pe.public_projection_json, '$.status') = 'confirmed'
                   THEN 1
@@ -1403,32 +1579,106 @@ const readForumPostTipStats = (
             AND pe.archived_at IS NULL
           WHERE ma.action_kind = 'post_reward'
             AND ma.amount_asset = 'sats'
-            AND ma.target_post_id IN (${placeholders})
+            AND ma.target_post_id IN (${batch.map(() => '?').join(', ')})
             AND ma.archived_at IS NULL
           GROUP BY ma.target_post_id`,
-      )
-      .bind(...uniquePostIds)
-      .all<ForumPostTipStatsRow>(),
+          )
+          .bind(...batch)
+          .all<ForumPostTipStatsRow>(),
+      ),
+    { concurrency: 'unbounded' },
   ).pipe(
-    Effect.map(result => {
-      const entries = (result.results ?? []).map(
-        row =>
-          [
-            row.post_id,
-            {
-              tipCount: Math.max(0, Number(row.tip_count ?? 0)),
-              totalPaidSats: Math.max(0, Number(row.total_paid_sats ?? 0)),
-              totalSettledSats: Math.max(
-                0,
-                Number(row.total_settled_sats ?? 0),
-              ),
-            },
-          ] as const,
+    Effect.map(results => {
+      const entries = results.flatMap(result =>
+        (result.results ?? []).map(
+          row =>
+            [
+              row.post_id,
+              {
+                staleness: forumPostTipStatsStaleness,
+                tipCount: Math.max(0, Number(row.tip_count ?? 0)),
+                totalCreditedSats: 0 as number,
+                totalPaidSats: Math.max(0, Number(row.total_paid_sats ?? 0)),
+                totalSettledSats: Math.max(
+                  0,
+                  Number(row.total_settled_sats ?? 0),
+                ),
+              },
+            ] as const,
+        ),
       )
 
       return new Map(entries)
     }),
+    Effect.flatMap(stats =>
+      readCreditedPostTipTotals(db, uniquePostIds).pipe(
+        Effect.map(creditedTotals => {
+          if (creditedTotals.size === 0) {
+            return stats
+          }
+
+          const merged = new Map(stats)
+          for (const [postId, creditedSats] of creditedTotals) {
+            const existing = merged.get(postId) ?? zeroPostTipStats
+            merged.set(postId, {
+              ...existing,
+              tipCount: existing.tipCount + (creditedSats > 0 ? 1 : 0),
+              totalCreditedSats: creditedSats,
+              totalPaidSats: existing.totalPaidSats + creditedSats,
+            })
+          }
+          return merged
+        }),
+      ),
+    ),
   )
+}
+
+// Credited-rung tips from the payments ledger (issue #4706). The query
+// is failure-tolerant: environments without migration 0160 simply show
+// no credited totals rather than breaking tip stats. Chunked for the D1
+// 100-bound-parameter limit so large threads stay correct.
+const readCreditedPostTipTotals = (
+  db: D1Database,
+  postIds: ReadonlyArray<string>,
+): Effect.Effect<ReadonlyMap<string, number>, never> => {
+  if (postIds.length === 0) {
+    return Effect.succeed(new Map())
+  }
+
+  return Effect.promise(async () => {
+    const totals = new Map<string, number>()
+    try {
+      for (const batch of chunkForD1Params(postIds)) {
+        const contextRefs = batch.map(postId => `forum.post.${postId}`)
+        const result = await db
+          .prepare(
+            `SELECT context_ref, COALESCE(SUM(cost_msat), 0) AS credited_msat
+             FROM pay_ins
+            WHERE pay_in_type = 'tip'
+              AND rung = 'credited'
+              AND state = 'paid'
+              AND context_ref IN (${batch.map(() => '?').join(', ')})
+            GROUP BY context_ref`,
+          )
+          .bind(...contextRefs)
+          .all()
+
+        for (const row of (result.results ?? []) as Array<{
+          context_ref: unknown
+          credited_msat: unknown
+        }>) {
+          totals.set(
+            String(row.context_ref).replace('forum.post.', ''),
+            Math.floor(Number(row.credited_msat) / 1000),
+          )
+        }
+      }
+      return totals
+    } catch {
+      return new Map<string, number>()
+    }
+  })
 }
 
 const postsWithTipStats = (
@@ -1632,6 +1882,142 @@ const normalizeAgentProfileRef = (profileRef: string): string =>
       ? profileRef.slice('agent_profile:'.length)
     : profileRef
 
+const readForumAgentProfileActivity = (
+  db: D1Database,
+  actorRef: string,
+  limit = 12,
+): Effect.Effect<
+  ReadonlyArray<ForumAgentProfileActivityItem>,
+  ForumStorageError
+> =>
+  Effect.gen(function* () {
+    const boundedLimit = Math.max(1, Math.min(50, Math.trunc(limit)))
+    const [topics, posts] = yield* Effect.all([
+      d1Effect('forum.agentProfileActivity.topics', () =>
+        db
+          .prepare(
+            `/* forum.agentProfileActivity.topics */
+             SELECT forum_topics.id AS activity_id,
+                    forum_topics.id AS topic_id,
+                    forum_topics.title AS title,
+                    forum_topics.state AS state,
+                    forum_topics.created_at AS created_at,
+                    forum_topics.updated_at AS updated_at,
+                    COALESCE(first_post.receipt_refs_json, '[]') AS first_post_receipt_refs_json
+               FROM forum_topics
+               JOIN forum_forums
+                 ON forum_forums.id = forum_topics.forum_id
+                AND forum_forums.archived_at IS NULL
+                AND forum_forums.visibility = 'public'
+                AND forum_forums.discoverability = 'listed'
+          LEFT JOIN forum_posts first_post
+                 ON first_post.id = forum_topics.first_post_id
+                AND first_post.archived_at IS NULL
+                AND first_post.state IN ('visible', 'edited')
+              WHERE forum_topics.actor_ref = ?
+                AND forum_topics.archived_at IS NULL
+                AND forum_topics.state IN ('open', 'locked')
+              ORDER BY forum_topics.created_at DESC, forum_topics.id DESC
+              LIMIT ?`,
+          )
+          .bind(actorRef, boundedLimit)
+          .all<ForumAgentActivityTopicRow>(),
+      ),
+      d1Effect('forum.agentProfileActivity.posts', () =>
+        db
+          .prepare(
+            `/* forum.agentProfileActivity.posts */
+             SELECT forum_posts.id AS activity_id,
+                    forum_posts.id AS post_id,
+                    forum_posts.topic_id AS topic_id,
+                    forum_topics.title AS title,
+                    forum_posts.state AS state,
+                    forum_posts.created_at AS created_at,
+                    forum_posts.updated_at AS updated_at,
+                    forum_posts.receipt_refs_json AS receipt_refs_json
+               FROM forum_posts
+               JOIN forum_topics
+                 ON forum_topics.id = forum_posts.topic_id
+                AND forum_topics.archived_at IS NULL
+                AND forum_topics.state IN ('open', 'locked')
+               JOIN forum_forums
+                 ON forum_forums.id = forum_posts.forum_id
+                AND forum_forums.archived_at IS NULL
+                AND forum_forums.visibility = 'public'
+                AND forum_forums.discoverability = 'listed'
+              WHERE forum_posts.actor_ref = ?
+                AND forum_posts.archived_at IS NULL
+                AND forum_posts.state IN ('visible', 'edited')
+              ORDER BY forum_posts.created_at DESC, forum_posts.id DESC
+              LIMIT ?`,
+          )
+          .bind(actorRef, boundedLimit)
+          .all<ForumAgentActivityPostRow>(),
+      ),
+    ])
+
+    return [
+      ...(topics.results ?? []).map(topicActivityFromRow),
+      ...(posts.results ?? []).map(postActivityFromRow),
+    ]
+      .sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) ||
+          right.activityId.localeCompare(left.activityId),
+      )
+      .slice(0, boundedLimit)
+  })
+
+const readApprovedOwnerClaimForAgent = (
+  db: D1Database,
+  agentUserId: string,
+): Effect.Effect<AgentProfileOwnerClaimRow | null, ForumStorageError> =>
+  d1Effect('forum.readAgentPublicProfile.ownerClaim', () =>
+    db
+      .prepare(
+        `SELECT id,
+                owner_user_id,
+                receipt_ref,
+                decided_at,
+                updated_at
+           FROM agent_owner_claims
+          WHERE agent_user_id = ?
+            AND status = 'approved'
+            AND owner_user_id IS NOT NULL
+          ORDER BY decided_at DESC, updated_at DESC
+          LIMIT 1`,
+      )
+      .bind(agentUserId)
+      .first<AgentProfileOwnerClaimRow>(),
+  )
+
+// The verified X-proof challenge is the second write that the profile
+// projection used to lose (#4751 instance 2, documented on #4744):
+// composing it live keeps the public trust surface aligned with the
+// verification ledger.
+const readVerifiedXChallengeForAgent = (
+  db: D1Database,
+  agentUserId: string,
+): Effect.Effect<AgentProfileXChallengeRow | null, ForumStorageError> =>
+  d1Effect('forum.readAgentPublicProfile.xChallenge', () =>
+    db
+      .prepare(
+        `SELECT id,
+                receipt_ref,
+                state,
+                updated_at,
+                verified_at
+           FROM agent_owner_x_claim_challenges
+          WHERE agent_user_id = ?
+            AND state IN ('verified', 'approved')
+            AND tweet_ref IS NOT NULL
+          ORDER BY verified_at DESC, updated_at DESC
+          LIMIT 1`,
+      )
+      .bind(agentUserId)
+      .first<AgentProfileXChallengeRow>(),
+  )
+
 export const readForumAgentPublicProfile = (
   db: D1Database,
   profileRef: string,
@@ -1665,9 +2051,14 @@ export const readForumAgentPublicProfile = (
 
     if (row !== null) {
       const actorRef = `agent:${row.user_id}`
-      const stats = yield* readActorStats(db, actorRef)
+      const [ownerClaim, xChallenge, stats, activity] = yield* Effect.all([
+        readApprovedOwnerClaimForAgent(db, row.user_id),
+        readVerifiedXChallengeForAgent(db, row.user_id),
+        readActorStats(db, actorRef),
+        readForumAgentProfileActivity(db, actorRef),
+      ])
 
-      return agentProfileFromRow(row, stats)
+      return agentProfileFromRow(row, ownerClaim, xChallenge, stats, activity)
     }
 
     const snapshot = yield* d1Effect(
@@ -1691,13 +2082,14 @@ export const readForumAgentPublicProfile = (
               WHERE (
                     forum_posts.actor_ref = ?
                  OR json_extract(forum_posts.actor_json, '$.slug') = ?
+                 OR json_extract(forum_posts.actor_json, '$.actorId') = ?
               )
                 AND forum_posts.archived_at IS NULL
                 AND forum_posts.state IN ('visible', 'edited')
               ORDER BY forum_posts.created_at DESC
               LIMIT 1`,
           )
-          .bind(profileRef, normalized)
+          .bind(profileRef, normalized, normalized)
           .first<
             Readonly<{
               actor_json: string
@@ -1732,15 +2124,70 @@ export const readForumAgentPublicProfile = (
       }
     }
 
-    const stats = yield* readActorStats(db, actor.actorRef)
+    const [stats, activity] = yield* Effect.all([
+      readActorStats(db, actor.actorRef),
+      readForumAgentProfileActivity(db, actor.actorRef),
+    ])
 
     return snapshotProfileFromActor(
       actor,
       snapshot.created_at,
       snapshot.updated_at,
       stats,
+      activity,
     )
   })
+
+// Batched sibling of readForumTipRecipientReadinessForActor: fetch the wallet
+// records for many authors in ONE chunked `actor_ref IN (...)` query instead of
+// one query per post. Large threads previously fired a readiness query for
+// every post (no dedup by author); callers now resolve each author from this
+// map, projecting + handling errors exactly as before. actor_ref is unique per
+// wallet, so there is at most one non-archived record per actor.
+const readForumTipRecipientWalletRecords = (
+  db: D1Database,
+  actorRefs: ReadonlyArray<string>,
+): Effect.Effect<
+  ReadonlyMap<string, ForumTipRecipientWalletRecord>,
+  ForumStorageError
+> => {
+  const uniqueActorRefs = [...new Set(actorRefs)].filter(
+    actorRef => actorRef !== '',
+  )
+
+  if (uniqueActorRefs.length === 0) {
+    return Effect.succeed(new Map())
+  }
+
+  return Effect.forEach(
+    chunkForD1Params(uniqueActorRefs),
+    batch =>
+      d1Effect('forum.readTipRecipientWallets.batch', () =>
+        db
+          .prepare(
+            `SELECT *
+               FROM forum_tip_recipient_wallets
+              WHERE actor_ref IN (${batch.map(() => '?').join(', ')})
+                AND archived_at IS NULL`,
+          )
+          .bind(...batch)
+          .all<ForumTipRecipientWalletRow>(),
+      ),
+    { concurrency: 'unbounded' },
+  ).pipe(
+    Effect.map(
+      results =>
+        new Map(
+          results.flatMap(result =>
+            (result.results ?? []).map(row => {
+              const record = tipRecipientWalletRecordFromRow(row)
+              return [record.actorRef, record] as const
+            }),
+          ),
+        ),
+    ),
+  )
+}
 
 export const readForumTipRecipientReadinessForActor = (
   db: D1Database,
@@ -1795,7 +2242,9 @@ export const upsertForumTipRecipientWallet = (
              provider_class,
              wallet_ref,
              receive_capability_ref,
+             spark_address,
              bolt12_offer,
+             lightning_address,
              payout_target_approval_ref,
              readiness_refs_json,
              caveat_refs_json,
@@ -1809,12 +2258,14 @@ export const upsertForumTipRecipientWallet = (
              disabled_at,
              archived_at
            )
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
            ON CONFLICT(actor_ref) DO UPDATE SET
              provider_class = excluded.provider_class,
              wallet_ref = excluded.wallet_ref,
              receive_capability_ref = excluded.receive_capability_ref,
+             spark_address = excluded.spark_address,
              bolt12_offer = excluded.bolt12_offer,
+             lightning_address = excluded.lightning_address,
              payout_target_approval_ref = excluded.payout_target_approval_ref,
              readiness_refs_json = excluded.readiness_refs_json,
              caveat_refs_json = excluded.caveat_refs_json,
@@ -1833,7 +2284,9 @@ export const upsertForumTipRecipientWallet = (
           record.providerClass,
           record.walletRef,
           record.receiveCapabilityRef,
+          record.sparkAddress,
           record.bolt12Offer,
+          record.lightningAddress,
           record.payoutTargetApprovalRef,
           JSON.stringify(record.readinessRefs),
           JSON.stringify(record.caveatRefs),
@@ -1955,6 +2408,31 @@ export const readForumTopicById = (
       .first<TopicRow>(),
   ).pipe(Effect.map(row => (row === null ? null : topicFromRow(row))))
 
+// Resolve a topic by either its topicId (UUID primary key) or its slug. Topic
+// IDs are UUIDs and slugs are human strings, so they never collide on a single
+// row; slugs are unique per forum, not globally, so an exact id match is
+// preferred first and a slug match falls back to the most recently updated
+// topic. This lets pretty `/forum/t/<slug>` URLs resolve the same as
+// `/forum/t/<topicId>` URLs (the same id-or-slug pattern used by
+// `readForumSummaryByRef`).
+export const readForumTopicByRef = (
+  db: D1Database,
+  topicRef: string,
+): Effect.Effect<ForumTopicSummary | null, ForumStorageError> =>
+  d1Effect('forum.readTopicByRef', () =>
+    db
+      .prepare(
+        `SELECT *
+           FROM forum_topics
+          WHERE (id = ? OR slug = ?)
+            AND archived_at IS NULL
+          ORDER BY (id = ?) DESC, updated_at DESC
+          LIMIT 1`,
+      )
+      .bind(topicRef, topicRef, topicRef)
+      .first<TopicRow>(),
+  ).pipe(Effect.map(row => (row === null ? null : topicFromRow(row))))
+
 export const readForumPostById = (
   db: D1Database,
   postId: string,
@@ -1974,6 +2452,74 @@ export const readForumPostById = (
       .bind(postId)
       .first<PostRow>(),
   ).pipe(Effect.map(row => (row === null ? null : postFromRow(row))))
+
+export type ForumPostThreadRef = Readonly<{
+  parentPostId: string | null
+  postId: string
+  state: 'visible' | 'edited' | 'tombstoned' | 'held_for_review' | 'hidden'
+  topicId: string
+}>
+
+export const readForumPostThreadRef = (
+  db: D1Database,
+  postId: string,
+): Effect.Effect<ForumPostThreadRef | null, ForumStorageError> =>
+  d1Effect('forum.readPostThreadRef', () =>
+    db
+      .prepare(
+        `SELECT id, topic_id, parent_post_id, state
+           FROM forum_posts
+          WHERE id = ?
+            AND archived_at IS NULL
+          LIMIT 1`,
+      )
+      .bind(postId)
+      .first<Pick<PostRow, 'id' | 'parent_post_id' | 'state' | 'topic_id'>>(),
+  ).pipe(
+    Effect.map(row =>
+      row === null
+        ? null
+        : {
+            parentPostId: row.parent_post_id,
+            postId: row.id,
+            state: row.state,
+            topicId: row.topic_id,
+          },
+    ),
+  )
+
+const ForumPostAncestorWalkDepthLimit = 128
+
+export const forumPostThreadHasAncestor = (
+  db: D1Database,
+  input: Readonly<{ ancestorPostId: string; startPostId: string }>,
+): Effect.Effect<boolean, ForumStorageError> =>
+  d1Effect('forum.postThreadHasAncestor', () =>
+    db
+      .prepare(
+        `WITH RECURSIVE forum_post_ancestors (id, parent_post_id, depth) AS (
+           SELECT id, parent_post_id, 0
+             FROM forum_posts
+            WHERE id = ?
+              AND archived_at IS NULL
+           UNION ALL
+           SELECT forum_posts.id,
+                  forum_posts.parent_post_id,
+                  forum_post_ancestors.depth + 1
+             FROM forum_posts
+             JOIN forum_post_ancestors
+               ON forum_posts.id = forum_post_ancestors.parent_post_id
+            WHERE forum_posts.archived_at IS NULL
+              AND forum_post_ancestors.depth < ${ForumPostAncestorWalkDepthLimit}
+         )
+         SELECT 1 AS found
+           FROM forum_post_ancestors
+          WHERE id = ?
+          LIMIT 1`,
+      )
+      .bind(input.startPostId, input.ancestorPostId)
+      .first<Readonly<{ found: number }>>(),
+  ).pipe(Effect.map(row => row !== null))
 
 export const readForumTopicByIdempotencyKey = (
   db: D1Database,
@@ -2094,18 +2640,31 @@ export const readForumTopicList = (
     const topics = yield* d1Effect('forum.readTopicList.topics', () =>
       db
         .prepare(
-          `SELECT *
+          `SELECT forum_topics.*
              FROM forum_topics
-            WHERE forum_id = ?
-              AND archived_at IS NULL
-              AND state IN ('open', 'locked')
+             LEFT JOIN forum_posts AS latest_visible_post
+               ON latest_visible_post.id = forum_topics.latest_post_id
+              AND latest_visible_post.topic_id = forum_topics.id
+              AND latest_visible_post.archived_at IS NULL
+              AND latest_visible_post.state IN ('visible', 'edited', 'tombstoned')
+            WHERE forum_topics.forum_id = ?
+              AND forum_topics.archived_at IS NULL
+              AND forum_topics.state IN ('open', 'locked')
             ORDER BY
-              CASE pin_state
+              COALESCE(
+                latest_visible_post.created_at,
+                latest_visible_post.updated_at,
+                forum_topics.updated_at,
+                forum_topics.created_at
+              ) DESC,
+              CASE forum_topics.pin_state
                 WHEN 'announcement' THEN 0
                 WHEN 'sticky' THEN 1
                 ELSE 2
               END ASC,
-              updated_at DESC
+              forum_topics.updated_at DESC,
+              forum_topics.created_at DESC,
+              forum_topics.id ASC
             LIMIT ?`,
         )
         .bind(forum.forumId, limit)
@@ -2132,14 +2691,19 @@ export const readForumTopicList = (
 
 export const readForumTopicDetail = (
   db: D1Database,
-  topicId: string,
-  options: Readonly<{ limit?: number }> = {},
+  topicRef: string,
+  options: Readonly<{
+    limit?: number
+    postSortDirection?: ForumTopicPostSortDirection
+  }> = {},
 ): Effect.Effect<
   ForumTopicDetailResponse | null,
   ForumStorageError | ForumReadAccessDenied | ForumValidationError
 > =>
   Effect.gen(function* () {
-    const maybeTopic = yield* readForumTopicById(db, topicId)
+    // Resolve by topicId or slug so both `/forum/t/<topicId>` and
+    // `/forum/t/<slug>` URLs render the same topic.
+    const maybeTopic = yield* readForumTopicByRef(db, topicRef)
 
     if (maybeTopic === null) {
       return null
@@ -2154,7 +2718,25 @@ export const readForumTopicDetail = (
       return null
     }
 
-    const limit = options.limit ?? 50
+    // Load the full thread by default so a direct link to any post (e.g. a
+    // permalink to post #51+) resolves on the topic page — the client scrolls to
+    // the post element, which must be present in the DOM. The previous default
+    // of 50 capped the page and silently dropped later posts, so deep links to
+    // them landed on "page 1" with nothing to scroll to. 500 covers every
+    // current thread; `hasMore` below stays honest if a thread ever exceeds it
+    // (the scalable follow-up is client load-more over /topics/{id}/posts).
+    const limit = options.limit ?? 500
+    const postOrderDirection =
+      options.postSortDirection === 'desc' ? 'DESC' : 'ASC'
+    // Deleted (tombstoned) posts must NOT appear in the thread. A tombstoned
+    // row carries a null body, so including it here forced the client to fall
+    // back to rendering the raw `content.forum.post.<id>` contentRef as a
+    // broken placeholder. The tombstone row stays in the table for audit
+    // (revision history + idempotent-repeat lookup); it is simply excluded
+    // from every public read projection. Threading is unaffected: surviving
+    // child replies are rendered flat by post_number and keep their own
+    // bodies, and their `parentPostId` still resolves to the real (now hidden)
+    // row, so a deleted parent never orphans or crashes the thread.
     const posts = yield* d1Effect('forum.readTopicDetail.posts', () =>
       db
         .prepare(
@@ -2165,8 +2747,8 @@ export const readForumTopicDetail = (
               AND forum_post_bodies.archived_at IS NULL
             WHERE forum_posts.topic_id = ?
               AND forum_posts.archived_at IS NULL
-              AND forum_posts.state IN ('visible', 'edited', 'tombstoned')
-            ORDER BY forum_posts.post_number ASC
+              AND forum_posts.state IN ('visible', 'edited')
+            ORDER BY forum_posts.post_number ${postOrderDirection}
             LIMIT ?`,
         )
         .bind(topic.topicId, limit)
@@ -2176,10 +2758,20 @@ export const readForumTopicDetail = (
     const topicPostsWithoutTipReadiness = (posts.results ?? [])
       .map(postFromRow)
       .map(post => postWithSubject(post, topic.title))
+    const topicTipRecipientWalletRecords =
+      yield* readForumTipRecipientWalletRecords(
+        db,
+        topicPostsWithoutTipReadiness.map(post => post.author.actorRef),
+      )
     const topicPostTipRecipientReadiness = yield* Effect.all(
-      topicPostsWithoutTipReadiness.map(post =>
-        readForumTipRecipientReadinessForActor(db, post.author.actorRef),
-      ),
+      topicPostsWithoutTipReadiness.map(post => {
+        const record = topicTipRecipientWalletRecords.get(post.author.actorRef)
+        return record === undefined
+          ? Effect.succeed(
+              missingForumTipRecipientReadiness(post.author.actorRef),
+            )
+          : projectTipRecipientReadiness(record)
+      }),
     )
     const topicPosts = topicPostsWithoutTipReadiness.map((post, index) =>
       postWithTipRecipientReadiness(
@@ -2197,10 +2789,41 @@ export const readForumTopicDetail = (
       latestTopicId: topic.topicId,
     })
 
+    // Live post count excludes tombstoned (deleted) posts so postCount /
+    // replyCount stay honest even for threads whose stored post_count was not
+    // decremented when older posts were tombstoned. Counted independently of
+    // the rendered page limit so a long thread still reports a true total.
+    const liveCount = yield* d1Effect('forum.readTopicDetail.liveCount', () =>
+      db
+        .prepare(
+          `SELECT COUNT(*) AS live_count
+             FROM forum_posts
+            WHERE forum_posts.topic_id = ?
+              AND forum_posts.archived_at IS NULL
+              AND forum_posts.state IN ('visible', 'edited')`,
+        )
+        .bind(topic.topicId)
+        .first<{ live_count: number }>(),
+    )
+    const livePostCount = Math.max(0, Number(liveCount?.live_count ?? 0))
+    const topicWithLiveCounts = decodeForumTopicSummary({
+      ...topic,
+      postCount: livePostCount,
+      replyCount: Math.max(0, livePostCount - 1),
+    })
+
+    // Honest pagination: hasMore only if the query actually hit the limit (a
+    // thread larger than `limit`). Never claim "no more" while truncating.
+    const cappedAtLimit = (posts.results ?? []).length >= limit
     return decodeForumTopicDetailResponse({
-      pagination: defaultPagination(limit),
+      pagination: {
+        cursor: null,
+        hasMore: cappedAtLimit,
+        limit,
+        nextCursor: null,
+      },
       posts: postsWithTipStats(topicPosts, tipStats),
-      topic: topicWithLastPost(topic, lastPost),
+      topic: topicWithLastPost(topicWithLiveCounts, lastPost),
     })
   })
 
@@ -2365,7 +2988,41 @@ export const readForumPostList = (
             createdAt: lastVisibleRow.created_at,
             postId: lastVisibleRow.id,
           })
-    const posts = visibleRows.map(postFromRow)
+    const postsWithoutTipReadiness = visibleRows.map(postFromRow)
+    const postListTipRecipientWalletRecords =
+      yield* readForumTipRecipientWalletRecords(
+        db,
+        postsWithoutTipReadiness.map(post => post.author.actorRef),
+      )
+    const postTipRecipientReadiness = yield* Effect.all(
+      postsWithoutTipReadiness.map(post => {
+        const record = postListTipRecipientWalletRecords.get(
+          post.author.actorRef,
+        )
+        return (
+          record === undefined
+            ? Effect.succeed(
+                missingForumTipRecipientReadiness(post.author.actorRef),
+              )
+            : projectTipRecipientReadiness(record)
+        ).pipe(
+          // A malformed wallet for a single author must not fail the whole
+          // post list; degrade that author to "not ready" instead.
+          Effect.catchTag('ForumValidationError', () =>
+            Effect.succeed(
+              missingForumTipRecipientReadiness(post.author.actorRef),
+            ),
+          ),
+        )
+      }),
+    )
+    const posts = postsWithoutTipReadiness.map((post, index) =>
+      postWithTipRecipientReadiness(
+        post,
+        postTipRecipientReadiness[index] ??
+          missingForumTipRecipientReadiness(post.author.actorRef),
+      ),
+    )
     const tipStats = yield* readForumPostTipStats(
       db,
       posts.map(post => post.postId),
@@ -3266,7 +3923,8 @@ export const editForumPostBody = (
   input: Omit<
     ForumPostRevisionInput,
     'actionKind' | 'nextState' | 'previousBodyText' | 'previousState'
-  >,
+  > &
+    Readonly<{ nextParentPostId?: string | null | undefined }>,
   runtime: ForumRepositoryRuntime = systemForumRepositoryRuntime,
 ): Effect.Effect<
   ForumPostSummary,
@@ -3286,8 +3944,9 @@ export const editForumPostBody = (
       })
     }
 
+    const { nextParentPostId, ...revisionBase } = input
     const revisionInput: ForumPostRevisionInput = {
-      ...input,
+      ...revisionBase,
       actionKind: 'edit',
       previousBodyText: existing.bodyText ?? null,
       previousState: existing.state,
@@ -3325,6 +3984,21 @@ export const editForumPostBody = (
         .bind(input.id, now, input.postId)
         .run(),
     )
+
+    if (nextParentPostId !== undefined) {
+      yield* d1Effect('forum.reparentPost', () =>
+        db
+          .prepare(
+            `UPDATE forum_posts
+                SET parent_post_id = ?,
+                    updated_at = ?
+              WHERE id = ?
+                AND archived_at IS NULL`,
+          )
+          .bind(nextParentPostId, now, input.postId)
+          .run(),
+      )
+    }
 
     const updated = yield* readForumPostById(db, input.postId)
 
@@ -3406,6 +4080,39 @@ export const tombstoneForumPost = (
         .bind(input.id, now, input.postId)
         .run(),
     )
+
+    // A tombstoned post no longer counts toward the public thread. Decrement
+    // the topic and forum post counts so topic-list replyCount (derived as
+    // post_count - 1) and forum totals stay honest. Clamped at zero so a count
+    // can never go negative. The topic-detail read derives its own live count
+    // independently, which also covers older tombstoned rows that predate this
+    // decrement.
+    const containingTopic = yield* readForumTopicById(db, existing.topicId)
+    yield* d1Effect('forum.decrementTopicPostCountAfterTombstone', () =>
+      db
+        .prepare(
+          `UPDATE forum_topics
+              SET post_count = MAX(0, post_count - 1),
+                  updated_at = ?
+            WHERE id = ?
+              AND archived_at IS NULL`,
+        )
+        .bind(now, existing.topicId)
+        .run(),
+    )
+    if (containingTopic !== null) {
+      yield* d1Effect('forum.decrementForumPostCountAfterTombstone', () =>
+        db
+          .prepare(
+            `UPDATE forum_forums
+                SET post_count = MAX(0, post_count - 1)
+              WHERE id = ?
+                AND archived_at IS NULL`,
+          )
+          .bind(containingTopic.forumId)
+          .run(),
+      )
+    }
 
     const updated = yield* readForumPostById(db, input.postId)
 
@@ -3782,6 +4489,27 @@ export const updateForumTopicPinState = (
             AND archived_at IS NULL`,
       )
       .bind(input.pinState, runtime.nowIso(), input.topicId)
+      .run(),
+  ).pipe(Effect.flatMap(() => readForumTopicById(db, input.topicId)))
+
+export const updateForumTopicTitle = (
+  db: D1Database,
+  input: Readonly<{
+    title: string
+    topicId: string
+  }>,
+  runtime: ForumRepositoryRuntime = systemForumRepositoryRuntime,
+): Effect.Effect<ForumTopicSummary | null, ForumStorageError> =>
+  d1Effect('forum.updateTopicTitle', () =>
+    db
+      .prepare(
+        `UPDATE forum_topics
+            SET title = ?,
+                updated_at = ?
+          WHERE id = ?
+            AND archived_at IS NULL`,
+      )
+      .bind(input.title, runtime.nowIso(), input.topicId)
       .run(),
   ).pipe(Effect.flatMap(() => readForumTopicById(db, input.topicId)))
 

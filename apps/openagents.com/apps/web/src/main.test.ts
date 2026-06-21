@@ -1,4 +1,5 @@
 import { Effect, Option } from 'effect'
+import { Scene } from 'foldkit'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
@@ -6,6 +7,8 @@ import {
   incompleteOnboardingStatus,
 } from './domain/session'
 import { Flags, flags, init } from './main'
+import { update } from './update'
+import { view } from './view'
 
 const appUrl = (pathname: string) => ({
   protocol: 'https:',
@@ -74,22 +77,14 @@ describe('auth bootstrap flags', () => {
     window.history.replaceState({}, '', '/')
   })
 
-  test('requests the auth session on the root application route', async () => {
+  test('does not request the auth session on the root Pylon route', async () => {
     window.history.replaceState({}, '', '/')
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      Response.json({
-        authenticated: false,
-      }),
-    )
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
 
     const loadedFlags = await Effect.runPromise(flags)
 
     expect(loadedFlags.maybeAuth).toEqual(Option.none())
-    expect(fetchSpy).toHaveBeenCalledWith('/api/auth/session', {
-      cache: 'no-store',
-      credentials: 'include',
-      headers: { accept: 'application/json' },
-    })
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   test('does not request the auth session on unknown public paths', async () => {
@@ -121,7 +116,74 @@ describe('auth bootstrap flags', () => {
   })
 
   test('does not request the auth session on demo routes', async () => {
-    window.history.replaceState({}, '', '/demo')
+    for (const path of ['/demo', '/demo2']) {
+      window.history.replaceState({}, '', path)
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+      const loadedFlags = await Effect.runPromise(flags)
+
+      expect(loadedFlags.maybeAuth).toEqual(Option.none())
+      expect(fetchSpy).not.toHaveBeenCalled()
+      vi.restoreAllMocks()
+    }
+  })
+
+  test('does not request the auth session on the Moksha route', async () => {
+    window.history.replaceState({}, '', '/moksha')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+    const loadedFlags = await Effect.runPromise(flags)
+
+    expect(loadedFlags.maybeAuth).toEqual(Option.none())
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  test('does not request the auth session on the OpenAgents Moksha route', async () => {
+    window.history.replaceState({}, '', '/moksha2')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+    const loadedFlags = await Effect.runPromise(flags)
+
+    expect(loadedFlags.maybeAuth).toEqual(Option.none())
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  test('does not request the auth session on the Pylon route', async () => {
+    window.history.replaceState({}, '', '/pylon')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+    const loadedFlags = await Effect.runPromise(flags)
+
+    expect(loadedFlags.maybeAuth).toEqual(Option.none())
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  test('does not request the auth session on the Tassadar route', async () => {
+    window.history.replaceState({}, '', '/tassadar')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+    const loadedFlags = await Effect.runPromise(flags)
+
+    expect(loadedFlags.maybeAuth).toEqual(Option.none())
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  test('does not request the auth session on the Tassadar replay route', async () => {
+    window.history.replaceState(
+      {},
+      '',
+      '/tassadar/replay/first-real-settlement',
+    )
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+    const loadedFlags = await Effect.runPromise(flags)
+
+    expect(loadedFlags.maybeAuth).toEqual(Option.none())
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  test('does not request the auth session on the Activity route', async () => {
+    window.history.replaceState({}, '', '/activity')
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
 
     const loadedFlags = await Effect.runPromise(flags)
@@ -132,6 +194,22 @@ describe('auth bootstrap flags', () => {
 
   test('requests the auth session on application routes', async () => {
     window.history.replaceState({}, '', '/teams/openagents-core-team/chat')
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('', { status: 401 }))
+
+    const loadedFlags = await Effect.runPromise(flags)
+
+    expect(loadedFlags.maybeAuth).toEqual(Option.none())
+    expect(fetchSpy).toHaveBeenCalledWith('/api/auth/session', {
+      cache: 'no-store',
+      credentials: 'include',
+      headers: { accept: 'application/json' },
+    })
+  })
+
+  test('requests the auth session on workspace invite routes', async () => {
+    window.history.replaceState({}, '', '/workspaces/workspace_seed')
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response('', { status: 401 }))
@@ -156,10 +234,27 @@ describe('authenticated startup routing', () => {
 
     expect(model).toMatchObject({
       _tag: 'Demo',
+      mode: 'training',
+      playback: 'complete',
+      routeKey: 'demo:training-fullscreen',
+    })
+    expect(commands).toHaveLength(0)
+  })
+
+  test('opens workroom playback at demo2 without an auth session', () => {
+    const [model, commands] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/demo2'),
+    )
+
+    expect(model).toMatchObject({
+      _tag: 'Demo',
       loggedIn: {
         route: { _tag: 'TeamProjectChat' },
       },
+      mode: 'workroom',
       playback: 'playing',
+      routeKey: 'demo:pylon-release',
     })
     expect(commands).toHaveLength(0)
   })
@@ -167,7 +262,7 @@ describe('authenticated startup routing', () => {
   test('opens customer order demo without an auth session', () => {
     const [model, commands] = init(
       Flags.make({ maybeAuth: Option.none() }),
-      appUrl('/demo/order'),
+      appUrl('/demo2/order'),
     )
 
     expect(model).toMatchObject({
@@ -184,7 +279,7 @@ describe('authenticated startup routing', () => {
   test('opens demo without using the authenticated product startup gate', () => {
     const [model, commands] = init(
       Flags.make({ maybeAuth: Option.some(authWithProject) }),
-      appUrl('/demo/t/pylon-release-demo'),
+      appUrl('/demo2/t/pylon-release-demo'),
     )
 
     expect(model).toMatchObject({
@@ -194,6 +289,194 @@ describe('authenticated startup routing', () => {
       },
     })
     expect(commands).toHaveLength(0)
+  })
+
+  test('opens Moksha without an auth session', () => {
+    const [model, commands] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/moksha'),
+    )
+
+    expect(model).toMatchObject({
+      _tag: 'LoggedOut',
+      route: { _tag: 'Moksha' },
+    })
+    expect(commands).toHaveLength(0)
+  })
+
+  test('renders the Moksha route through the top-level view', () => {
+    const [model] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/moksha'),
+    )
+
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(Scene.selector('[data-route="moksha"]')).toExist(),
+      Scene.expect(Scene.selector('oa-moksha')).toExist(),
+    )
+  })
+
+  test('renders the OpenAgents Moksha route through the top-level view', () => {
+    const [model] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/moksha2'),
+    )
+
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(Scene.selector('[data-route="moksha2"]')).toExist(),
+      Scene.expect(Scene.selector('oa-moksha')).toExist(),
+    )
+  })
+
+  test('opens Pylon without an auth session', () => {
+    const [model, commands] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/pylon'),
+    )
+
+    expect(model).toMatchObject({
+      _tag: 'LoggedOut',
+      route: { _tag: 'Pylon' },
+    })
+    expect(commands).toHaveLength(0)
+  })
+
+  test('opens Tassadar without an auth session', () => {
+    const [model, commands] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/tassadar'),
+    )
+
+    expect(model).toMatchObject({
+      _tag: 'LoggedOut',
+      route: { _tag: 'Tassadar' },
+    })
+    expect(commands).toHaveLength(0)
+  })
+
+  test('opens Tassadar replay without an auth session', () => {
+    const [model, commands] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/tassadar/replay/first-real-settlement'),
+    )
+
+    expect(model).toMatchObject({
+      _tag: 'LoggedOut',
+      route: {
+        _tag: 'TassadarReplay',
+        replaySlug: 'first-real-settlement',
+      },
+    })
+    expect(commands).toHaveLength(0)
+  })
+
+  test('opens Activity without an auth session', () => {
+    const [model, commands] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/activity'),
+    )
+
+    expect(model).toMatchObject({
+      _tag: 'LoggedOut',
+      route: { _tag: 'Activity' },
+    })
+    expect(commands).toHaveLength(0)
+  })
+
+  test('opens Activity as a public model for signed-in users', () => {
+    const [model] = init(
+      Flags.make({ maybeAuth: Option.some(authWithProject) }),
+      appUrl('/activity'),
+    )
+
+    expect(model).toMatchObject({
+      _tag: 'LoggedOut',
+      route: { _tag: 'Activity' },
+    })
+  })
+
+  test('renders the retired Tassadar web scene notice through the top-level view', () => {
+    const [model] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/tassadar'),
+    )
+
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(Scene.selector('oa-tassadar-run')).not.toExist(),
+      Scene.expect(Scene.selector('[data-tassadar-scene="retired"]')).toExist(),
+      Scene.expect(Scene.role('heading', { name: 'Tassadar lives in the Verse' })).toExist(),
+      Scene.expect(Scene.role('link', { name: 'Public summary API' })).toExist(),
+      Scene.expect(Scene.role('link', { name: 'Proof replay' })).toExist(),
+      Scene.expect(Scene.selector('[data-route="tassadar"]')).toExist(),
+      Scene.expect(Scene.role('link', { name: 'Docs' })).not.toExist(),
+      Scene.expect(Scene.role('link', { name: 'Blog' })).not.toExist(),
+      Scene.expect(Scene.role('link', { name: 'Log in' })).not.toExist(),
+    )
+  })
+
+  test('renders the Tassadar replay route through the top-level view', () => {
+    const [model] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/tassadar/replay/first-real-settlement'),
+    )
+
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(Scene.selector('oa-tassadar-proof-replay')).toExist(),
+      Scene.expect(Scene.selector('[data-route="tassadar-replay"]')).toExist(),
+      Scene.expect(Scene.role('link', { name: 'Docs' })).not.toExist(),
+      Scene.expect(Scene.role('link', { name: 'Blog' })).not.toExist(),
+      Scene.expect(Scene.role('link', { name: 'Log in' })).not.toExist(),
+    )
+  })
+
+  test('renders the Activity route through the top-level view', () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(
+        () => new Promise<Response>(() => undefined),
+      ) as unknown as typeof fetch & { mockRestore: () => void }
+    const [model] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/activity'),
+    )
+
+    try {
+      Scene.scene(
+        { update, view },
+        Scene.with(model),
+        Scene.expect(Scene.selector('[data-route="activity"]')).toExist(),
+        Scene.expect(Scene.selector('oa-public-activity-timeline')).toExist(),
+      )
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  test('renders the Pylon route through the top-level view', () => {
+    const [model] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/pylon'),
+    )
+
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(Scene.selector('[data-route="pylon"]')).toExist(),
+      Scene.expect(Scene.selector('oa-pylon')).toExist(),
+      Scene.expect(Scene.selector('oa-pylon-launch-gate')).toExist(),
+      Scene.expect(Scene.selector('[data-cta="install-pylon"]')).toExist(),
+      Scene.expect(
+        Scene.selector('[data-cta="install-pylon-command"]'),
+      ).toHaveText('npx @openagentsinc/pylon'),
+    )
   })
 
   test('keeps onboarding behind the logged-out application gate', () => {
@@ -242,37 +525,30 @@ describe('authenticated startup routing', () => {
     ])
   })
 
-  test('routes incomplete authenticated root visits to onboarding', () => {
+  test('keeps incomplete authenticated root visits on the public Pylon scene', () => {
     const [model, commands] = init(
       Flags.make({ maybeAuth: Option.some(authWithIncompleteOnboarding) }),
       appUrl('/'),
     )
 
     expect(model).toMatchObject({
-      _tag: 'LoggedIn',
-      route: { _tag: 'Onboarding' },
+      _tag: 'LoggedOut',
+      route: { _tag: 'Pylon' },
     })
-    expect(commands.map(command => command.name)).toEqual([
-      'InstallAccountMenuOutsideClick',
-      'LoadOnboardingRepositories',
-      'RedirectToOnboarding',
-    ])
+    expect(commands).toHaveLength(0)
   })
 
-  test('routes authenticated visitors without Core Team access to order status', () => {
+  test('keeps authenticated root visits on the public Pylon scene', () => {
     const [model, commands] = init(
       Flags.make({ maybeAuth: Option.some(authWithoutCoreTeam) }),
       appUrl('/'),
     )
 
     expect(model).toMatchObject({
-      _tag: 'LoggedIn',
-      route: { _tag: 'Order' },
+      _tag: 'LoggedOut',
+      route: { _tag: 'Pylon' },
     })
-    expect(commands.map(command => command.name)).toEqual([
-      'InstallAccountMenuOutsideClick',
-      'LoadCustomerOrders',
-    ])
+    expect(commands).toHaveLength(0)
   })
 
   test('redirects authenticated visitors without Core Team access away from invite', () => {
@@ -292,7 +568,7 @@ describe('authenticated startup routing', () => {
     ])
   })
 
-  test('keeps logged-out root visitors on the public homepage', () => {
+  test('keeps logged-out root visitors on the public Pylon scene', () => {
     const [model, commands] = init(
       Flags.make({ maybeAuth: Option.none() }),
       appUrl('/'),
@@ -300,12 +576,75 @@ describe('authenticated startup routing', () => {
 
     expect(model).toMatchObject({
       _tag: 'LoggedOut',
-      route: { _tag: 'Home' },
+      route: { _tag: 'Pylon' },
+    })
+    expect(commands).toHaveLength(0)
+  })
+
+  test('keeps logged-out workspace invite visitors on the invite URL', () => {
+    const [model, commands] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/workspaces/workspace_seed'),
+    )
+
+    expect(model).toMatchObject({
+      _tag: 'LoggedOut',
+      route: { _tag: 'Workspace', workspaceId: 'workspace_seed' },
+    })
+    expect(commands).toHaveLength(0)
+  })
+
+  test('renders logged-out workspace invites with GitHub login', () => {
+    const [model] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/workspaces/workspace_seed'),
+    )
+
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(Scene.selector('[data-route="workspace-invite"]')).toExist(),
+      Scene.expect(
+        Scene.role('heading', { name: 'Open your project workspace' }),
+      ).toExist(),
+      Scene.expect(
+        Scene.role('link', { name: 'Log in with GitHub' }),
+      ).toHaveAttr('href', '/login/github'),
+    )
+  })
+
+  test('opens authenticated workspace invites in the product shell', () => {
+    const [model, commands] = init(
+      Flags.make({ maybeAuth: Option.some(authWithTeam) }),
+      appUrl('/workspaces/workspace_seed'),
+    )
+
+    expect(model).toMatchObject({
+      _tag: 'LoggedIn',
+      route: { _tag: 'Workspace', workspaceId: 'workspace_seed' },
+    })
+    expect(commands.map(command => command.name)).toEqual([
+      'InstallAccountMenuOutsideClick',
+      'LoadPrefilledWorkspace',
+    ])
+    expect(commands[1]?.args).toEqual({ workspaceId: 'workspace_seed' })
+  })
+
+  test('serves the former public homepage from stats', () => {
+    const [model, commands] = init(
+      Flags.make({ maybeAuth: Option.none() }),
+      appUrl('/stats'),
+    )
+
+    expect(model).toMatchObject({
+      _tag: 'LoggedOut',
+      route: { _tag: 'Stats' },
     })
     expect(commands.map(command => command.name)).toEqual([
       'LoadPublicPylonStats',
       'LoadPublicForumLaunchStatus',
       'LoadPublicForumTipLeaderboards',
+      'LoadSettledFeedSnapshot',
     ])
   })
 
@@ -317,14 +656,9 @@ describe('authenticated startup routing', () => {
 
     expect(model).toMatchObject({
       _tag: 'LoggedOut',
-      route: { _tag: 'Home' },
+      route: { _tag: 'Pylon' },
     })
-    expect(commands.map(command => command.name)).toEqual([
-      'LoadPublicPylonStats',
-      'LoadPublicForumLaunchStatus',
-      'LoadPublicForumTipLeaderboards',
-      'RedirectToHome',
-    ])
+    expect(commands.map(command => command.name)).toEqual(['RedirectToHome'])
   })
 
   test('loads public Artanis goals and pylon stats without an authenticated shell', () => {
@@ -410,21 +744,17 @@ describe('authenticated startup routing', () => {
     ])
   })
 
-  test('defaults the root route to order status for team members', () => {
+  test('keeps authenticated root visits on the public Pylon scene', () => {
     const [model, commands] = init(
       Flags.make({ maybeAuth: Option.some(authWithTeam) }),
       appUrl('/'),
     )
 
     expect(model).toMatchObject({
-      _tag: 'LoggedIn',
-      route: { _tag: 'Order' },
-      auth: { teams: authWithTeam.teams },
+      _tag: 'LoggedOut',
+      route: { _tag: 'Pylon' },
     })
-    expect(commands.map(command => command.name)).toEqual([
-      'InstallAccountMenuOutsideClick',
-      'LoadCustomerOrders',
-    ])
+    expect(commands).toHaveLength(0)
   })
 
   test('loads the admin route for configured admins', () => {
@@ -496,6 +826,7 @@ describe('authenticated startup routing', () => {
       'LoadAgentGoal',
       'LoadThreadFiles',
       'FocusChatComposer',
+      'RequestNotificationPermission',
     ])
     expect(commands[0]?.args).toEqual({
       href: '/api/sync/workspace/github%3A14167547/snapshot',
@@ -516,6 +847,7 @@ describe('authenticated startup routing', () => {
     expect(commands.map(command => command.name)).toEqual([
       'LoadSyncSnapshot',
       'InstallAccountMenuOutsideClick',
+      'RequestNotificationPermission',
     ])
   })
 
@@ -534,6 +866,7 @@ describe('authenticated startup routing', () => {
       'LoadSyncSnapshot',
       'InstallAccountMenuOutsideClick',
       'LoadThreadFiles',
+      'RequestNotificationPermission',
     ])
     expect(commands[2]?.args).toEqual({
       href: '/api/teams/team_openagents_core/files',
@@ -577,6 +910,7 @@ describe('authenticated startup routing', () => {
       'LoadSyncSnapshot',
       'InstallAccountMenuOutsideClick',
       'LoadThreadFileDetail',
+      'RequestNotificationPermission',
     ])
     expect(commands[2]?.args).toEqual({
       fileId: 'file_1',
@@ -598,6 +932,7 @@ describe('authenticated startup routing', () => {
       'LoadSyncSnapshot',
       'InstallAccountMenuOutsideClick',
       'LoadThreadFileDetail',
+      'RequestNotificationPermission',
     ])
     expect(commands[2]?.args).toEqual({
       fileId: 'file_personal_1',

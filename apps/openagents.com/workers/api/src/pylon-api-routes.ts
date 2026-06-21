@@ -1,4 +1,4 @@
-import { notFound } from '@openagents/sync-worker'
+import { notFound } from '@openagentsinc/sync-worker'
 import { Effect, Match as M, Schema as S } from 'effect'
 
 import {
@@ -34,9 +34,13 @@ import {
   type PylonApiRegistrationRecord,
   PylonApiRegistrationRequest,
   PylonApiSettlementStatusRequest,
+  PylonApiSparkPayoutTargetRegisterRequest,
   type PylonApiStore,
   PylonApiStoreError,
   PylonApiWalletReadinessRequest,
+  type PylonSparkPayoutTargetReadiness,
+  type PylonSparkPayoutTargetStore,
+  SPARK_PAYOUT_TARGET_NOT_READY,
   buildPylonApiAssignmentRecord,
   buildPylonApiEventRecord,
   buildPylonApiRegistrationRecord,
@@ -48,8 +52,14 @@ import {
   publicPylonApiRegistrationProjection,
   pylonApiStoreErrorFromUnknown,
   pylonClientVersionMeetsMinimum,
+  resolveSparkPayoutTargetReadiness,
 } from './pylon-api'
 import { currentIsoTimestamp, randomUuid } from './runtime-primitives'
+import {
+  TASSADAR_DISPATCH_CAPABILITY_UNRECEIPTED_BLOCKER_REF,
+  admitTassadarExecutorCapabilityClaim,
+  tassadarDispatchCapabilityUnreceipted,
+} from './tassadar-capability-admission'
 
 type HttpResponse = globalThis.Response
 
@@ -57,6 +67,10 @@ type PylonApiRouteDependencies<Bindings> = Readonly<{
   agentStore: (env: Bindings) => AgentRegistrationStore
   makeId?: () => string
   makeStore: (env: Bindings) => PylonApiStore
+  // #5252: private operator-only store for raw Spark payout targets. Optional so
+  // existing route wiring/tests stay valid; the spark-payout-target route fails
+  // closed (501) when it is not wired.
+  makeSparkPayoutTargetStore?: (env: Bindings) => PylonSparkPayoutTargetStore
   nowIso?: () => string
   recordAutopilotWorkerCloseout?: (
     env: Bindings,
@@ -67,12 +81,34 @@ type PylonApiRouteDependencies<Bindings> = Readonly<{
 
 type PylonApiRouteEnv = Readonly<Record<string, unknown>>
 
+// Presence contract (#5058): Pylon presence and lifecycle writes are
+// agent-token authenticated. A node's self-held Nostr key proves Nostr
+// identity, not ownership of a Pylon registration: registrations are bound
+// to `ownerAgentUserId` from the bearer-token session, and the registry does
+// not bind a verified Nostr pubkey to that owner. The Worker therefore does
+// not accept a NIP-98 self-signed heartbeat as presence authority. When a
+// request arrives with a Nostr/NIP-98 `Authorization` scheme we return an
+// explanatory 401 that names the token-only contract and points the node at
+// the bearer-token path, instead of a bare `unauthorized`.
+const PYLON_API_PRESENCE_REQUIRES_AGENT_TOKEN =
+  'pylon_api_presence_requires_agent_token'
+
 class PylonApiUnauthorized extends S.TaggedErrorClass<PylonApiUnauthorized>()(
   'PylonApiUnauthorized',
-  {},
+  { presenceContract: S.optionalKey(S.Boolean) },
 ) {}
 
 type PylonApiRouteError = PylonApiStoreError | PylonApiUnauthorized
+
+const presenceContractUnauthorized = (): HttpResponse =>
+  noStoreJsonResponse(
+    {
+      error: PYLON_API_PRESENCE_REQUIRES_AGENT_TOKEN,
+      reason:
+        'Pylon presence and lifecycle writes are authenticated with an OpenAgents agent bearer token. A self-signed Nostr (NIP-98) signature proves Nostr identity but is not accepted as presence authority, because Pylon registrations are bound to the owning agent token, not to a Nostr pubkey. Send this request with `Authorization: Bearer <agent token>`.',
+    },
+    { headers: { 'www-authenticate': 'Bearer' }, status: 401 },
+  )
 
 const routeErrorResponse = (error: PylonApiRouteError): HttpResponse =>
   M.value(error).pipe(
@@ -93,7 +129,10 @@ const routeErrorResponse = (error: PylonApiRouteError): HttpResponse =>
                       : 400,
           },
         ),
-      PylonApiUnauthorized: () => unauthorized(),
+      PylonApiUnauthorized: unauthorizedError =>
+        unauthorizedError.presenceContract === true
+          ? presenceContractUnauthorized()
+          : unauthorized(),
     }),
     M.exhaustive,
   )
@@ -112,6 +151,22 @@ const bearerTokenFromRequest = (request: Request): string | undefined => {
     token.startsWith(AGENT_TOKEN_PREFIX)
     ? token
     : undefined
+}
+
+// A NIP-98 self-signed request uses the `Nostr` authorization scheme
+// (see apps/pylon `encodeNip98Authorization`). Detecting it lets the
+// presence routes return the documented token-only contract (#5058)
+// instead of a bare 401.
+const isNostrSignedRequest = (request: Request): boolean => {
+  const authorization = request.headers.get('authorization')
+
+  if (authorization === null) {
+    return false
+  }
+
+  const [scheme] = authorization.split(' ')
+
+  return scheme?.toLowerCase() === 'nostr'
 }
 
 const idempotencyKeyFromRequest = (request: Request): string | undefined => {
@@ -160,6 +215,29 @@ const routeAgentStore = <Bindings extends PylonApiRouteEnv>(
   dependencies: PylonApiRouteDependencies<Bindings>,
   env: Bindings,
 ): AgentRegistrationStore => dependencies.agentStore(env)
+
+// #5306 onboarding backstop: resolve the node's Spark payout-target readiness
+// from the private operator store keyed by pylonRef. Fails closed — when the
+// store dependency is not wired or the read errors, readiness is not-ready, so
+// the public projection shows a visible, self-healing gap rather than a
+// fabricated target. Because this is recomputed on every register/heartbeat/read,
+// the flag flips to ready with no manual step once the node (#5305) auto-registers.
+const resolveRouteSparkPayoutTargetReadiness = <
+  Bindings extends PylonApiRouteEnv,
+>(
+  dependencies: PylonApiRouteDependencies<Bindings>,
+  env: Bindings,
+  pylonRef: string,
+): Effect.Effect<PylonSparkPayoutTargetReadiness> => {
+  const makeSparkStore = dependencies.makeSparkPayoutTargetStore
+  if (makeSparkStore === undefined) {
+    return Effect.succeed(SPARK_PAYOUT_TARGET_NOT_READY)
+  }
+
+  return Effect.promise(() =>
+    resolveSparkPayoutTargetReadiness(makeSparkStore(env), pylonRef),
+  )
+}
 
 const routeNowIso = <Bindings>(
   dependencies: PylonApiRouteDependencies<Bindings>,
@@ -370,6 +448,13 @@ const controlledPylonAssignmentDispatchGate = (
     ...(missingCapabilityRefs.length > 0
       ? ['blocker.public.pylon_dispatch.wrong_capability']
       : []),
+    ...(registration !== undefined &&
+    tassadarDispatchCapabilityUnreceipted(
+      gateRefs(body.requiredCapabilityRefs),
+      registration.capabilityRefs,
+    )
+      ? [TASSADAR_DISPATCH_CAPABILITY_UNRECEIPTED_BLOCKER_REF]
+      : []),
     ...(duplicateRefs.length > 0
       ? ['blocker.public.pylon_dispatch.duplicate_active_assignment']
       : []),
@@ -440,7 +525,11 @@ const requireAgent = <Bindings extends PylonApiRouteEnv>(
   const token = bearerTokenFromRequest(request)
 
   if (token === undefined) {
-    return Effect.fail(new PylonApiUnauthorized({}))
+    return Effect.fail(
+      new PylonApiUnauthorized(
+        isNostrSignedRequest(request) ? { presenceContract: true } : {},
+      ),
+    )
   }
 
   return Effect.flatMap(
@@ -601,6 +690,13 @@ const routeRegister = <Bindings extends PylonApiRouteEnv>(
         )
       }
 
+      const existingSparkReadiness =
+        yield* resolveRouteSparkPayoutTargetReadiness(
+          dependencies,
+          env,
+          existingRegistration.pylonRef,
+        )
+
       return noStoreJsonResponse(
         {
           event: publicPylonApiEventProjection(existingEvent, nowIso),
@@ -608,12 +704,20 @@ const routeRegister = <Bindings extends PylonApiRouteEnv>(
           pylon: publicPylonApiRegistrationProjection(
             existingRegistration,
             nowIso,
+            existingSparkReadiness,
           ),
         },
         { status: 200 },
       )
     }
 
+    // W4.1 (#4750): a Tassadar executor-capability claim is admitted
+    // only with its self-test receipt ref. Refused claims are stripped
+    // before the registration row is built, so unreceipted executor
+    // capacity never becomes dispatchable registry state.
+    const tassadarAdmission = admitTassadarExecutorCapabilityClaim(
+      body.capabilityRefs ?? [],
+    )
     const registration = yield* Effect.try({
       catch: pylonApiStoreErrorFromUnknown,
       try: () =>
@@ -624,7 +728,10 @@ const routeRegister = <Bindings extends PylonApiRouteEnv>(
           nowIso,
           ownerAgentTokenPrefix: session.credential.tokenPrefix,
           ownerAgentUserId: session.user.id,
-          request: body,
+          request: {
+            ...body,
+            capabilityRefs: tassadarAdmission.admittedCapabilityRefs,
+          },
         }),
     })
     const event = yield* Effect.try({
@@ -633,8 +740,13 @@ const routeRegister = <Bindings extends PylonApiRouteEnv>(
         buildPylonApiEventRecord({
           body: {
             capabilityRefs: registration.capabilityRefs,
+            capabilityRefusalRefs: tassadarAdmission.refusalRefs,
             clientProtocolVersion: registration.clientProtocolVersion,
             clientVersion: registration.clientVersion,
+            providerMarketRelayRefs: registration.providerMarketRelayRefs,
+            providerNip90LaneRefs: registration.providerNip90LaneRefs,
+            providerNostrNpub: registration.providerNostrNpub,
+            providerNostrPubkey: registration.providerNostrPubkey,
             resourceMode: registration.resourceMode,
             statusRefs: body.statusRefs ?? [],
             walletRef: registration.walletRef,
@@ -656,12 +768,26 @@ const routeRegister = <Bindings extends PylonApiRouteEnv>(
       catch: pylonApiStoreErrorFromUnknown,
       try: () => store.createEvent(event),
     })
+    const sparkReadiness = yield* resolveRouteSparkPayoutTargetReadiness(
+      dependencies,
+      env,
+      storedRegistration.pylonRef,
+    )
 
     return noStoreJsonResponse(
       {
         event: publicPylonApiEventProjection(eventResult.record, nowIso),
         idempotent: eventResult.idempotent,
-        pylon: publicPylonApiRegistrationProjection(storedRegistration, nowIso),
+        pylon: publicPylonApiRegistrationProjection(
+          storedRegistration,
+          nowIso,
+          sparkReadiness,
+        ),
+        tassadarCapabilityAdmission: {
+          refusalRefs: tassadarAdmission.refusalRefs,
+          selfTestReceiptRefs: tassadarAdmission.selfTestReceiptRefs,
+          state: tassadarAdmission.state,
+        },
       },
       { status: eventResult.idempotent ? 200 : 201 },
     )
@@ -948,6 +1074,12 @@ const routeEvent = <Bindings extends PylonApiRouteEnv>(
         session,
       )
       const replayNowIso = routeNowIso(dependencies)
+      const replaySparkReadiness =
+        yield* resolveRouteSparkPayoutTargetReadiness(
+          dependencies,
+          env,
+          existingRegistration.pylonRef,
+        )
 
       return noStoreJsonResponse(
         {
@@ -956,6 +1088,7 @@ const routeEvent = <Bindings extends PylonApiRouteEnv>(
           pylon: publicPylonApiRegistrationProjection(
             existingRegistration,
             replayNowIso,
+            replaySparkReadiness,
           ),
         },
         { status: 200 },
@@ -1055,6 +1188,11 @@ const routeEvent = <Bindings extends PylonApiRouteEnv>(
       catch: pylonApiStoreErrorFromUnknown,
       try: () => store.upsertRegistration(nextRegistration),
     })
+    const sparkReadiness = yield* resolveRouteSparkPayoutTargetReadiness(
+      dependencies,
+      env,
+      storedRegistration.pylonRef,
+    )
 
     return noStoreJsonResponse(
       {
@@ -1068,7 +1206,213 @@ const routeEvent = <Bindings extends PylonApiRouteEnv>(
             }),
         event: publicPylonApiEventProjection(eventResult.record, nowIso),
         idempotent: eventResult.idempotent,
-        pylon: publicPylonApiRegistrationProjection(storedRegistration, nowIso),
+        pylon: publicPylonApiRegistrationProjection(
+          storedRegistration,
+          nowIso,
+          sparkReadiness,
+        ),
+      },
+      { status: eventResult.idempotent ? 200 : 201 },
+    )
+  })
+
+// #5252: derive the public-safe redacted Spark payout-target ref from the raw
+// address. Mirrors the Pylon `sparkPayoutTargetRef` (sha256(raw).slice(0,24)) so
+// the server can verify the client's declared digest actually corresponds to
+// the raw address it sent, rather than trusting an arbitrary ref.
+const deriveSparkPayoutTargetRef = (
+  rawSparkAddress: string,
+): Effect.Effect<string> =>
+  Effect.map(
+    Effect.promise(() => sha256Hex(rawSparkAddress.trim())),
+    digest => `payout.spark.${digest.slice(0, 24)}`,
+  )
+
+// #5252: register a raw Spark address as the agent's OWN payout target. The raw
+// `spark1…` rides ONLY this authenticated request body, is stored in the private
+// operator store keyed to pylonRef + owning agent, and is NEVER projected,
+// logged, or persisted into a public event. The public projection — including
+// the emitted `payout_target_admission` event body — carries ONLY the redacted
+// `payout.spark.<digest>` ref. Auth is the agent's own bearer token, so a node
+// can only set its own target. The private upsert and the public event are both
+// idempotency-keyed, so re-registering the same address is a no-op update.
+const routeRegisterSparkPayoutTarget = <Bindings extends PylonApiRouteEnv>(
+  dependencies: PylonApiRouteDependencies<Bindings>,
+  request: Request,
+  env: Bindings,
+  pylonRef: string,
+) =>
+  Effect.gen(function* () {
+    const session = yield* requireAgent(dependencies, request, env)
+
+    const makeSparkStore = dependencies.makeSparkPayoutTargetStore
+    if (makeSparkStore === undefined) {
+      return noStoreJsonResponse(
+        {
+          error: 'pylon_api_spark_payout_target_unavailable',
+          reason:
+            'Raw Spark payout-target registration is not wired in this deployment.',
+        },
+        { status: 501 },
+      )
+    }
+
+    const idempotencyKeyHash = yield* requireIdempotencyHash(request)
+    const store = routeStore(dependencies, env)
+    const sparkStore = makeSparkStore(env)
+
+    const existingEvent = yield* Effect.tryPromise({
+      catch: pylonApiStoreErrorFromUnknown,
+      try: () => store.readEventByIdempotencyKeyHash(idempotencyKeyHash),
+    })
+
+    if (existingEvent !== undefined) {
+      if (
+        existingEvent.ownerAgentUserId !== session.user.id ||
+        existingEvent.pylonRef !== pylonRef
+      ) {
+        return routeErrorResponse(
+          new PylonApiStoreError({
+            kind: 'forbidden',
+            reason:
+              'Idempotency key is already bound to another agent or Pylon.',
+          }),
+        )
+      }
+
+      if (existingEvent.eventKind !== 'payout_target_admission') {
+        return routeErrorResponse(
+          new PylonApiStoreError({
+            kind: 'conflict',
+            reason:
+              'Idempotency key is already bound to a different Pylon event.',
+          }),
+        )
+      }
+
+      const existingRegistration = yield* requireOwnedRegistration(
+        dependencies,
+        env,
+        pylonRef,
+        session,
+      )
+      const replayNowIso = routeNowIso(dependencies)
+      const replaySparkReadiness = yield* Effect.promise(() =>
+        resolveSparkPayoutTargetReadiness(
+          sparkStore,
+          existingRegistration.pylonRef,
+        ),
+      )
+
+      return noStoreJsonResponse(
+        {
+          event: publicPylonApiEventProjection(existingEvent, replayNowIso),
+          idempotent: true,
+          pylon: publicPylonApiRegistrationProjection(
+            existingRegistration,
+            replayNowIso,
+            replaySparkReadiness,
+          ),
+        },
+        { status: 200 },
+      )
+    }
+
+    const registration = yield* requireOwnedRegistration(
+      dependencies,
+      env,
+      pylonRef,
+      session,
+    )
+    // The schema validates the raw `spark1…` shape and the redacted digest ref
+    // shape at the JSON boundary; the raw address never reaches here unvalidated.
+    const body = yield* decodeBody(
+      request,
+      PylonApiSparkPayoutTargetRegisterRequest,
+    )
+
+    // Verify the declared redacted ref actually corresponds to the raw address.
+    // A mismatch fails closed: we never store a raw address under a ref a
+    // resolver would not derive for it.
+    const derivedRef = yield* deriveSparkPayoutTargetRef(body.rawSparkAddress)
+    if (derivedRef !== body.payoutTargetRef) {
+      return routeErrorResponse(
+        new PylonApiStoreError({
+          kind: 'validation_error',
+          reason:
+            'payoutTargetRef does not match the digest of the provided Spark address.',
+        }),
+      )
+    }
+
+    const nowIso = routeNowIso(dependencies)
+
+    // PRIVATE write FIRST: store the raw address operator-only, keyed to this
+    // pylon and bound to the owning agent. Idempotent upsert.
+    yield* Effect.tryPromise({
+      catch: pylonApiStoreErrorFromUnknown,
+      try: () =>
+        sparkStore.upsert({
+          pylonRef: registration.pylonRef,
+          ownerAgentUserId: session.user.id,
+          payoutTargetRef: derivedRef,
+          rawSparkAddress: body.rawSparkAddress,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        }),
+    })
+
+    // PUBLIC event: carries ONLY the redacted digest ref — never the raw address.
+    const event = yield* Effect.try({
+      catch: pylonApiStoreErrorFromUnknown,
+      try: () =>
+        buildPylonApiEventRecord({
+          body: {
+            admissionRefs: ['admission.public.pylon.payout_target.registered'],
+            payoutTargetRef: derivedRef,
+            policyRefs: [
+              'policy.public.pylon.redacted_payout_target_only',
+              'policy.private.pylon.spark_payout_target_raw_stored_operator_only',
+            ],
+            status: 'registered',
+          },
+          eventKind: 'payout_target_admission',
+          idempotencyKeyHash,
+          makeId: () => routeMakeId(dependencies),
+          nowIso,
+          ownerAgentUserId: session.user.id,
+          pylonRef: registration.pylonRef,
+          status: 'registered',
+        }),
+    })
+    const eventResult = yield* Effect.tryPromise({
+      catch: pylonApiStoreErrorFromUnknown,
+      try: () => store.createEvent(event),
+    })
+    const nextRegistration = nextRegistrationForEvent(
+      registration,
+      eventResult.record,
+      nowIso,
+    )
+    const storedRegistration = yield* Effect.tryPromise({
+      catch: pylonApiStoreErrorFromUnknown,
+      try: () => store.upsertRegistration(nextRegistration),
+    })
+    // Recompute readiness from the private store right after the upsert: this
+    // is the moment a node-registered target becomes visible as ready (#5306).
+    const sparkReadiness = yield* Effect.promise(() =>
+      resolveSparkPayoutTargetReadiness(sparkStore, storedRegistration.pylonRef),
+    )
+
+    return noStoreJsonResponse(
+      {
+        event: publicPylonApiEventProjection(eventResult.record, nowIso),
+        idempotent: eventResult.idempotent,
+        pylon: publicPylonApiRegistrationProjection(
+          storedRegistration,
+          nowIso,
+          sparkReadiness,
+        ),
       },
       { status: eventResult.idempotent ? 200 : 201 },
     )
@@ -1085,11 +1429,26 @@ const routeList = <Bindings extends PylonApiRouteEnv>(
       try: () => routeStore(dependencies, env).listRegistrations(100),
     })
 
-    return noStoreJsonResponse({
-      pylons: registrations.map(registration =>
-        publicPylonApiRegistrationProjection(registration, nowIso),
-      ),
-    })
+    const pylons = yield* Effect.forEach(
+      registrations,
+      registration =>
+        resolveRouteSparkPayoutTargetReadiness(
+          dependencies,
+          env,
+          registration.pylonRef,
+        ).pipe(
+          Effect.map(readiness =>
+            publicPylonApiRegistrationProjection(
+              registration,
+              nowIso,
+              readiness,
+            ),
+          ),
+        ),
+      { concurrency: 8 },
+    )
+
+    return noStoreJsonResponse({ pylons })
   })
 
 const routeRead = <Bindings extends PylonApiRouteEnv>(
@@ -1113,9 +1472,19 @@ const routeRead = <Bindings extends PylonApiRouteEnv>(
       try: () => routeStore(dependencies, env).listEventsForPylon(pylonRef, 25),
     })
 
+    const sparkReadiness = yield* resolveRouteSparkPayoutTargetReadiness(
+      dependencies,
+      env,
+      registration.pylonRef,
+    )
+
     return noStoreJsonResponse({
       events: events.map(event => publicPylonApiEventProjection(event, nowIso)),
-      pylon: publicPylonApiRegistrationProjection(registration, nowIso),
+      pylon: publicPylonApiRegistrationProjection(
+        registration,
+        nowIso,
+        sparkReadiness,
+      ),
     })
   })
 
@@ -1254,6 +1623,25 @@ export const makePylonApiRoutes = <Bindings extends PylonApiRouteEnv>(
         pylonRef: decodeURIComponent(payoutTargetMatch[1]!),
         schema: PylonApiPayoutTargetAdmissionRequest,
       }).pipe(Effect.catch(error => Effect.succeed(routeErrorResponse(error))))
+    }
+
+    // #5252: raw Spark address registration as a payout target. The raw address
+    // rides only the authenticated request body and is stored privately; the
+    // public projection carries only the redacted `payout.spark.<digest>` ref.
+    const sparkPayoutTargetMatch =
+      /^\/api\/pylons\/([^/]+)\/spark-payout-target$/.exec(url.pathname)
+
+    if (sparkPayoutTargetMatch !== null) {
+      if (request.method !== 'POST') {
+        return Effect.succeed(methodNotAllowed(['POST']))
+      }
+
+      return routeRegisterSparkPayoutTarget(
+        dependencies,
+        request,
+        env,
+        decodeURIComponent(sparkPayoutTargetMatch[1]!),
+      ).pipe(Effect.catch(error => Effect.succeed(routeErrorResponse(error))))
     }
 
     const assignmentMatch =

@@ -26,7 +26,14 @@ import {
 } from './autopilot-work-pylon-assignment-synthesizer'
 import {
   authenticateCustomerOrderAgentRequest,
+  CustomerOrderAgentAuthFailure,
+  type CustomerOrderAgentScope,
 } from './customer-order-agent-auth'
+import {
+  evaluateLaneCFanoutForWorkOrder,
+  laneCFanoutObjectiveRef,
+} from './lane-c-fanout-bridge'
+import { buildSelfServeFanoutPlan } from './self-serve-fanout'
 import {
   methodNotAllowed,
   noStoreJsonResponse,
@@ -69,7 +76,14 @@ import {
   makeAutopilotWorkQuote,
 } from './autopilot-work-quote'
 import {
+  type AutopilotWorkPricingLanePolicy,
+  type AutopilotWorkPricingPolicy,
+  autopilotWorkPricingPolicy,
+  pricingLaneForRunnerKind,
+} from './autopilot-work-pricing-policy'
+import {
   type OpenAgentsAutopilotAccessRequestKind,
+  type OpenAgentsAutopilotRequestedCodingAdapter,
   OpenAgentsAutopilotRunnerKind,
   type OpenAgentsAutopilotRunnerKind as OpenAgentsAutopilotRunnerKindType,
   OpenAgentsAutopilotWorkState,
@@ -77,6 +91,19 @@ import {
   type OpenAgentsAutopilotWorkState as OpenAgentsAutopilotWorkStateType,
   decodeOpenAgentsAutopilotWorkRequest,
 } from './autopilot-work-request'
+import {
+  type AutopilotWorkScheduledLaunchProjection,
+  AutopilotWorkScheduledLaunchRecord,
+  dispatchedScheduledLaunch,
+  expiredScheduledLaunch,
+  scheduledLaunchDue,
+  scheduledLaunchHoldsDispatch,
+  scheduledLaunchHorizonReason,
+  scheduledLaunchProjection,
+  scheduledLaunchRecordForRequest,
+  scheduledLaunchRetryAfterSeconds,
+  scheduledLaunchWindowExpired,
+} from './autopilot-work-scheduled-launch'
 
 type HttpResponse = globalThis.Response
 
@@ -250,6 +277,7 @@ export type AutopilotWorkTaskLifecycleState =
   | 'rejected'
   | 'ready_for_assignment'
   | 'revision_required'
+  | 'scheduled'
 
 export type AutopilotWorkTaskPlacementState =
   | 'accepted'
@@ -261,15 +289,20 @@ export type AutopilotWorkTaskPlacementState =
   | 'rejected'
   | 'ready_for_assignment'
   | 'revision_required'
+  | 'scheduled'
 
 export type AutopilotWorkTaskRecordProjection = Readonly<{
   acceptanceCriteriaRefs: ReadonlyArray<string>
   accessRequirements: ReadonlyArray<AutopilotWorkAccessRequirementProjection>
   accessState: AutopilotWorkTaskAccessState
+  checkout: OpenAgentsAutopilotWorkRequest['tasks'][number]['checkout'] | null
   kind: OpenAgentsAutopilotWorkRequest['tasks'][number]['kind']
   lifecycleState: AutopilotWorkTaskLifecycleState
+  objective: string
   paymentState: AutopilotWorkFundingProjection['buyerFundingState']
   placementState: AutopilotWorkTaskPlacementState
+  requestedAdapter?: OpenAgentsAutopilotRequestedCodingAdapter | null
+  requestedAdapterProfileRef?: string | null
   repository: OpenAgentsAutopilotWorkRequest['tasks'][number]['repository'] | null
   taskRef: string
 }>
@@ -290,6 +323,7 @@ export type AutopilotWorkOrderRecord = Readonly<{
   paymentChallengeRef: string | null
   request: OpenAgentsAutopilotWorkRequest
   reviewDecision: AutopilotWorkReviewDecisionRecord | null
+  scheduledLaunch: AutopilotWorkScheduledLaunchRecord | null
   state: OpenAgentsAutopilotWorkStateType
   statusUrlRef: string
   taskRefs: ReadonlyArray<string>
@@ -300,15 +334,33 @@ export type AutopilotWorkOrderRecord = Readonly<{
 const AutopilotWorkExecutionCloseoutRecord = S.Struct({
   assignmentRefs: S.Array(S.String),
   artifactRefs: S.optionalKey(S.Array(S.String)),
+  authorityReceiptRefs: S.optionalKey(S.Array(S.String)),
   blockerRefs: S.optionalKey(S.Array(S.String)),
   buildRefs: S.optionalKey(S.Array(S.String)),
+  changeCaptureRefs: S.optionalKey(S.Array(S.String)),
+  changeCaptureStatus: S.optionalKey(
+    S.Literals(['blocked', 'review_ready', 'stale']),
+  ),
   closeoutRefs: S.Array(S.String),
+  deliveryReadinessFreshness: S.optionalKey(S.Literals(['fresh', 'stale'])),
+  deliveryReadinessRefs: S.optionalKey(S.Array(S.String)),
+  deliveryReadinessStatus: S.optionalKey(
+    S.Literals(['blocked', 'ready', 'scoped_exception']),
+  ),
+  fileCount: S.optionalKey(S.Number),
+  addedLineCount: S.optionalKey(S.Number),
+  patchDigestRef: S.optionalKey(S.NullOr(S.String)),
   previewRefs: S.optionalKey(S.Array(S.String)),
   proofRefs: S.Array(S.String),
+  removedLineCount: S.optionalKey(S.Number),
   resultRefs: S.Array(S.String),
+  reviewCaveatRefs: S.optionalKey(S.Array(S.String)),
   runnerKind: OpenAgentsAutopilotRunnerKind,
   summaryRefs: S.optionalKey(S.Array(S.String)),
   testRefs: S.optionalKey(S.Array(S.String)),
+  verificationRefs: S.optionalKey(S.Array(S.String)),
+  worktreeIdentityStatus: S.optionalKey(S.Literals(['blocked', 'ready', 'stale'])),
+  writebackRequired: S.optionalKey(S.Boolean),
 })
 export type AutopilotWorkExecutionCloseoutRecord =
   typeof AutopilotWorkExecutionCloseoutRecord.Type
@@ -338,12 +390,16 @@ export type AutopilotWorkOrderProjection = Readonly<{
   executionCloseout: AutopilotWorkExecutionCloseoutProjection | null
   fallbackLeaseIntents: ReadonlyArray<AutopilotFallbackLeaseIntentProjection>
   funding: AutopilotWorkFundingProjection
+  generatedAt: string
   idempotent: boolean
   nextAction: AutopilotWorkNextActionProjection
   paymentChallenge: AutopilotWorkPaymentChallengeProjection | null
   paymentChallengeRef: string | null
   placementDecision: AutopilotPlacementDecisionProjection
   placementPolicy: AutopilotWorkPlacementPolicyRecordProjection
+  pricingPolicy: AutopilotWorkPricingPolicy & Readonly<{
+    activeLane: AutopilotWorkPricingLanePolicy | null
+  }>
   pylonAssignmentIntents: ReadonlyArray<AutopilotPylonAssignmentIntentProjection>
   promiseRef: Readonly<{
     blockerRefs: ReadonlyArray<string>
@@ -353,6 +409,7 @@ export type AutopilotWorkOrderProjection = Readonly<{
   quote: AutopilotWorkQuote
   repositoryAuthorities: ReadonlyArray<AutopilotWorkRepositoryAuthorityProjection>
   reviewDecision: AutopilotWorkReviewDecisionProjection | null
+  scheduledLaunch: AutopilotWorkScheduledLaunchProjection | null
   state: OpenAgentsAutopilotWorkStateType
   statusUrlRef: string
   taskRefs: ReadonlyArray<string>
@@ -371,6 +428,7 @@ export type AutopilotWorkEventKind =
   | 'rejected'
   | 'revision_required'
   | 'running'
+  | 'scheduled'
   | 'settled'
 
 export type AutopilotWorkEventProjection = Readonly<{
@@ -436,6 +494,18 @@ export type AutopilotWorkStore = Readonly<{
     ownerUserId: string,
     idempotencyKeyHash: string,
   ) => Promise<AutopilotWorkOrderRecord | undefined>
+  listPendingScheduledWorkOrders: (
+    input: Readonly<{ limit: number }>,
+  ) => Promise<ReadonlyArray<AutopilotWorkOrderRecord>>
+  recordScheduledLaunchTransition: (
+    input: Readonly<{
+      ownerUserId: string
+      scheduledLaunch: AutopilotWorkScheduledLaunchRecord
+      state: OpenAgentsAutopilotWorkStateType
+      updatedAt: string
+      workOrderRef: string
+    }>,
+  ) => Promise<AutopilotWorkOrderRecord | undefined>
 }>
 
 export type AutopilotWorkExecutor = (
@@ -484,6 +554,11 @@ type AutopilotWorkRoutesDependencies<Bindings> = Readonly<{
   pylonRegistrations?: (
     env: Bindings,
   ) => Promise<ReadonlyArray<PylonApiRegistrationRecord>>
+  requireBrowserSession?: (
+    request: Request,
+    env: Bindings,
+    ctx: ExecutionContext,
+  ) => Promise<Readonly<{ user: Readonly<{ userId: string }> }> | undefined>
   verifyL402PaymentProof?: (
     env: Bindings,
     input: AutopilotWorkL402PaymentVerificationInput,
@@ -530,6 +605,21 @@ const requireIdempotencyHash = (
   return Effect.promise(() => sha256Hex(idempotencyKey))
 }
 
+const idempotencyHashForBrowserRequest = <Bindings>(
+  dependencies: AutopilotWorkRoutesDependencies<Bindings>,
+  request: Request,
+  ownerUserId: string,
+): Effect.Effect<string, AutopilotWorkStoreError> => {
+  const idempotencyKey = idempotencyKeyFromRequest(request)
+
+  return Effect.promise(() =>
+    sha256Hex(
+      idempotencyKey ??
+        `browser.autopilot_work.${ownerUserId}.${routeMakeId(dependencies)}`,
+    ),
+  )
+}
+
 const decodeWorkRequest = (
   request: Request,
 ): Effect.Effect<OpenAgentsAutopilotWorkRequest, AutopilotWorkStoreError> =>
@@ -558,6 +648,21 @@ const decodeReviewDecisionRequest = (
       ),
   })
 
+const decodeFallbackCloseoutRequest = (
+  request: Request,
+): Effect.Effect<AutopilotWorkFallbackCloseoutRequest, AutopilotWorkStoreError> =>
+  Effect.tryPromise({
+    catch: error =>
+      new AutopilotWorkStoreError({
+        kind: 'validation_error',
+        reason: error instanceof Error ? error.message : String(error),
+      }),
+    try: async () =>
+      S.decodeUnknownSync(AutopilotWorkFallbackCloseoutRequest)(
+        await readJsonObject(request),
+      ),
+  })
+
 const routeNowIso = <Bindings>(
   dependencies: AutopilotWorkRoutesDependencies<Bindings>,
 ): string => dependencies.nowIso?.() ?? currentIsoTimestamp()
@@ -565,6 +670,80 @@ const routeNowIso = <Bindings>(
 const routeMakeId = <Bindings>(
   dependencies: AutopilotWorkRoutesDependencies<Bindings>,
 ): string => (dependencies.makeId ?? randomUuid)()
+
+export type AutopilotWorkRouteAuth = Readonly<{
+  actorAgentCredentialId: string
+  actorAgentUserId: string
+  ownerUserId: string
+}>
+
+export type AutopilotWorkAuthDependencies<Bindings> = Readonly<{
+  agentStore: (env: Bindings) => AgentRegistrationStore
+  requireBrowserSession?: (
+    request: Request,
+    env: Bindings,
+    ctx: ExecutionContext,
+  ) => Promise<Readonly<{ user: Readonly<{ userId: string }> }> | undefined>
+}>
+
+const hasBearerAuthorization = (request: Request): boolean =>
+  request.headers.get('authorization')?.trim().toLowerCase().startsWith('bearer ') ===
+  true
+
+export const authenticateAutopilotWorkRequest = <Bindings extends AutopilotWorkRouteEnv>(
+  dependencies: AutopilotWorkAuthDependencies<Bindings>,
+  request: Request,
+  env: Bindings,
+  input: Readonly<{
+    ctx: ExecutionContext
+    nowIso: () => string
+    requiredScope: CustomerOrderAgentScope
+  }>,
+): Effect.Effect<
+  AutopilotWorkRouteAuth,
+  AutopilotWorkStoreError | CustomerOrderAgentAuthFailure
+> =>
+  hasBearerAuthorization(request) || dependencies.requireBrowserSession === undefined
+    ? authenticateCustomerOrderAgentRequest(
+        request,
+        dependencies.agentStore(env),
+        {
+          nowIso: input.nowIso,
+          requiredScope: input.requiredScope,
+        },
+      ).pipe(
+        Effect.map(auth => ({
+          actorAgentCredentialId: auth.agent.credential.id,
+          actorAgentUserId: auth.agent.user.id,
+          ownerUserId: auth.ownerUserId,
+        })),
+      )
+    : Effect.gen(function* () {
+        const session = yield* Effect.tryPromise({
+          catch: error =>
+            new AutopilotWorkStoreError({
+              kind: 'storage_error',
+              reason: errorReason(error),
+            }),
+          try: () =>
+            dependencies.requireBrowserSession?.(request, env, input.ctx) ??
+            Promise.resolve(undefined),
+        })
+
+        if (session === undefined) {
+          return yield* new CustomerOrderAgentAuthFailure({
+            failureKind: 'missing_credentials',
+            reason: 'Autopilot work browser session is required.',
+          })
+        }
+
+        return {
+          actorAgentCredentialId:
+            `browser_session.${cleanRefSegment(session.user.userId)}`,
+          actorAgentUserId: session.user.userId,
+          ownerUserId: session.user.userId,
+        }
+      })
 
 const routePylonRegistrations = <Bindings extends AutopilotWorkRouteEnv>(
   dependencies: AutopilotWorkRoutesDependencies<Bindings>,
@@ -930,7 +1109,7 @@ const safePaymentProofRefPattern = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,260}$/
 const safeExecutionCloseoutRefPattern =
   /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,260}$/
 const unsafeExecutionCloseoutRefPattern =
-  /(\/Users\/|\/home\/|access[_-]?token|bearer\s+|checkout|cookie|gho_[a-z0-9_]+|ghp_[a-z0-9_]+|invoice|lnbc|lntb|lnbcrt|lno1|mdk[_-]?(access[_-]?token|mnemonic|webhook[_-]?secret)|mnemonic|oauth|payment[_-]?(hash|preimage)|payout[_-]?(address|destination|target)|preimage|private[_-]?(key|repo)|provider[_-]?(account|grant|payload|token)|raw[_-]?(auth|invoice|payment|payload|prompt|provider|runner|run[_-]?log|source[_-]?archive|tool[_-]?log|webhook)|secret|sk-[a-z0-9]|source[_-]?archive|token|wallet[_-]?(home|material|mnemonic|path|private|secret|state)|webhook[_-]?secret)/iu
+  /(\/Users\/|\/home\/|access[_-]?token|bearer\s+|cookie|gho_[a-z0-9_]+|ghp_[a-z0-9_]+|invoice|lnbc|lntb|lnbcrt|lno1|mdk[_-]?(access[_-]?token|mnemonic|webhook[_-]?secret)|mnemonic|oauth|payment[_-]?(hash|preimage)|payout[_-]?(address|destination|target)|preimage|private[_-]?(key|repo)|provider[_-]?(account|grant|payload|token)|raw[_-]?(auth|invoice|payment|payload|prompt|provider|runner|run[_-]?log|source[_-]?archive|tool[_-]?log|webhook)|secret|sk-[a-z0-9]|source[_-]?archive|token|wallet[_-]?(home|material|mnemonic|path|private|secret|state)|webhook[_-]?secret)/iu
 const AutopilotWorkReviewPublicSafeRef = S.Trim.check(
   S.isNonEmpty(),
   S.isMinLength(3),
@@ -949,6 +1128,40 @@ const AutopilotWorkReviewDecisionRequest = S.Struct({
 type AutopilotWorkReviewDecisionRequest =
   typeof AutopilotWorkReviewDecisionRequest.Type
 
+const AutopilotWorkFallbackCloseoutRequest = S.Struct({
+  assignmentRefs: S.Array(S.String),
+  artifactRefs: S.optionalKey(S.Array(S.String)),
+  authorityReceiptRefs: S.optionalKey(S.Array(S.String)),
+  blockerRefs: S.optionalKey(S.Array(S.String)),
+  buildRefs: S.optionalKey(S.Array(S.String)),
+  changeCaptureRefs: S.optionalKey(S.Array(S.String)),
+  changeCaptureStatus: S.optionalKey(
+    S.Literals(['blocked', 'review_ready', 'stale']),
+  ),
+  closeoutRefs: S.Array(S.String),
+  deliveryReadinessFreshness: S.optionalKey(S.Literals(['fresh', 'stale'])),
+  deliveryReadinessRefs: S.optionalKey(S.Array(S.String)),
+  deliveryReadinessStatus: S.optionalKey(
+    S.Literals(['blocked', 'ready', 'scoped_exception']),
+  ),
+  fileCount: S.optionalKey(S.Number),
+  addedLineCount: S.optionalKey(S.Number),
+  patchDigestRef: S.optionalKey(S.NullOr(S.String)),
+  previewRefs: S.optionalKey(S.Array(S.String)),
+  proofRefs: S.Array(S.String),
+  removedLineCount: S.optionalKey(S.Number),
+  resultRefs: S.Array(S.String),
+  reviewCaveatRefs: S.optionalKey(S.Array(S.String)),
+  runnerKind: OpenAgentsAutopilotRunnerKind,
+  summaryRefs: S.optionalKey(S.Array(S.String)),
+  testRefs: S.optionalKey(S.Array(S.String)),
+  verificationRefs: S.optionalKey(S.Array(S.String)),
+  worktreeIdentityStatus: S.optionalKey(S.Literals(['blocked', 'ready', 'stale'])),
+  writebackRequired: S.optionalKey(S.Boolean),
+})
+type AutopilotWorkFallbackCloseoutRequest =
+  typeof AutopilotWorkFallbackCloseoutRequest.Type
+
 const safeBuyerPaymentProofRef = (value: string | null): string | undefined =>
   value !== null &&
   safePaymentProofRefPattern.test(value) &&
@@ -956,7 +1169,7 @@ const safeBuyerPaymentProofRef = (value: string | null): string | undefined =>
     ? value
     : undefined
 
-const publicSafeExecutionCloseoutRef = (value: string): boolean =>
+export const publicSafeExecutionCloseoutRef = (value: string): boolean =>
   safeExecutionCloseoutRefPattern.test(value) &&
   !unsafeExecutionCloseoutRefPattern.test(value)
 
@@ -968,6 +1181,13 @@ const optionalPublicSafeExecutionCloseoutRefs = (
   refs: ReadonlyArray<string> | undefined,
 ): boolean => refs === undefined || refs.every(publicSafeExecutionCloseoutRef)
 
+const optionalPublicSafeExecutionCloseoutRef = (
+  ref: string | null | undefined,
+): boolean => ref === null || ref === undefined || publicSafeExecutionCloseoutRef(ref)
+
+const optionalNonNegativeInteger = (value: number | undefined): boolean =>
+  value === undefined || (Number.isSafeInteger(value) && value >= 0)
+
 const publicSafeReviewRefs = (refs: ReadonlyArray<string>): boolean =>
   refs.every(publicSafeExecutionCloseoutRef)
 
@@ -978,6 +1198,67 @@ const publicSafeRefsFromBody = (
   Array.isArray(body[key])
     ? body[key].filter((ref): ref is string => typeof ref === 'string')
     : []
+
+const optionalPublicSafeRefsFromBody = (
+  body: Record<string, unknown>,
+  key: string,
+): ReadonlyArray<string> | undefined =>
+  key in body ? publicSafeRefsFromBody(body, key) : undefined
+
+const optionalPublicSafeRefFromBody = (
+  body: Record<string, unknown>,
+  key: string,
+): string | null | undefined =>
+  key in body
+    ? body[key] === null
+      ? null
+      : typeof body[key] === 'string'
+        ? body[key]
+        : undefined
+    : undefined
+
+const optionalNonNegativeIntegerFromBody = (
+  body: Record<string, unknown>,
+  key: string,
+): number | undefined =>
+  typeof body[key] === 'number' && Number.isSafeInteger(body[key]) && body[key] >= 0
+    ? body[key]
+    : undefined
+
+const optionalChangeCaptureStatusFromBody = (
+  body: Record<string, unknown>,
+): AutopilotWorkExecutionCloseoutRecord['changeCaptureStatus'] =>
+  body.changeCaptureStatus === 'blocked' ||
+  body.changeCaptureStatus === 'review_ready' ||
+  body.changeCaptureStatus === 'stale'
+    ? body.changeCaptureStatus
+    : undefined
+
+const optionalDeliveryReadinessFreshnessFromBody = (
+  body: Record<string, unknown>,
+): AutopilotWorkExecutionCloseoutRecord['deliveryReadinessFreshness'] =>
+  body.deliveryReadinessFreshness === 'fresh' ||
+  body.deliveryReadinessFreshness === 'stale'
+    ? body.deliveryReadinessFreshness
+    : undefined
+
+const optionalDeliveryReadinessStatusFromBody = (
+  body: Record<string, unknown>,
+): AutopilotWorkExecutionCloseoutRecord['deliveryReadinessStatus'] =>
+  body.deliveryReadinessStatus === 'blocked' ||
+  body.deliveryReadinessStatus === 'ready' ||
+  body.deliveryReadinessStatus === 'scoped_exception'
+    ? body.deliveryReadinessStatus
+    : undefined
+
+const optionalWorktreeIdentityStatusFromBody = (
+  body: Record<string, unknown>,
+): AutopilotWorkExecutionCloseoutRecord['worktreeIdentityStatus'] =>
+  body.worktreeIdentityStatus === 'blocked' ||
+  body.worktreeIdentityStatus === 'ready' ||
+  body.worktreeIdentityStatus === 'stale'
+    ? body.worktreeIdentityStatus
+    : undefined
 
 const reviewStateForAction = (
   action: AutopilotWorkReviewAction,
@@ -1303,6 +1584,7 @@ const paymentRequiredResponse = <Bindings extends AutopilotWorkRouteEnv>(
   return noStoreJsonResponse(
     {
       error: 'payment_required',
+      generatedAt: input.projection.generatedAt,
       work: input.projection,
     },
     { headers, status: 402 },
@@ -1369,6 +1651,13 @@ const placementPolicyForRecord = (
   }
 }
 
+const pricingPolicyForPlacement = (
+  placementDecision: AutopilotPlacementDecisionProjection,
+): AutopilotWorkOrderProjection['pricingPolicy'] => ({
+  ...autopilotWorkPricingPolicy,
+  activeLane: pricingLaneForRunnerKind(placementDecision.selectedRunnerKind),
+})
+
 const executionCloseoutForRecord = (
   record: AutopilotWorkOrderRecord,
 ): AutopilotWorkExecutionCloseoutProjection | null =>
@@ -1395,6 +1684,10 @@ const lifecycleStateForTask = (
     return 'payment_required'
   }
 
+  if (scheduledLaunchHoldsDispatch(record.scheduledLaunch)) {
+    return 'scheduled'
+  }
+
   switch (record.state) {
     case 'accepted':
       return 'accepted'
@@ -1415,6 +1708,8 @@ const lifecycleStateForTask = (
     case 'access_required':
     case 'payment_required':
       return 'ready_for_assignment'
+    case 'scheduled':
+      return 'scheduled'
   }
 }
 
@@ -1440,6 +1735,8 @@ const placementStateForLifecycle = (
       return 'ready_for_assignment'
     case 'revision_required':
       return 'revision_required'
+    case 'scheduled':
+      return 'scheduled'
   }
 }
 
@@ -1462,10 +1759,14 @@ const taskRecordsForRecord = (
       accessState: accessRequirements.length === 0
         ? 'satisfied'
         : 'missing_required_access',
+      checkout: task.checkout ?? null,
       kind: task.kind,
       lifecycleState,
+      objective: task.objective,
       paymentState: funding.buyerFundingState,
       placementState: placementStateForLifecycle(lifecycleState),
+      requestedAdapter: task.requestedAdapter ?? null,
+      requestedAdapterProfileRef: task.requestedAdapterProfileRef ?? null,
       repository: task.repository ?? null,
       taskRef: task.taskRef,
     }
@@ -1476,6 +1777,7 @@ const nextActionForRecord = (
   record: AutopilotWorkOrderRecord,
   funding: AutopilotWorkFundingProjection,
   placementDecision: AutopilotPlacementDecisionProjection,
+  nowIso: string,
 ): AutopilotWorkNextActionProjection => {
   if (record.state === 'accepted') {
     return {
@@ -1522,6 +1824,24 @@ const nextActionForRecord = (
     }
   }
 
+  if (
+    record.scheduledLaunch !== null &&
+    scheduledLaunchHoldsDispatch(record.scheduledLaunch)
+  ) {
+    return {
+      callerActionRefs: ['caller.wait_for_scheduled_launch'],
+      reasonRefs: [
+        'next_action.scheduled_launch_pending',
+        'scheduled_launch.placement_at_launch_time',
+      ],
+      retryAfterSeconds: scheduledLaunchRetryAfterSeconds(
+        record.scheduledLaunch,
+        nowIso,
+      ),
+      state: 'retry_later',
+    }
+  }
+
   if (placementDecision.source === 'none_available') {
     return {
       callerActionRefs: placementDecision.callerActionRefs,
@@ -1543,6 +1863,7 @@ const nextActionForRecord = (
 
 const stateForRequest = (
   request: OpenAgentsAutopilotWorkRequest,
+  scheduledLaunch: AutopilotWorkScheduledLaunchRecord | null,
 ): OpenAgentsAutopilotWorkStateType => {
   if (accessRequirementsForRequest(request).length > 0) {
     return 'access_required'
@@ -1550,6 +1871,10 @@ const stateForRequest = (
 
   if (paymentChallengeRefForRequest(request) !== null) {
     return 'payment_required'
+  }
+
+  if (scheduledLaunchHoldsDispatch(scheduledLaunch)) {
+    return 'scheduled'
   }
 
   return 'accepted_free_slice'
@@ -1579,12 +1904,14 @@ const projectionForRecord = (
     executionCloseout: executionCloseoutForRecord(record),
     fallbackLeaseIntents: [],
     funding,
+    generatedAt: nowIso,
     idempotent,
-    nextAction: nextActionForRecord(record, funding, placementDecision),
+    nextAction: nextActionForRecord(record, funding, placementDecision, nowIso),
     paymentChallenge: paymentChallengeForRecord(record),
     paymentChallengeRef: record.paymentChallengeRef,
     placementDecision,
     placementPolicy: placementPolicyForRecord(record),
+    pricingPolicy: pricingPolicyForPlacement(placementDecision),
     promiseRef:
       record.request.promiseRef === undefined
         ? null
@@ -1597,6 +1924,7 @@ const projectionForRecord = (
     quote: makeAutopilotWorkQuote(record.request),
     repositoryAuthorities: repositoryAuthoritiesForRequest(record.request),
     reviewDecision: reviewDecisionProjectionForRecord(record.reviewDecision),
+    scheduledLaunch: scheduledLaunchProjection(record.scheduledLaunch),
     state: record.state,
     statusUrlRef: record.statusUrlRef,
     taskRefs: record.taskRefs,
@@ -1639,10 +1967,7 @@ const validateExecutionCloseoutForWork = (
     executionCloseout.assignmentRefs.length > 0 &&
     executionCloseout.assignmentRefs.every(ref => assignmentRefs.has(ref))
   const refsArePublicSafe =
-    allPublicSafeExecutionCloseoutRefs(executionCloseout.assignmentRefs) &&
-    allPublicSafeExecutionCloseoutRefs(executionCloseout.closeoutRefs) &&
-    allPublicSafeExecutionCloseoutRefs(executionCloseout.proofRefs) &&
-    allPublicSafeExecutionCloseoutRefs(executionCloseout.resultRefs)
+    executionCloseoutRefsArePublicSafe(executionCloseout)
   const runnerMatches =
     work.placementDecision.selectedRunnerKind === hostedGeminiRunnerKind &&
     executionCloseout.runnerKind === hostedGeminiRunnerKind
@@ -1659,6 +1984,29 @@ const validateExecutionCloseoutForWork = (
 
   return Effect.succeed(executionCloseout)
 }
+
+const executionCloseoutRefsArePublicSafe = (
+  executionCloseout: AutopilotWorkExecutionCloseoutRecord,
+): boolean =>
+  allPublicSafeExecutionCloseoutRefs(executionCloseout.assignmentRefs) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.artifactRefs) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.authorityReceiptRefs) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.blockerRefs) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.buildRefs) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.changeCaptureRefs) &&
+  allPublicSafeExecutionCloseoutRefs(executionCloseout.closeoutRefs) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.deliveryReadinessRefs) &&
+  optionalNonNegativeInteger(executionCloseout.fileCount) &&
+  optionalNonNegativeInteger(executionCloseout.addedLineCount) &&
+  optionalPublicSafeExecutionCloseoutRef(executionCloseout.patchDigestRef) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.previewRefs) &&
+  allPublicSafeExecutionCloseoutRefs(executionCloseout.proofRefs) &&
+  optionalNonNegativeInteger(executionCloseout.removedLineCount) &&
+  allPublicSafeExecutionCloseoutRefs(executionCloseout.resultRefs) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.reviewCaveatRefs) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.summaryRefs) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.testRefs) &&
+  optionalPublicSafeExecutionCloseoutRefs(executionCloseout.verificationRefs)
 
 const codingAssignmentString = (
   assignment: PylonApiAssignmentRecord,
@@ -1691,38 +2039,87 @@ const executionCloseoutFromPylonWorkerCloseout = (
   const workOrderRef = autopilotWorkOrderRefForAssignment(input.assignment)
   const taskRef = autopilotTaskRefForAssignment(input.assignment)
   const artifactRefs = publicSafeRefsFromBody(input.body, 'artifactRefs')
+  const authorityReceiptRefs = optionalPublicSafeRefsFromBody(
+    input.body,
+    'authorityReceiptRefs',
+  )
   const blockerRefs = publicSafeRefsFromBody(input.body, 'blockerRefs')
   const buildRefs = publicSafeRefsFromBody(input.body, 'buildRefs')
+  const changeCaptureRefs = optionalPublicSafeRefsFromBody(
+    input.body,
+    'changeCaptureRefs',
+  )
   const closeoutRefs = publicSafeRefsFromBody(input.body, 'closeoutRefs')
+  const deliveryReadinessRefs = optionalPublicSafeRefsFromBody(
+    input.body,
+    'deliveryReadinessRefs',
+  )
   const previewRefs = publicSafeRefsFromBody(input.body, 'previewRefs')
   const proofRefs = publicSafeRefsFromBody(input.body, 'proofRefs')
   const resultRefs = publicSafeRefsFromBody(input.body, 'resultRefs')
+  const reviewCaveatRefs = optionalPublicSafeRefsFromBody(
+    input.body,
+    'reviewCaveatRefs',
+  )
   const summaryRefs = publicSafeRefsFromBody(input.body, 'summaryRefs')
   const testRefs = publicSafeRefsFromBody(input.body, 'testRefs')
+  const verificationRefs = optionalPublicSafeRefsFromBody(
+    input.body,
+    'verificationRefs',
+  )
+  const changeCaptureStatus = optionalChangeCaptureStatusFromBody(input.body)
+  const deliveryReadinessFreshness =
+    optionalDeliveryReadinessFreshnessFromBody(input.body)
+  const deliveryReadinessStatus =
+    optionalDeliveryReadinessStatusFromBody(input.body)
+  const fileCount = optionalNonNegativeIntegerFromBody(input.body, 'fileCount')
+  const addedLineCount = optionalNonNegativeIntegerFromBody(
+    input.body,
+    'addedLineCount',
+  )
+  const patchDigestRef = optionalPublicSafeRefFromBody(
+    input.body,
+    'patchDigestRef',
+  )
+  const removedLineCount = optionalNonNegativeIntegerFromBody(
+    input.body,
+    'removedLineCount',
+  )
+  const worktreeIdentityStatus =
+    optionalWorktreeIdentityStatusFromBody(input.body)
   const executionCloseout: AutopilotWorkExecutionCloseoutRecord = {
     assignmentRefs: [input.assignment.assignmentRef],
     artifactRefs,
+    ...(authorityReceiptRefs === undefined ? {} : { authorityReceiptRefs }),
     blockerRefs,
     buildRefs,
+    ...(changeCaptureRefs === undefined ? {} : { changeCaptureRefs }),
+    ...(changeCaptureStatus === undefined ? {} : { changeCaptureStatus }),
     closeoutRefs,
+    ...(deliveryReadinessFreshness === undefined
+      ? {}
+      : { deliveryReadinessFreshness }),
+    ...(deliveryReadinessRefs === undefined ? {} : { deliveryReadinessRefs }),
+    ...(deliveryReadinessStatus === undefined ? {} : { deliveryReadinessStatus }),
+    ...(fileCount === undefined ? {} : { fileCount }),
+    ...(addedLineCount === undefined ? {} : { addedLineCount }),
+    ...(patchDigestRef === undefined ? {} : { patchDigestRef }),
     previewRefs,
     proofRefs,
+    ...(removedLineCount === undefined ? {} : { removedLineCount }),
     resultRefs,
+    ...(reviewCaveatRefs === undefined ? {} : { reviewCaveatRefs }),
     runnerKind: 'requester_pylon',
     summaryRefs,
     testRefs,
+    ...(verificationRefs === undefined ? {} : { verificationRefs }),
+    ...(worktreeIdentityStatus === undefined ? {} : { worktreeIdentityStatus }),
+    ...(typeof input.body.writebackRequired === 'boolean'
+      ? { writebackRequired: input.body.writebackRequired }
+      : {}),
   }
   const refsArePublicSafe =
-    allPublicSafeExecutionCloseoutRefs(executionCloseout.assignmentRefs) &&
-    optionalPublicSafeExecutionCloseoutRefs(executionCloseout.artifactRefs) &&
-    optionalPublicSafeExecutionCloseoutRefs(executionCloseout.blockerRefs) &&
-    optionalPublicSafeExecutionCloseoutRefs(executionCloseout.buildRefs) &&
-    allPublicSafeExecutionCloseoutRefs(executionCloseout.closeoutRefs) &&
-    optionalPublicSafeExecutionCloseoutRefs(executionCloseout.previewRefs) &&
-    allPublicSafeExecutionCloseoutRefs(executionCloseout.proofRefs) &&
-    allPublicSafeExecutionCloseoutRefs(executionCloseout.resultRefs) &&
-    optionalPublicSafeExecutionCloseoutRefs(executionCloseout.summaryRefs) &&
-    optionalPublicSafeExecutionCloseoutRefs(executionCloseout.testRefs)
+    executionCloseoutRefsArePublicSafe(executionCloseout)
   const refsMatch =
     workOrderRef === input.record.workOrderRef &&
     taskRef !== undefined &&
@@ -1735,6 +2132,109 @@ const executionCloseoutFromPylonWorkerCloseout = (
         kind: 'validation_error',
         reason:
           'Autopilot worker closeout must match the work order, task, assignment owner, and contain only public-safe closeout refs.',
+      }),
+    )
+  }
+
+  return Effect.succeed(executionCloseout)
+}
+
+const executionCloseoutRecordFromFallbackCloseoutBody = (
+  body: AutopilotWorkFallbackCloseoutRequest,
+): AutopilotWorkExecutionCloseoutRecord => ({
+  assignmentRefs: body.assignmentRefs,
+  ...(body.artifactRefs === undefined ? {} : { artifactRefs: body.artifactRefs }),
+  ...(body.authorityReceiptRefs === undefined
+    ? {}
+    : { authorityReceiptRefs: body.authorityReceiptRefs }),
+  ...(body.blockerRefs === undefined ? {} : { blockerRefs: body.blockerRefs }),
+  ...(body.buildRefs === undefined ? {} : { buildRefs: body.buildRefs }),
+  ...(body.changeCaptureRefs === undefined
+    ? {}
+    : { changeCaptureRefs: body.changeCaptureRefs }),
+  ...(body.changeCaptureStatus === undefined
+    ? {}
+    : { changeCaptureStatus: body.changeCaptureStatus }),
+  closeoutRefs: body.closeoutRefs,
+  ...(body.deliveryReadinessFreshness === undefined
+    ? {}
+    : { deliveryReadinessFreshness: body.deliveryReadinessFreshness }),
+  ...(body.deliveryReadinessRefs === undefined
+    ? {}
+    : { deliveryReadinessRefs: body.deliveryReadinessRefs }),
+  ...(body.deliveryReadinessStatus === undefined
+    ? {}
+    : { deliveryReadinessStatus: body.deliveryReadinessStatus }),
+  ...(body.fileCount === undefined ? {} : { fileCount: body.fileCount }),
+  ...(body.addedLineCount === undefined
+    ? {}
+    : { addedLineCount: body.addedLineCount }),
+  ...(body.patchDigestRef === undefined
+    ? {}
+    : { patchDigestRef: body.patchDigestRef }),
+  ...(body.previewRefs === undefined ? {} : { previewRefs: body.previewRefs }),
+  proofRefs: body.proofRefs,
+  ...(body.removedLineCount === undefined
+    ? {}
+    : { removedLineCount: body.removedLineCount }),
+  resultRefs: body.resultRefs,
+  ...(body.reviewCaveatRefs === undefined
+    ? {}
+    : { reviewCaveatRefs: body.reviewCaveatRefs }),
+  runnerKind: body.runnerKind,
+  ...(body.summaryRefs === undefined ? {} : { summaryRefs: body.summaryRefs }),
+  ...(body.testRefs === undefined ? {} : { testRefs: body.testRefs }),
+  ...(body.verificationRefs === undefined
+    ? {}
+    : { verificationRefs: body.verificationRefs }),
+  ...(body.worktreeIdentityStatus === undefined
+    ? {}
+    : { worktreeIdentityStatus: body.worktreeIdentityStatus }),
+  ...(body.writebackRequired === undefined
+    ? {}
+    : { writebackRequired: body.writebackRequired }),
+})
+
+const executionCloseoutFromFallbackCloseout = (
+  input: Readonly<{
+    body: AutopilotWorkFallbackCloseoutRequest
+    nowIso: string
+    pylonRegistrations: ReadonlyArray<PylonApiRegistrationRecord>
+    record: AutopilotWorkOrderRecord
+  }>,
+): Effect.Effect<AutopilotWorkExecutionCloseoutRecord, AutopilotWorkStoreError> => {
+  const work = projectionForRecord(
+    input.record,
+    false,
+    input.nowIso,
+    input.pylonRegistrations,
+  )
+  const fallbackLeaseIntents = new Map(
+    work.fallbackLeaseIntents.map(intent => [intent.assignmentRef, intent]),
+  )
+  const assignmentRefsMatch =
+    input.body.assignmentRefs.length > 0 &&
+    input.body.assignmentRefs.every(ref => fallbackLeaseIntents.has(ref))
+  const runnerMatches =
+    work.placementDecision.source === 'fallback' &&
+    work.placementDecision.selectedRunnerKind === input.body.runnerKind &&
+    input.body.assignmentRefs.every(
+      ref => fallbackLeaseIntents.get(ref)?.runnerKind === input.body.runnerKind,
+    )
+  const executionCloseout = executionCloseoutRecordFromFallbackCloseoutBody(
+    input.body,
+  )
+
+  if (
+    !assignmentRefsMatch ||
+    !runnerMatches ||
+    !executionCloseoutRefsArePublicSafe(executionCloseout)
+  ) {
+    return Effect.fail(
+      new AutopilotWorkStoreError({
+        kind: 'validation_error',
+        reason:
+          'Autopilot fallback closeout must match the selected fallback assignment and runner, and contain only public-safe closeout refs.',
       }),
     )
   }
@@ -1793,7 +2293,8 @@ const maybeExecuteReadyWork = <Bindings extends AutopilotWorkRouteEnv>(
       dependencies.executeReadyWork === undefined ||
       input.record.executionCloseout !== null ||
       input.record.state === 'payment_required' ||
-      input.record.state === 'access_required'
+      input.record.state === 'access_required' ||
+      scheduledLaunchHoldsDispatch(input.record.scheduledLaunch)
     ) {
       return input.record
     }
@@ -1980,7 +2481,8 @@ const maybeDispatchPylonAssignments = <Bindings extends AutopilotWorkRouteEnv>(
       input.record.executionCloseout !== null ||
       input.record.state === 'access_required' ||
       input.record.state === 'payment_required' ||
-      input.record.state === 'queued_or_running'
+      input.record.state === 'queued_or_running' ||
+      scheduledLaunchHoldsDispatch(input.record.scheduledLaunch)
     ) {
       return input.record
     }
@@ -2046,6 +2548,159 @@ const maybeDispatchPylonAssignments = <Bindings extends AutopilotWorkRouteEnv>(
     return dispatched ?? input.record
   })
 
+export type AutopilotScheduledLaunchDispatchReport = Readonly<{
+  dispatchedWorkOrderRefs: ReadonlyArray<string>
+  expiredWorkOrderRefs: ReadonlyArray<string>
+  generatedAt: string
+  heldWorkOrders: ReadonlyArray<Readonly<{
+    reasonRef: string
+    workOrderRef: string
+  }>>
+}>
+
+const releasedStateForScheduledRecord = (
+  record: AutopilotWorkOrderRecord,
+): OpenAgentsAutopilotWorkStateType =>
+  record.state === 'scheduled' ? 'accepted_free_slice' : record.state
+
+const dispatchableScheduledStates: ReadonlySet<OpenAgentsAutopilotWorkStateType> =
+  new Set(['accepted_free_slice', 'paid_ready', 'scheduled'])
+
+export const dispatchDueScheduledAutopilotWork = <
+  Bindings extends AutopilotWorkRouteEnv,
+>(
+  dependencies: AutopilotWorkRoutesDependencies<Bindings>,
+  env: Bindings,
+  input: Readonly<{ limit?: number; nowIso: string }>,
+): Effect.Effect<AutopilotScheduledLaunchDispatchReport> =>
+  Effect.gen(function* () {
+    const nowIso = input.nowIso
+    const store = dependencies.makeStore(env)
+    const pending = yield* Effect.tryPromise({
+      catch: error =>
+        new AutopilotWorkStoreError({
+          kind: 'storage_error',
+          reason: errorReason(error),
+        }),
+      try: () =>
+        store.listPendingScheduledWorkOrders({ limit: input.limit ?? 50 }),
+    })
+    const dispatchedWorkOrderRefs: Array<string> = []
+    const expiredWorkOrderRefs: Array<string> = []
+    const heldWorkOrders: Array<{ reasonRef: string; workOrderRef: string }> =
+      []
+    const pylonRegistrations = yield* routePylonRegistrations(
+      dependencies,
+      env,
+    )
+
+    for (const record of pending) {
+      const scheduledLaunch = record.scheduledLaunch
+
+      if (
+        scheduledLaunch === null ||
+        !scheduledLaunchHoldsDispatch(scheduledLaunch)
+      ) {
+        continue
+      }
+
+      if (scheduledLaunchWindowExpired(scheduledLaunch, nowIso)) {
+        yield* Effect.tryPromise({
+          catch: error =>
+            new AutopilotWorkStoreError({
+              kind: 'storage_error',
+              reason: errorReason(error),
+            }),
+          try: () =>
+            store.recordScheduledLaunchTransition({
+              ownerUserId: record.ownerUserId,
+              scheduledLaunch: expiredScheduledLaunch(scheduledLaunch, nowIso),
+              state: 'blocked',
+              updatedAt: nowIso,
+              workOrderRef: record.workOrderRef,
+            }),
+        })
+        expiredWorkOrderRefs.push(record.workOrderRef)
+        continue
+      }
+
+      if (!scheduledLaunchDue(scheduledLaunch, nowIso)) {
+        continue
+      }
+
+      if (!dispatchableScheduledStates.has(record.state)) {
+        heldWorkOrders.push({
+          reasonRef: `scheduled_launch.held.${record.state}`,
+          workOrderRef: record.workOrderRef,
+        })
+        continue
+      }
+
+      const released = yield* Effect.tryPromise({
+        catch: error =>
+          new AutopilotWorkStoreError({
+            kind: 'storage_error',
+            reason: errorReason(error),
+          }),
+        try: () =>
+          store.recordScheduledLaunchTransition({
+            ownerUserId: record.ownerUserId,
+            scheduledLaunch: dispatchedScheduledLaunch(
+              scheduledLaunch,
+              nowIso,
+            ),
+            state: releasedStateForScheduledRecord(record),
+            updatedAt: nowIso,
+            workOrderRef: record.workOrderRef,
+          }),
+      })
+
+      if (released === undefined) {
+        heldWorkOrders.push({
+          reasonRef: 'scheduled_launch.held.transition_lost',
+          workOrderRef: record.workOrderRef,
+        })
+        continue
+      }
+
+      const executedRecord = yield* maybeExecuteReadyWork(dependencies, env, {
+        idempotent: false,
+        nowIso,
+        pylonRegistrations,
+        record: released,
+      })
+
+      yield* maybeDispatchPylonAssignments(dependencies, env, {
+        idempotent: false,
+        nowIso,
+        pylonRegistrations,
+        record: executedRecord,
+      })
+      dispatchedWorkOrderRefs.push(record.workOrderRef)
+    }
+
+    return {
+      dispatchedWorkOrderRefs,
+      expiredWorkOrderRefs,
+      generatedAt: nowIso,
+      heldWorkOrders,
+    }
+  }).pipe(
+    Effect.catch(error =>
+      Effect.succeed({
+        dispatchedWorkOrderRefs: [],
+        expiredWorkOrderRefs: [],
+        generatedAt: input.nowIso,
+        heldWorkOrders: [
+          {
+            reasonRef: `scheduled_launch.dispatch_failed.${error.kind}`,
+            workOrderRef: 'scheduled_launch.dispatch_batch',
+          },
+        ],
+      }),
+    ),
+  )
+
 const terminalEventKindForState = (
   state: OpenAgentsAutopilotWorkStateType,
 ): AutopilotWorkEventKind | undefined => {
@@ -2069,6 +2724,8 @@ const terminalEventKindForState = (
       return 'rejected'
     case 'revision_required':
       return 'revision_required'
+    case 'scheduled':
+      return 'scheduled'
     case 'accepted_free_slice':
       return undefined
   }
@@ -2120,6 +2777,10 @@ const buildWorkOrderRecord = (
 ): AutopilotWorkOrderRecord => {
   const workOrderRef = workOrderRefForId(input.id)
   const paymentChallengeRef = paymentChallengeRefForRequest(input.request)
+  const scheduledLaunch = scheduledLaunchRecordForRequest(
+    input.request,
+    input.nowIso,
+  )
 
   return {
     accessRequestRefs: accessRequestRefsForRequest(input.request),
@@ -2137,7 +2798,8 @@ const buildWorkOrderRecord = (
     paymentChallengeRef,
     request: input.request,
     reviewDecision: null,
-    state: stateForRequest(input.request),
+    scheduledLaunch,
+    state: stateForRequest(input.request, scheduledLaunch),
     statusUrlRef: statusUrlRefForWorkOrder(workOrderRef),
     taskRefs: input.request.tasks.map(task => task.taskRef),
     updatedAt: input.nowIso,
@@ -2149,6 +2811,7 @@ const createWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
   dependencies: AutopilotWorkRoutesDependencies<Bindings>,
   request: Request,
   env: Bindings,
+  ctx: ExecutionContext,
 ): Effect.Effect<HttpResponse> =>
   Effect.gen(function* () {
     const nowIso = routeNowIso(dependencies)
@@ -2156,15 +2819,23 @@ const createWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
       dependencies,
       env,
     )
-    const auth = yield* authenticateCustomerOrderAgentRequest(
+    const auth = yield* authenticateAutopilotWorkRequest(
+      dependencies,
       request,
-      dependencies.agentStore(env),
+      env,
       {
+        ctx,
         nowIso: () => nowIso,
         requiredScope: 'customer_orders.write',
       },
     )
-    const idempotencyKeyHash = yield* requireIdempotencyHash(request)
+    const idempotencyKeyHash = hasBearerAuthorization(request)
+      ? yield* requireIdempotencyHash(request)
+      : yield* idempotencyHashForBrowserRequest(
+          dependencies,
+          request,
+          auth.ownerUserId,
+        )
     const existing = yield* Effect.promise(() =>
       dependencies
         .makeStore(env)
@@ -2232,19 +2903,33 @@ const createWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
             projection,
             record: dispatchedRecord,
           })
-        : noStoreJsonResponse({ work: projection }, { status: 200 })
+        : noStoreJsonResponse(
+            { generatedAt: nowIso, work: projection },
+            { status: 200 },
+          )
     }
 
     const workRequest = yield* decodeWorkRequest(request)
     const record = buildWorkOrderRecord({
-      agentCredentialId: auth.agent.credential.id,
-      agentUserId: auth.agent.user.id,
+      agentCredentialId: auth.actorAgentCredentialId,
+      agentUserId: auth.actorAgentUserId,
       id: routeMakeId(dependencies),
       idempotencyKeyHash,
       nowIso,
       ownerUserId: auth.ownerUserId,
       request: workRequest,
     })
+    const horizonReason = scheduledLaunchHorizonReason(
+      record.scheduledLaunch,
+      nowIso,
+    )
+
+    if (horizonReason !== undefined) {
+      return yield* new AutopilotWorkStoreError({
+        kind: 'validation_error',
+        reason: horizonReason,
+      })
+    }
     const proof = yield* verifyBuyerPaymentProofFromRequest(
       dependencies,
       env,
@@ -2302,7 +2987,7 @@ const createWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
           record: dispatchedRecord,
         })
       : noStoreJsonResponse(
-          { work: projection },
+          { generatedAt: nowIso, work: projection },
           { status: created.idempotent ? 200 : 202 },
         )
   }).pipe(
@@ -2316,6 +3001,7 @@ const readWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
   dependencies: AutopilotWorkRoutesDependencies<Bindings>,
   request: Request,
   env: Bindings,
+  ctx: ExecutionContext,
   workOrderRef: string,
 ): Effect.Effect<HttpResponse> =>
   Effect.gen(function* () {
@@ -2324,10 +3010,12 @@ const readWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
       dependencies,
       env,
     )
-    const auth = yield* authenticateCustomerOrderAgentRequest(
+    const auth = yield* authenticateAutopilotWorkRequest(
+      dependencies,
       request,
-      dependencies.agentStore(env),
+      env,
       {
+        ctx,
         nowIso: () => nowIso,
         requiredScope: 'customer_orders.read',
       },
@@ -2352,12 +3040,156 @@ const readWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
     }
 
     return noStoreJsonResponse({
+      generatedAt: nowIso,
       work: projectionForRecord(record, false, nowIso, pylonRegistrations),
     })
   }).pipe(
     Effect.catchTag('CustomerOrderAgentAuthFailure', () =>
       Effect.succeed(unauthorized())
     ),
+    Effect.catch(error => Effect.succeed(routeErrorResponse(error))),
+  )
+
+// Lane C fanout (#4783): server-side gate that bursts a product work order to
+// the public labor market when owned capacity is dark, the customer opted in,
+// and the public trust-tier floor is met — then creates the linked market work
+// request. The tier floor + opt-in + budget cap are enforced HERE (server-side)
+// before any market listing is created; a private order can never leave the
+// first-party lanes through this route.
+const laneCFanoutWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
+  dependencies: AutopilotWorkRoutesDependencies<Bindings>,
+  request: Request,
+  env: Bindings,
+  ctx: ExecutionContext,
+  workOrderRef: string,
+): Effect.Effect<HttpResponse> =>
+  Effect.gen(function* () {
+    const nowIso = routeNowIso(dependencies)
+    const pylonRegistrations = yield* routePylonRegistrations(dependencies, env)
+    const auth = yield* authenticateAutopilotWorkRequest(dependencies, request, env, {
+      ctx,
+      nowIso: () => nowIso,
+      requiredScope: 'customer_orders.write',
+    })
+    const record = yield* Effect.tryPromise({
+      catch: error =>
+        new AutopilotWorkStoreError({
+          kind: 'storage_error',
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      try: () => dependencies.makeStore(env).readWorkOrder(workOrderRef),
+    })
+    if (record === undefined || record.ownerUserId !== auth.ownerUserId) {
+      return noStoreJsonResponse(
+        { error: 'autopilot_work_not_found', reason: 'Autopilot work order was not found.' },
+        { status: 404 },
+      )
+    }
+
+    const body = (yield* Effect.tryPromise({
+      catch: () =>
+        new AutopilotWorkStoreError({ kind: 'validation_error', reason: 'Invalid Lane C fanout body.' }),
+      try: () => request.json() as Promise<Record<string, unknown>>,
+    })) ?? {}
+    const customerOptIn = body.customerOptIn === true
+    const budgetCapSats = typeof body.budgetCapSats === 'number' ? body.budgetCapSats : 0
+
+    const work = projectionForRecord(record, false, nowIso, pylonRegistrations)
+    // Server-supplied placement/policy + readiness facts for the lane-C gate.
+    // The customer never asserts these — they come from the work order
+    // projection, so the public-trust floor stays enforced server-side.
+    const workOrderFacts = {
+      placementSource: work.placementDecision.source,
+      placementAvailabilityState: work.placementDecision.availabilityState,
+      privacyTier: work.placementPolicy.privacyTier,
+      settlementBridgeReady: true, // P4 (#4780) USD->sats settlement bridge is built/closed.
+      marketInventoryReady: true,
+      artifactAuthorityReady: true,
+      validatorPolicyReady: true,
+      missionWorkOrderUnified: true,
+      providerTrustTier: 'public_rung1' as const,
+    }
+    const fanout = evaluateLaneCFanoutForWorkOrder({
+      ...workOrderFacts,
+      customerOptIn,
+      budgetCapSats,
+      // The fanout authorizes market quotes up to the budget cap; the per-quote
+      // budget check is enforced again at escrow-reserve time on acceptance.
+      quotedSats: budgetCapSats,
+    })
+
+    // Self-serve fanout plan (autopilot.control_center_fanout_marketplace.v1):
+    // this route is customer-authenticated (customer_orders.write), so the
+    // customer (not an operator) initiates the fanout in a SINGLE self-serve
+    // action. Build the typed plan so the response is the self-serve capability,
+    // not an operator-staged two-step. The plan reuses the SAME lane-C gate, so
+    // a blocked gate yields a plan with marketWorkRequest=null. It is INERT and
+    // clears only the self-serve blocker (code_task work class only).
+    const selfServePlanResult = buildSelfServeFanoutPlan(
+      {
+        workOrderRef,
+        customerRef: `agent:${auth.ownerUserId}`,
+        customerOptIn,
+        budgetCapSats,
+        title: `Lane C fanout: ${workOrderRef}`,
+      },
+      workOrderFacts,
+      nowIso,
+    )
+    const selfServePlan = selfServePlanResult.ok ? selfServePlanResult.plan : null
+
+    if (!fanout.readyForMarket) {
+      return noStoreJsonResponse(
+        {
+          error: 'lane_c_fanout_blocked',
+          fanout: {
+            lane: fanout.decision.lane,
+            ownedCapacityState: fanout.ownedCapacityState,
+            reasonRefs: fanout.decision.reasonRefs,
+            state: fanout.decision.state,
+          },
+          reason: 'Lane C fanout gate not satisfied.',
+        },
+        { status: 409 },
+      )
+    }
+
+    // Server gate passed. The public-tier floor + opt-in + budget cap are now
+    // enforced server-side; the route authorizes the fanout and returns the
+    // public-safe objective ref + the market work-request input the requester
+    // uses to list the linked job on the open market
+    // (POST /api/forum/work-requests). A private/non-public order never reaches
+    // this branch (it gets a 409 above), so the floor cannot be bypassed.
+    const objectiveRef = laneCFanoutObjectiveRef(workOrderRef)
+    return noStoreJsonResponse(
+      {
+        fanout: {
+          authorized: true,
+          lane: fanout.decision.lane,
+          objectiveRef,
+          ownedCapacityState: fanout.ownedCapacityState,
+          reasonRefs: fanout.decision.reasonRefs,
+          state: fanout.decision.state,
+        },
+        generatedAt: nowIso,
+        marketWorkRequestInput: {
+          budgetSats: budgetCapSats,
+          deadlineRef: 'deadline.public.lane_c_fanout.20261231',
+          objectiveRef,
+          requiredCapabilityRefs: ['capability.pylon.local_claude_agent'],
+          title: `Lane C fanout: ${workOrderRef}`.slice(0, 160),
+          verificationCommandRef: 'command.public.pylon.labor.bun_test',
+        },
+        // The customer-initiated self-serve fanout plan (single-action,
+        // INERT, code_task work class only). This makes the route the
+        // self-serve capability rather than an operator-staged two-step.
+        selfServeFanout: selfServePlan,
+        workOrderRef,
+      },
+      { status: 201 },
+    )
+  }).pipe(
+    Effect.catchTag('CustomerOrderAgentAuthFailure', () => Effect.succeed(unauthorized())),
     Effect.catch(error => Effect.succeed(routeErrorResponse(error))),
   )
 
@@ -2410,10 +3242,16 @@ const reviewDecisionRecordFromRequest = (
   revisionRequestRefs: input.body.revisionRequestRefs ?? [],
 })
 
-const reviewWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
+const closeoutRecordsEqual = (
+  left: AutopilotWorkExecutionCloseoutRecord,
+  right: AutopilotWorkExecutionCloseoutRecord,
+): boolean => JSON.stringify(left) === JSON.stringify(right)
+
+const closeoutWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
   dependencies: AutopilotWorkRoutesDependencies<Bindings>,
   request: Request,
   env: Bindings,
+  ctx: ExecutionContext,
   workOrderRef: string,
 ): Effect.Effect<HttpResponse> =>
   Effect.gen(function* () {
@@ -2422,10 +3260,138 @@ const reviewWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
       dependencies,
       env,
     )
-    const auth = yield* authenticateCustomerOrderAgentRequest(
+    const auth = yield* authenticateAutopilotWorkRequest(
+      dependencies,
       request,
-      dependencies.agentStore(env),
+      env,
       {
+        ctx,
+        nowIso: () => nowIso,
+        requiredScope: 'customer_orders.write',
+      },
+    )
+    yield* requireIdempotencyHash(request)
+    const body = yield* decodeFallbackCloseoutRequest(request)
+    const existing = yield* Effect.tryPromise({
+      catch: error =>
+        new AutopilotWorkStoreError({
+          kind: 'storage_error',
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      try: () => dependencies.makeStore(env).readWorkOrder(workOrderRef),
+    })
+
+    if (existing === undefined || existing.ownerUserId !== auth.ownerUserId) {
+      return noStoreJsonResponse(
+        {
+          error: 'autopilot_work_not_found',
+          reason: 'Autopilot work order was not found.',
+        },
+        { status: 404 },
+      )
+    }
+
+    const requestedExecutionCloseout =
+      executionCloseoutRecordFromFallbackCloseoutBody(body)
+
+    if (existing.executionCloseout !== null) {
+      if (
+        executionCloseoutRefsArePublicSafe(requestedExecutionCloseout) &&
+        closeoutRecordsEqual(
+          existing.executionCloseout,
+          requestedExecutionCloseout,
+        )
+      ) {
+        return noStoreJsonResponse(
+          {
+            generatedAt: nowIso,
+            idempotent: true,
+            work: projectionForRecord(
+              existing,
+              true,
+              nowIso,
+              pylonRegistrations,
+            ),
+          },
+          { status: 200 },
+        )
+      }
+
+      return yield* new AutopilotWorkStoreError({
+        kind: 'conflict',
+        reason:
+          'Autopilot work already has execution closeout evidence.',
+      })
+    }
+
+    const executionCloseout = yield* executionCloseoutFromFallbackCloseout({
+      body,
+      nowIso,
+      pylonRegistrations,
+      record: existing,
+    })
+
+    const delivered = yield* Effect.tryPromise({
+      catch: error =>
+        error instanceof AutopilotWorkStoreError
+          ? error
+          : new AutopilotWorkStoreError({
+              kind: 'storage_error',
+              reason: error instanceof Error ? error.message : String(error),
+            }),
+      try: () =>
+        dependencies.makeStore(env).recordExecutionCloseout({
+          executionCloseout,
+          ownerUserId: auth.ownerUserId,
+          updatedAt: nowIso,
+          workOrderRef,
+        }),
+    })
+
+    if (delivered === undefined) {
+      return noStoreJsonResponse(
+        {
+          error: 'autopilot_work_not_found',
+          reason: 'Autopilot work order was not found.',
+        },
+        { status: 404 },
+      )
+    }
+
+    return noStoreJsonResponse(
+      {
+        generatedAt: nowIso,
+        idempotent: false,
+        work: projectionForRecord(delivered, false, nowIso, pylonRegistrations),
+      },
+      { status: 201 },
+    )
+  }).pipe(
+    Effect.catchTag('CustomerOrderAgentAuthFailure', () =>
+      Effect.succeed(unauthorized())
+    ),
+    Effect.catch(error => Effect.succeed(routeErrorResponse(error))),
+  )
+
+const reviewWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
+  dependencies: AutopilotWorkRoutesDependencies<Bindings>,
+  request: Request,
+  env: Bindings,
+  ctx: ExecutionContext,
+  workOrderRef: string,
+): Effect.Effect<HttpResponse> =>
+  Effect.gen(function* () {
+    const nowIso = routeNowIso(dependencies)
+    const pylonRegistrations = yield* routePylonRegistrations(
+      dependencies,
+      env,
+    )
+    const auth = yield* authenticateAutopilotWorkRequest(
+      dependencies,
+      request,
+      env,
+      {
+        ctx,
         nowIso: () => nowIso,
         requiredScope: 'customer_orders.write',
       },
@@ -2436,8 +3402,8 @@ const reviewWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
       validateReviewDecisionRequest,
     )
     const reviewDecision = reviewDecisionRecordFromRequest({
-      actorAgentCredentialId: auth.agent.credential.id,
-      actorAgentUserId: auth.agent.user.id,
+      actorAgentCredentialId: auth.actorAgentCredentialId,
+      actorAgentUserId: auth.actorAgentUserId,
       body,
       idempotencyKeyHash,
       nowIso,
@@ -2473,6 +3439,7 @@ const reviewWorkOrder = <Bindings extends AutopilotWorkRouteEnv>(
 
     return noStoreJsonResponse(
       {
+        generatedAt: nowIso,
         idempotent: result.idempotent,
         work: projectionForRecord(
           result.record,
@@ -2548,14 +3515,17 @@ const readWorkOrderEvents = <Bindings extends AutopilotWorkRouteEnv>(
   dependencies: AutopilotWorkRoutesDependencies<Bindings>,
   request: Request,
   env: Bindings,
+  ctx: ExecutionContext,
   workOrderRef: string,
 ): Effect.Effect<HttpResponse> =>
   Effect.gen(function* () {
     const nowIso = routeNowIso(dependencies)
-    const auth = yield* authenticateCustomerOrderAgentRequest(
+    const auth = yield* authenticateAutopilotWorkRequest(
+      dependencies,
       request,
-      dependencies.agentStore(env),
+      env,
       {
+        ctx,
         nowIso: () => nowIso,
         requiredScope: 'customer_orders.read',
       },
@@ -2590,6 +3560,7 @@ const readWorkOrderEvents = <Bindings extends AutopilotWorkRouteEnv>(
 
     return noStoreJsonResponse({
       events,
+      generatedAt: nowIso,
       nextAfter: events.length === 0
         ? after
         : events[events.length - 1]?.sequence ?? after,
@@ -2618,6 +3589,7 @@ const readWorkOrderBriefing = <Bindings extends AutopilotWorkRouteEnv>(
   dependencies: AutopilotWorkRoutesDependencies<Bindings>,
   request: Request,
   env: Bindings,
+  ctx: ExecutionContext,
   workOrderRef: string,
 ): Effect.Effect<HttpResponse> =>
   Effect.gen(function* () {
@@ -2626,10 +3598,12 @@ const readWorkOrderBriefing = <Bindings extends AutopilotWorkRouteEnv>(
       dependencies,
       env,
     )
-    const auth = yield* authenticateCustomerOrderAgentRequest(
+    const auth = yield* authenticateAutopilotWorkRequest(
+      dependencies,
       request,
-      dependencies.agentStore(env),
+      env,
       {
+        ctx,
         nowIso: () => nowIso,
         requiredScope: 'customer_orders.read',
       },
@@ -2673,6 +3647,20 @@ const workOrderEventsRefFromPath = (pathname: string): string | undefined => {
   return match?.[1]
 }
 
+const workOrderCloseoutRefFromPath = (pathname: string): string | undefined => {
+  const match = /^\/api\/autopilot\/work\/([^/]+)\/closeout$/.exec(pathname)
+
+  return match?.[1]
+}
+
+const workOrderLaneCFanoutRefFromPath = (
+  pathname: string,
+): string | undefined => {
+  const match = /^\/api\/autopilot\/work\/([^/]+)\/lane-c-fanout$/.exec(pathname)
+
+  return match?.[1]
+}
+
 const workOrderReviewRefFromPath = (pathname: string): string | undefined => {
   const match = /^\/api\/autopilot\/work\/([^/]+)\/review$/.exec(pathname)
 
@@ -2681,10 +3669,29 @@ const workOrderReviewRefFromPath = (pathname: string): string | undefined => {
 
 const promiseIdQueryPattern = /^[a-z0-9_]+(\.[a-z0-9_]+)*\.v\d+$/
 
+const routingSummaryForProjection = (
+  projection: AutopilotWorkOrderProjection,
+) => {
+  const activeLane = projection.pricingPolicy.activeLane
+
+  return {
+    availabilityState: projection.placementDecision.availabilityState,
+    buyerDebitRequired: activeLane?.buyerDebitRequired ?? false,
+    fallbackLeaseIntentCount: projection.fallbackLeaseIntents.length,
+    fallbackRunnerKind: projection.placementDecision.fallbackRunnerKind,
+    laneRef: activeLane?.laneRef ?? null,
+    meterKind: activeLane?.meterKind ?? null,
+    pylonAssignmentIntentCount: projection.pylonAssignmentIntents.length,
+    selectedRunnerKind: projection.placementDecision.selectedRunnerKind,
+    source: projection.placementDecision.source,
+  }
+}
+
 const listWorkOrders = <Bindings extends AutopilotWorkRouteEnv>(
   dependencies: AutopilotWorkRoutesDependencies<Bindings>,
   request: Request,
   env: Bindings,
+  ctx: ExecutionContext,
   url: URL,
 ): Effect.Effect<HttpResponse> =>
   Effect.gen(function* () {
@@ -2702,10 +3709,12 @@ const listWorkOrders = <Bindings extends AutopilotWorkRouteEnv>(
     }
 
     const nowIso = routeNowIso(dependencies)
-    const auth = yield* authenticateCustomerOrderAgentRequest(
+    const auth = yield* authenticateAutopilotWorkRequest(
+      dependencies,
       request,
-      dependencies.agentStore(env),
+      env,
       {
+        ctx,
         nowIso: () => nowIso,
         requiredScope: 'customer_orders.read',
       },
@@ -2725,20 +3734,37 @@ const listWorkOrders = <Bindings extends AutopilotWorkRouteEnv>(
     const matching = records.filter(
       record => record.request.promiseRef?.promiseId === promiseId,
     )
+    const pylonRegistrations = yield* routePylonRegistrations(dependencies, env)
 
     return noStoreJsonResponse({
+      generatedAt: nowIso,
       promiseId,
-      workOrders: matching.map(record => ({
-        createdAt: record.createdAt,
-        promiseRef: {
-          blockerRefs: record.request.promiseRef?.blockerRefs ?? [],
-          promiseId: record.request.promiseRef?.promiseId ?? promiseId,
-          registryVersion: record.request.promiseRef?.registryVersion ?? null,
-        },
-        state: record.state,
-        updatedAt: record.updatedAt,
-        workOrderRef: record.workOrderRef,
-      })),
+      workOrders: matching.map(record => {
+        const projection = projectionForRecord(
+          record,
+          false,
+          nowIso,
+          pylonRegistrations,
+        )
+
+        return {
+          createdAt: record.createdAt,
+          generatedAt: nowIso,
+          issueRefs: record.taskRefs
+            .flatMap(ref => /^task\.github_issue\.issue_(\d+)\./.exec(ref)?.[1] ?? [])
+            .map(issueNumber => `github.issue.${issueNumber}`),
+          promiseRef: {
+            blockerRefs: record.request.promiseRef?.blockerRefs ?? [],
+            promiseId: record.request.promiseRef?.promiseId ?? promiseId,
+            registryVersion: record.request.promiseRef?.registryVersion ?? null,
+          },
+          routing: routingSummaryForProjection(projection),
+          state: record.state,
+          taskRefs: record.taskRefs,
+          updatedAt: record.updatedAt,
+          workOrderRef: record.workOrderRef,
+        }
+      }),
     })
   }).pipe(
     Effect.catchTag('CustomerOrderAgentAuthFailure', () =>
@@ -2755,14 +3781,15 @@ export const makeAutopilotWorkRoutes = <
   routeAutopilotWorkRequest: (
     request: Request,
     env: Bindings,
+    ctx: ExecutionContext,
   ): Effect.Effect<HttpResponse> | undefined => {
     const url = new URL(request.url)
 
     if (url.pathname === '/api/autopilot/work') {
       return M.value(request.method).pipe(
-        M.when('POST', () => createWorkOrder(dependencies, request, env)),
+        M.when('POST', () => createWorkOrder(dependencies, request, env, ctx)),
         M.when('GET', () =>
-          listWorkOrders(dependencies, request, env, url)
+          listWorkOrders(dependencies, request, env, ctx, url)
         ),
         M.orElse(() => Effect.succeed(methodNotAllowed(['GET', 'POST']))),
       )
@@ -2777,6 +3804,7 @@ export const makeAutopilotWorkRoutes = <
             dependencies,
             request,
             env,
+            ctx,
             workOrderEventsRef,
           )
         ),
@@ -2793,10 +3821,28 @@ export const makeAutopilotWorkRoutes = <
             dependencies,
             request,
             env,
+            ctx,
             workOrderBriefingRef,
           )
         ),
         M.orElse(() => Effect.succeed(methodNotAllowed(['GET']))),
+      )
+    }
+
+    const workOrderCloseoutRef = workOrderCloseoutRefFromPath(url.pathname)
+
+    if (workOrderCloseoutRef !== undefined) {
+      return M.value(request.method).pipe(
+        M.when('POST', () =>
+          closeoutWorkOrder(
+            dependencies,
+            request,
+            env,
+            ctx,
+            workOrderCloseoutRef,
+          )
+        ),
+        M.orElse(() => Effect.succeed(methodNotAllowed(['POST']))),
       )
     }
 
@@ -2805,7 +3851,24 @@ export const makeAutopilotWorkRoutes = <
     if (workOrderReviewRef !== undefined) {
       return M.value(request.method).pipe(
         M.when('POST', () =>
-          reviewWorkOrder(dependencies, request, env, workOrderReviewRef)
+          reviewWorkOrder(dependencies, request, env, ctx, workOrderReviewRef)
+        ),
+        M.orElse(() => Effect.succeed(methodNotAllowed(['POST']))),
+      )
+    }
+
+    const workOrderLaneCFanoutRef = workOrderLaneCFanoutRefFromPath(url.pathname)
+
+    if (workOrderLaneCFanoutRef !== undefined) {
+      return M.value(request.method).pipe(
+        M.when('POST', () =>
+          laneCFanoutWorkOrder(
+            dependencies,
+            request,
+            env,
+            ctx,
+            workOrderLaneCFanoutRef,
+          )
         ),
         M.orElse(() => Effect.succeed(methodNotAllowed(['POST']))),
       )
@@ -2816,7 +3879,7 @@ export const makeAutopilotWorkRoutes = <
     if (workOrderRef !== undefined) {
       return M.value(request.method).pipe(
         M.when('GET', () =>
-          readWorkOrder(dependencies, request, env, workOrderRef)
+          readWorkOrder(dependencies, request, env, ctx, workOrderRef)
         ),
         M.orElse(() => Effect.succeed(methodNotAllowed(['GET']))),
       )
@@ -2840,6 +3903,15 @@ const reviewDecisionFromRowValue = (
 ): AutopilotWorkReviewDecisionRecord | null =>
   typeof value === 'string' && value.trim() !== ''
     ? S.decodeUnknownSync(AutopilotWorkReviewDecisionRecord)(
+        parseJsonUnknown(value),
+      )
+    : null
+
+const scheduledLaunchFromRowValue = (
+  value: unknown,
+): AutopilotWorkScheduledLaunchRecord | null =>
+  typeof value === 'string' && value.trim() !== ''
+    ? S.decodeUnknownSync(AutopilotWorkScheduledLaunchRecord)(
         parseJsonUnknown(value),
       )
     : null
@@ -2873,6 +3945,7 @@ const recordFromRow = (
     parseJsonUnknown(String(row.request_json)),
   ),
   reviewDecision: reviewDecisionFromRowValue(row.review_decision_json),
+  scheduledLaunch: scheduledLaunchFromRowValue(row.scheduled_launch_json),
   state: S.decodeUnknownSync(OpenAgentsAutopilotWorkState)(row.state),
   statusUrlRef: String(row.status_url_ref),
   taskRefs: parseJsonStringArray(String(row.task_refs_json)),
@@ -2917,12 +3990,13 @@ export const makeD1AutopilotWorkStore = (
           buyer_payment_proof_ref,
           payment_challenge_ref,
           placement_policy_json,
+          scheduled_launch_json,
           status_url_ref,
           event_stream_ref,
           created_at,
           updated_at,
           archived_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
       )
       .bind(
         record.id,
@@ -2939,6 +4013,9 @@ export const makeD1AutopilotWorkStore = (
         record.buyerPaymentProofRef,
         record.paymentChallengeRef,
         JSON.stringify(record.request.placementPolicy),
+        record.scheduledLaunch === null
+          ? null
+          : JSON.stringify(record.scheduledLaunch),
         record.statusUrlRef,
         record.eventStreamRef,
         record.createdAt,
@@ -2972,7 +4049,7 @@ export const makeD1AutopilotWorkStore = (
          WHERE work_order_ref = ?
            AND owner_user_id = ?
            AND archived_at IS NULL
-           AND state NOT IN ('access_required', 'payment_required', 'delivered')`,
+           AND state NOT IN ('access_required', 'payment_required', 'delivered', 'scheduled')`,
       )
       .bind(input.updatedAt, input.workOrderRef, input.ownerUserId)
       .run()
@@ -3163,6 +4240,65 @@ export const makeD1AutopilotWorkStore = (
          LIMIT 1`,
       )
       .bind(ownerUserId, idempotencyKeyHash)
+      .first<Record<string, unknown>>()
+
+    return row === null ? undefined : recordFromRow(row)
+  },
+  listPendingScheduledWorkOrders: async input => {
+    const rows = await db
+      .prepare(
+        `SELECT *
+         FROM autopilot_work_orders
+         WHERE scheduled_launch_json IS NOT NULL
+           AND archived_at IS NULL
+           AND state IN (
+             'scheduled',
+             'accepted_free_slice',
+             'paid_ready',
+             'access_required',
+             'payment_required'
+           )
+         ORDER BY created_at ASC
+         LIMIT ?`,
+      )
+      .bind(input.limit)
+      .all<Record<string, unknown>>()
+
+    return (rows.results ?? [])
+      .map(recordFromRow)
+      .filter(record => scheduledLaunchHoldsDispatch(record.scheduledLaunch))
+  },
+  recordScheduledLaunchTransition: async input => {
+    await db
+      .prepare(
+        `UPDATE autopilot_work_orders
+         SET scheduled_launch_json = ?,
+             state = ?,
+             updated_at = ?
+         WHERE work_order_ref = ?
+           AND owner_user_id = ?
+           AND archived_at IS NULL
+           AND scheduled_launch_json IS NOT NULL`,
+      )
+      .bind(
+        JSON.stringify(input.scheduledLaunch),
+        input.state,
+        input.updatedAt,
+        input.workOrderRef,
+        input.ownerUserId,
+      )
+      .run()
+
+    const row = await db
+      .prepare(
+        `SELECT *
+         FROM autopilot_work_orders
+         WHERE work_order_ref = ?
+           AND owner_user_id = ?
+           AND archived_at IS NULL
+         LIMIT 1`,
+      )
+      .bind(input.workOrderRef, input.ownerUserId)
       .first<Record<string, unknown>>()
 
     return row === null ? undefined : recordFromRow(row)

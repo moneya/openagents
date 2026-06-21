@@ -4,6 +4,7 @@ import {
   OmniDataClassification,
   OmniTrustTier,
 } from '../omni-data-classification'
+import { PublicProjectionStalenessContract } from '../public-projection-staleness'
 
 export const ForumUuid = S.String.pipe(S.brand('ForumUuid'))
 export type ForumUuid = typeof ForumUuid.Type
@@ -121,6 +122,7 @@ export const ForumPaidActionKind = S.Literals([
   'topic_fund',
   'post_down_signal',
   'report_fee',
+  'orange_check',
 ])
 export type ForumPaidActionKind = typeof ForumPaidActionKind.Type
 
@@ -165,13 +167,35 @@ export const ForumAgentOwnerHandoff = S.Struct({
   agentTokenStatus: S.Literals(['created']),
   claimEndpoint: S.String,
   claimPageTemplate: S.String,
-  humanLoginStatus: S.Literals(['owner_claim_required']),
+  claimReceiptRefs: S.Array(ForumReceiptRef),
+  claimRef: S.NullOr(S.String),
+  humanLoginStatus: S.Literals([
+    'owner_claim_approved',
+    'owner_claim_required',
+  ]),
   instruction: S.String,
   ownerLoginTemplate: S.String,
+  ownerUserRef: S.NullOr(S.String),
 })
 export type ForumAgentOwnerHandoff = typeof ForumAgentOwnerHandoff.Type
 
+export const ForumAgentProfileActivityItem = S.Struct({
+  activityId: S.String,
+  createdAt: S.String,
+  href: S.String,
+  kind: S.Literals(['topic', 'post']),
+  postId: S.NullOr(ForumUuid),
+  receiptRefs: S.Array(ForumReceiptRef),
+  state: S.String,
+  title: S.String,
+  topicId: ForumUuid,
+  updatedAt: S.String,
+})
+export type ForumAgentProfileActivityItem =
+  typeof ForumAgentProfileActivityItem.Type
+
 export const ForumAgentPublicProfile = S.Struct({
+  activity: S.Array(ForumAgentProfileActivityItem),
   actor: ForumActorSummary,
   avatarUrl: S.NullOr(S.String),
   createdAt: S.String,
@@ -189,7 +213,16 @@ export const ForumAgentPublicProfile = S.Struct({
     watchCount: S.Number,
   }),
   updatedAt: S.String,
-  verificationState: S.Literals(['registered_agent', 'forum_snapshot']),
+  // 'x_verified_agent' composes the verified X-proof challenge live so
+  // the public trust surface reflects the verification write (epic
+  // #4751 instance 2, documented on #4744): approved owner claim plus
+  // verified X challenge outranks 'owner_claimed_agent'.
+  verificationState: S.Literals([
+    'forum_snapshot',
+    'owner_claimed_agent',
+    'registered_agent',
+    'x_verified_agent',
+  ]),
 })
 export type ForumAgentPublicProfile = typeof ForumAgentPublicProfile.Type
 
@@ -216,11 +249,31 @@ export const ForumTipRecipientReadinessState = S.Literals([
 export type ForumTipRecipientReadinessState =
   typeof ForumTipRecipientReadinessState.Type
 
-export const ForumTipRecipientDirectPaymentInstruction = S.Struct({
+// Native Spark address (`spark1…` bech32m). A Spark sender transfers sats
+// straight to it (Spark→Spark, 0-fee, registration-free, offline-receive).
+// This is the preferred agent-to-agent tip rail; the Lightning rails below are
+// for external Lightning senders only.
+const ForumTipRecipientSparkAddressPaymentInstruction = S.Struct({
+  sparkAddress: S.String,
+  kind: S.Literal('spark_address'),
+  settlementAuthority: S.Literal('recipient_wallet_direct'),
+})
+const ForumTipRecipientBolt12PaymentInstruction = S.Struct({
   bolt12Offer: S.String,
+  lightningAddress: S.optionalKey(S.String),
   kind: S.Literal('bolt12_offer'),
   settlementAuthority: S.Literal('recipient_wallet_direct'),
 })
+const ForumTipRecipientLightningAddressPaymentInstruction = S.Struct({
+  lightningAddress: S.String,
+  kind: S.Literal('lightning_address'),
+  settlementAuthority: S.Literal('recipient_wallet_direct'),
+})
+export const ForumTipRecipientDirectPaymentInstruction = S.Union([
+  ForumTipRecipientSparkAddressPaymentInstruction,
+  ForumTipRecipientBolt12PaymentInstruction,
+  ForumTipRecipientLightningAddressPaymentInstruction,
+])
 export type ForumTipRecipientDirectPaymentInstruction =
   typeof ForumTipRecipientDirectPaymentInstruction.Type
 
@@ -524,7 +577,12 @@ export const ForumPostSummary = S.Struct({
   subject: S.optionalKey(S.NullOr(S.String)),
   tipStats: S.optionalKey(
     S.Struct({
+      // Post tip stats compose live at read (epic #4751, #4753
+      // remainder): the block declares its staleness contract instead
+      // of implying freshness.
+      staleness: PublicProjectionStalenessContract,
       tipCount: S.Number,
+      totalCreditedSats: S.optionalKey(S.Number),
       totalPaidSats: S.Number,
       totalSettledSats: S.Number,
     }),
@@ -729,6 +787,7 @@ export const ForumTipSettlementAuthority = S.Literals([
   'content_reward_evidence_only',
   'buyer_payment_evidence_only',
   'recipient_wallet_direct',
+  'openagents_ledger_credited',
   'openagents_treasury_mediated',
   'operator_reversal',
 ])
@@ -791,6 +850,8 @@ export const ForumTipSettlementState = S.Literals([
   'payment_required',
   'evidence_only',
   'paid',
+  'credited',
+  'swept',
   'recipient_pending',
   'dispatched',
   'settled',
@@ -972,15 +1033,19 @@ export const ForumCreatorEarning = S.Struct({
 export type ForumCreatorEarning = typeof ForumCreatorEarning.Type
 
 export const ForumCreatorEarningsSummary = S.Struct({
+  creditedCount: S.Number,
   failedCount: S.Number,
   paidCount: S.Number,
   pendingCount: S.Number,
   refundedCount: S.Number,
   reversedCount: S.Number,
   settledCount: S.Number,
+  sweptCount: S.Number,
   totalCount: S.Number,
+  totalCreditedSats: S.Number,
   totalPaidSats: S.Number,
   totalSettledSats: S.Number,
+  totalSweptSats: S.Number,
 })
 export type ForumCreatorEarningsSummary =
   typeof ForumCreatorEarningsSummary.Type
@@ -990,6 +1055,7 @@ export const ForumCreatorEarningsResponse = S.Struct({
   earnings: S.Array(ForumCreatorEarning),
   generatedAt: S.String,
   pagination: ForumPagination,
+  staleness: PublicProjectionStalenessContract,
   summary: ForumCreatorEarningsSummary,
 })
 export type ForumCreatorEarningsResponse =
@@ -999,6 +1065,7 @@ export const ForumTipLeaderboardPost = S.Struct({
   author: ForumActorSummary,
   postId: ForumUuid,
   postPermalink: S.String,
+  postTitle: S.NullOr(S.String),
   tipCount: S.Number,
   topicId: ForumUuid,
   totalPaidSats: S.Number,
@@ -1009,15 +1076,21 @@ export type ForumTipLeaderboardPost = typeof ForumTipLeaderboardPost.Type
 export const ForumTipLeaderboardCreator = S.Struct({
   actor: ForumActorSummary,
   tipCount: S.Number,
+  /** Ladder-credited sats not yet covered by a settled sweep (#4751). */
+  totalCreditedSats: S.Number,
   totalPaidSats: S.Number,
   totalSettledSats: S.Number,
+  /** Ladder-credited sats covered by settled sweeps, oldest first (#4753). */
+  totalSweptSats: S.Number,
 })
 export type ForumTipLeaderboardCreator = typeof ForumTipLeaderboardCreator.Type
 
 export const ForumTipLeaderboardsResponse = S.Struct({
+  caveatRefs: S.Array(S.String),
   creators: S.Array(ForumTipLeaderboardCreator),
   generatedAt: S.String,
   posts: S.Array(ForumTipLeaderboardPost),
+  staleness: PublicProjectionStalenessContract,
 })
 export type ForumTipLeaderboardsResponse =
   typeof ForumTipLeaderboardsResponse.Type
@@ -1031,6 +1104,7 @@ export const ForumTipReconciliationResponse = S.Struct({
   generatedAt: S.String,
   operatorCaveatRefs: S.Array(S.String),
   pagination: ForumPagination,
+  staleness: PublicProjectionStalenessContract,
   summary: ForumCreatorEarningsSummary,
 })
 export type ForumTipReconciliationResponse =

@@ -8,7 +8,7 @@ const registration = (
 ): PylonApiRegistrationRecord => ({
   capabilityRefs: [
     'capability.pylon.assignment_ready',
-    'capability.pylon.local_codex',
+    'capability.pylon.local_claude_agent',
   ],
   clientProtocolVersion: '0.2.5',
   clientVersion: '0.2.5',
@@ -24,6 +24,10 @@ const registration = (
   ownerAgentCredentialId: 'agent_credential_autopilot_work_test',
   ownerAgentTokenPrefix: 'oa_agent',
   ownerAgentUserId: 'agent_user_autopilot_work',
+  providerMarketRelayRefs: [],
+  providerNip90LaneRefs: [],
+  providerNostrNpub: null,
+  providerNostrPubkey: null,
   publicProjectionJson: '{}',
   pylonRef: 'pylon.local.docs_agent',
   resourceMode: 'balanced',
@@ -61,6 +65,8 @@ describe('Autopilot work placement selector', () => {
       reasonRefs: [
         'placement.selected.requester_pylon',
         'placement.pylon.preferred_before_fallback',
+        'pricing.autopilot_work.own_pylon_free',
+        'placement.reason.placed_on_your_pylon_free',
       ],
       selectedPylonRef: 'pylon.local.docs_agent',
       selectedRunnerKind: 'requester_pylon',
@@ -104,6 +110,8 @@ describe('Autopilot work placement selector', () => {
       reasonRefs: [
         'placement.selected.fallback',
         'placement.fallback.openagents_shc',
+        'pricing.autopilot_work.hosted_runner_metered',
+        'placement.reason.your_pylon_unavailable_hosted_metered',
       ],
       selectedPylonRef: null,
       selectedRunnerKind: 'openagents_shc',

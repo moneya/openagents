@@ -6,22 +6,35 @@ import {
   jsonResponse,
   makeD1SyncOutboxRepository,
   notFound,
-} from '@openagents/sync-worker'
+} from '@openagentsinc/sync-worker'
 import { issuer } from '@openauthjs/openauth'
 import { type Tokens, createClient } from '@openauthjs/openauth/client'
+import {
+  CodeProvider,
+  type CodeProviderError,
+} from '@openauthjs/openauth/provider/code'
 import { GithubProvider } from '@openauthjs/openauth/provider/github'
 import { createSubjects } from '@openauthjs/openauth/subject'
+import { CodeUI } from '@openauthjs/openauth/ui/code'
 import { THEME_OPENAUTH } from '@openauthjs/openauth/ui/theme'
-import { Cause, Effect, Layer, Option, Schema as S } from 'effect'
+import { Cause, Effect, Layer, Option, Redacted, Schema as S } from 'effect'
 import { Exit } from 'effect'
 import { WorkerEnvironment } from 'effect-cf'
 
+import { handleAcceptedOutcomesPerKwhApi } from './accepted-outcomes-per-kwh-routes'
 import { AdjutantEnrichmentQueueMessage } from './adjutant-enrichment-jobs'
 import type { AdjutantTaskPacketRefValidationInput } from './adjutant-task-packets'
 import { recordAdjutantUsageReceipt } from './adjutant-usage-receipts'
 import { makeAdminOverviewHandlers } from './admin-overview-routes'
+import {
+  handleAgentBalanceApi,
+  handleAgentBalancePreferencesApi,
+} from './agent-balance-routes'
 import { makeAgentGoalRoutes } from './agent-goal-routes'
-import { handleProgrammaticAgentHome } from './agent-home-routes'
+import {
+  handleProgrammaticAgentHome,
+  handleProgrammaticAgentSelfUpdate,
+} from './agent-home-routes'
 import {
   makeAgentOwnerClaimRoutes,
   makeD1AgentOwnerClaimStore,
@@ -47,9 +60,54 @@ import {
 } from './agent-scoped-grant-routes'
 import { makeAgentSearchRoutes } from './agent-search-routes'
 import { makeAgentSiteRoutes } from './agent-site-routes'
+import {
+  CodingQuickWinPipelineEndpoint,
+  handleCodingQuickWinPipelineApi,
+} from './coding-quick-win-pipeline-routes'
+import {
+  AgenticLaborProductEndpoint,
+  handleAgenticLaborProductApi,
+  isAgenticLaborProductsEnabled,
+} from './agentic-labor-product-routes'
+import { makeD1ArtanisAdminCloseoutReceiptStore } from './artanis-admin-closeout-receipts'
+import {
+  runArtanisAdminTickScheduled,
+  runArtanisCloseoutVerifierScheduled,
+} from './artanis-administrator-tick'
+import {
+  boundedDistillationDatasetLimit,
+  readArtanisDistillationDatasetReceipt,
+} from './artanis-distillation-dataset-receipt'
+import { deliverArtanisForumPublicationIntent } from './artanis-forum-delivery'
+import { ArtanisForumPublicationIntentRecord } from './artanis-forum-publication'
+import { exampleArtanisForumPublicationQueue } from './artanis-forum-publication'
+import {
+  ARTANIS_REGISTERED_ACTOR_REF,
+  runArtanisResponderScanScheduled,
+} from './artanis-forum-responder'
+import { handlePublicArtanisLaborReceiptsApi } from './artanis-labor-receipt-routes'
+import { makeD1ArtanisLaborUnattendedReceiptStore } from './artanis-labor-receipt-store'
+import { ArtanisMindSmokeSystem, artanisMindComplete } from './artanis-mind'
 import { makeOperatorArtanisConsoleRoutes } from './artanis-operator-console-routes'
+import { saveArtanisForumPublicationIntent } from './artanis-persistence'
 import { handlePublicArtanisReportApi } from './artanis-public-report-routes'
+import { handlePublicLaborEarningsApi } from './labor-earnings-routes'
+import { handleSelfServeLaborPayoutApi } from './labor-self-serve-earning-payout-routes'
+import { runArtanisComposerScheduled } from './artanis-reply-composer'
+import {
+  boundedResponderSupportLimit,
+  readArtanisResponderSupport,
+} from './artanis-responder-provenance'
 import { runArtanisScheduledTickForWorker } from './artanis-scheduled-runner'
+import { runArtanisSpendDecision } from './artanis-spend'
+import {
+  boundedTickMonitorLimit,
+  readArtanisTickMonitor,
+} from './artanis-tick-monitor'
+import {
+  boundedTickStreakLimit,
+  readArtanisTickStreak,
+} from './artanis-tick-streak'
 import {
   ACCESS_COOKIE,
   AUTH_STATE_COOKIE,
@@ -62,27 +120,55 @@ import {
   parseCookies,
   serializeCookie,
 } from './auth-cookies'
+import {
+  AUTH_EMAIL_OTP_CODE_TTL_SECONDS,
+  type AuthEmailOtpRateLimitRejected,
+  authEmailOtpClaimsAreFresh,
+  authEmailOtpClientIp,
+  authEmailOtpSendForm,
+  normalizeAuthEmailOtpEmail,
+  reserveAuthEmailOtpSend,
+  stampAuthEmailOtpClaims,
+} from './auth/email-otp-hardening'
 import { makeD1Storage } from './auth/openauth-storage'
 import {
   type VerifiedSession as VerifiedAuthSession,
   makeBrowserSessionBoundary,
 } from './auth/session'
 import {
-  type BillingSummary,
-  markOutOfCreditsNotificationFailed,
-  markOutOfCreditsNotificationSent,
-  readBillingSummary,
-  recordContainerUsageDebitForRun,
-  reserveOutOfCreditsNotification,
-  suspendBillingAccountIfOutOfCredits,
-} from './billing'
-import { makeBillingApiHandlers } from './billing-routes'
+  AutopilotComposedRunEndpoint,
+  handleAutopilotComposedRunApi,
+  isAutopilotComposedRunEnabled,
+} from './autopilot-composed-run-routes'
 import {
+  listAutopilotContinuationRunCandidates,
+  makeD1AutopilotContinuationStore,
+  runAutopilotContinuationSweep,
+} from './autopilot-continuation-policy'
+import { makeAutopilotContinuationPolicyRoutes } from './autopilot-continuation-policy-routes'
+import { makeAutopilotDecisionRoutes } from './autopilot-decision-routes'
+import { makeHostedGeminiExecuteReadyWork } from './autopilot-hosted-gemini-executor-env'
+import { makeAutopilotMorningReportRoutes } from './autopilot-morning-report-routes'
+import {
+  type AutopilotWorkOrderRecord,
+  dispatchDueScheduledAutopilotWork,
   makeAutopilotWorkRoutes,
   makeD1AutopilotWorkStore,
   recordAutopilotWorkerCloseoutFromPylon,
   verifyAutopilotL402PaymentProofFromBuyerLedger,
 } from './autopilot-work-routes'
+import {
+  type BillingSummary,
+  markOutOfCreditsNotificationFailed,
+  markOutOfCreditsNotificationSent,
+  readBillingSummary,
+  recordContainerUsageDebitForRun,
+  requireMinimumRunCredits,
+  reserveOutOfCreditsNotification,
+  suspendBillingAccountIfOutOfCredits,
+  withBillingCreditPackages,
+} from './billing'
+import { makeBillingApiHandlers } from './billing-routes'
 import { OpenAgentsDatabase, ThreadFileArtifacts } from './bindings'
 import { makeBlueprintProbeContributionRoutes } from './blueprint-probe-contribution-routes'
 import { makeBlueprintRoutes } from './blueprint-routes'
@@ -98,24 +184,70 @@ import {
   listBlueprintProgramRuns,
   recordBlueprintProgramRun,
 } from './blueprint/repositories/program-runs'
+import { handleBusinessSignupApi } from './business-signup-routes'
+import { makeD1BuyModeDispatcherStore } from './buy-mode-dispatcher'
 import { makeD1BuyerPaymentLedgerStore } from './buyer-payment-ledger'
+import { makeCheckoutPageRoutes } from './checkout-page-routes'
+// Cloud coding-session surface (autopilot.cloud_coding_sessions.v1, red) — the
+// "our cloud" autonomous-execution lane. INERT behind CLOUD_CODING_SESSIONS_ENABLED
+// (default off). Ships wired to the stub/accepting runtime adapter + no-op
+// metering stub; the managed GCE control-plane adapter + live receipt-first
+// metering plug into its seams. The promise STAYS red — no real VM, no real
+// repo-edit, no paid receipt; no green flip lands here.
+import {
+  isCloudCodingSessionsEnabled,
+  routeCloudCodingSessionRequest as routeCloudCodingSessionRequestImpl,
+} from './cloud/cloud-coding-session-routes'
+// Cloud primitive SCAFFOLDS (EPIC #5510). Both flag-gated INERT by default; the
+// promises `cloud.fine_tuning_service.v1` / `cloud.sandbox_compute_service.v1`
+// STAY red until a dereferenceable paid receipt lands. No green flip here.
+import {
+  handleFineTuningJobSubmit,
+  isFineTuningServiceEnabled,
+} from './cloud/fine-tuning-service-routes'
+import {
+  handleSandboxRequest,
+  isSandboxComputeServiceEnabled,
+} from './cloud/sandbox-compute-service-routes'
 import {
   type OpenAgentsWorkerConfigEnv,
   getOpenAgentsWorkerConfig,
   redactedValue,
 } from './config'
+import { CustomerOneCohortEndpoint } from './customer-one-cohort-projection'
 import {
+  handleOperatorCustomerOneCohortRowsApi,
+  handlePublicCustomerOneCohortApi,
+} from './customer-one-cohort-routes'
+import { makeD1CustomerOneCohortRowStore } from './customer-one-cohort-store'
+import { handleDemandProvenanceApi } from './demand-provenance-routes'
+import { makeEcommerceCampaignReceiptRoutes } from './ecommerce-campaign-receipt-routes'
+import { makeEcommerceCampaignReceiptOperatorRoutes } from './ecommerce-campaign-receipt-operator-routes'
+import { makeEcommerceCampaignSelfServeRoutes } from './ecommerce-campaign-self-serve-routes'
+import { makeD1EcommerceCampaignReceiptStore } from './ecommerce-campaign-receipt-store'
+import { firstPaidEcommerceCampaignDeliveryReceiptFixture } from './ecommerce-campaign-delivery-receipt-fixture'
+import { makeInMemoryEcommerceCampaignPaidDeliveryClaimStore } from './ecommerce-campaign-claim-upgrade'
+import {
+  AutopilotDecisionEmailInput,
   OrderSitesTransactionalEmailInput,
   buildOrderSitesTransactionalEmailIdempotencyKey,
+  sendAutopilotDecisionEmailWithLedger,
   sendOrderSitesTransactionalEmailWithLedger,
   sendOutOfCreditsEmailWithLedger,
+  sendPrivateWorkspaceInviteEmailWithLedger,
 } from './email'
 import {
   type EmailCampaignDispatcherResult,
   dispatchDueEmailCampaignSends,
 } from './email-campaign-dispatcher'
 import type { OnboardingDripOrderState } from './email-onboarding-drip'
+import { makeEmailSequenceAuthoringRoutes } from './email-sequence-authoring-routes'
+import { makeFirmupBitcoinSettlementRoutes } from './firmup-bitcoin-settlement-routes'
+import { readFirmupSettleableEscrow } from './firmup-settleable-escrow'
 import { makeForumRoutes } from './forum-routes'
+import { forumWorkRequestRelayPublisherForEnv } from './forum-work-request-live-publisher'
+import { archiveStaleDirectTipRecoveries } from './forum/paid-actions'
+import { readForumTipRecipientReadinessForActor } from './forum/repository'
 import {
   GITHUB_WRITE_REQUIRED_SCOPES,
   GitHubWriteApiFailure,
@@ -143,6 +275,17 @@ import {
   makeMissingOpenAgentsHostedMdkClient,
   makeOpenAgentsHostedMdkRouteClient,
 } from './hosted-mdk-client'
+import type { ContainerPathFetch } from './http/container-fetch'
+import { handleForumThreadDocument } from './http/forum-social-preview'
+import {
+  type DurableMdkPaymentOutcome,
+  durableMdkPaymentOutcomeResponse,
+  journalMdkResponseOutcome,
+  mdkPaymentIdFromStatusPath,
+  mdkPaymentOutcomeStorageKey,
+  mdkTerminalOutcomeFromPayload,
+} from './http/mdk-payment-outcome-journal'
+import { fetchAppShellWithPylonStatsBootPayload } from './http/pylon-stats-boot-payload'
 import {
   forbidden,
   methodNotAllowed,
@@ -153,8 +296,52 @@ import {
 } from './http/responses'
 import { routeAccessResponse } from './http/route-access-response'
 import { routeEffect, routeEffectOrResponse } from './http/route-effects'
-import type { ExactRoute } from './http/router'
+import { makeD1HygieneDebtReceiptStore } from './hygiene-debt-receipt-store'
+import { makeHygieneLaneSettlementRoutes } from './hygiene-lane-settlement-routes'
 import { makeImageGenerationRoutes } from './image-generation-routes'
+import { makeD1InferenceReceiptStore } from './inference-receipts'
+import { makeD1CardCreditSpendReceiptStore } from './inference/card-credit-spend-receipt-store'
+import { handleBatchJobsSubmit, handleBatchJobReceiptRead, handleBatchJobStatusRead } from './inference/batch-job-routes'
+import {
+  handleChatCompletions,
+  isInferenceGatewayEnabled,
+} from './inference/chat-completions-routes'
+import { fireworksAdapter } from './inference/fireworks-adapter'
+import { handleGatewayReadiness } from './inference/gateway-readiness-routes'
+import {
+  checkFreeAllowancePreflight,
+  withFreeAllowance,
+} from './inference/inference-free-allowance'
+import { makeVerifiedOwnerIdentityResolver } from './inference/inference-owner-identity'
+import { makePremiumAccessGate } from './inference/inference-premium-allowlist'
+import { withReferralAccrual } from './inference/inference-referral-accrual'
+import { makeInferenceReferralRoutes } from './inference/inference-referral-routes'
+import { makeLedgerMeteringHook } from './inference/metering-hook'
+import { selectAdapterPlan } from './inference/model-router'
+import { resolveSupplyLaneArming } from './inference/model-serving-policy'
+import {
+  handleModelsList,
+  routeModelRetrieveRequest,
+} from './inference/models-routes'
+import {
+  type PassthroughAdapterConfig,
+  makePassthroughAdapter,
+} from './inference/passthrough-adapter'
+import {
+  InferenceAdapterError,
+  InferenceProviderRegistry,
+} from './inference/provider-adapter'
+import { handleQuote } from './inference/quote-routes'
+import { stubEchoAdapter } from './inference/stub-echo-adapter'
+import {
+  VERTEX_ANTHROPIC_ADAPTER_ID,
+  makeVertexAnthropicAdapter,
+} from './inference/vertex-anthropic-adapter'
+import {
+  VERTEX_GEMINI_ADAPTER_ID,
+  makeVertexGeminiAdapter,
+} from './inference/vertex-gemini-adapter'
+import { tokenProviderFromSecret } from './inference/vertex-token'
 import {
   decodeUnknownWithSchema,
   isRecord,
@@ -167,9 +354,35 @@ import {
   stringArrayFromUnknown,
 } from './json-boundary'
 import { makeOpenAgentsL402HmacSigningBoundary } from './l402-credential-service'
+import { makeMarketingAgencyReceiptPublicRoutes } from './marketing-agency-receipt-public-routes'
+import { makeInMemoryMarketingAgencyPaidDeliveryClaimStore } from './marketing-agency-claim-upgrade'
+import { makeMarketingAgencySelfServePublicRoutes } from './marketing-agency-self-serve-public-routes'
+import { makeInMemoryMarketingAgencySelfServeClaimStore } from './marketing-agency-self-serve-claim-upgrade'
+import {
+  MarketplaceComposeListEndpoint,
+  handleMarketplaceCompositionApi,
+  isMarketplaceComposeAndListEnabled,
+} from './marketplace-composition-routes'
+import {
+  MarketplaceWorkClassCatalogEndpoint,
+  handleMarketplaceWorkClassCatalogApi,
+} from './marketplace-work-class-catalog-routes'
+import {
+  mdkContainerEnvVars,
+  optionalMdkContainerSecret,
+} from './mdk-container-env'
+import { hostedMdkDirectPayoutDisabledGate } from './mdk-payout-mode-gate'
+import {
+  MobileWorkroomApprovalProjectionEndpoint,
+  handleMobileWorkroomApprovalProjectionApi,
+  isMobileWorkroomApprovalProjectionEnabled,
+} from './mobile-workroom-approval-projection-routes'
 import { makeMulletRoutes } from './mullet/routes'
+import { makeNativeListsService } from './native-lists'
+import { makeNativeListsRoutes } from './native-lists-routes'
 import { makeNexusPylonVisibilityRoutes } from './nexus-pylon-visibility-routes'
 import { makeD1NexusTreasuryPayoutLedgerStore } from './nexus-treasury-payout-ledger'
+import { makeD1Nip90MarketReceiptStore } from './nip90-market-receipts'
 import {
   logWorkerRouteError,
   logWorkerRouteWarning,
@@ -177,7 +390,17 @@ import {
   observedPromise,
 } from './observability'
 import { handleOmniApiSdkSeedApi } from './omni-api-sdk-seed-routes'
+import { makeOmniBundleRoutes } from './omni-bundle-routes'
+import {
+  OmniClientDeliveryProjectionEndpoint,
+  handleOmniClientDeliveryProjectionApi,
+  isOmniClientDeliveryProjectionEnabled,
+} from './omni-client-delivery-projection-routes'
+import { handleOmniContributorAccrualBundleApi } from './omni-contributor-accrual-bundle-routes'
+import { readOmniEvidenceBundleById } from './omni-evidence-bundles'
 import { makeOmniHandlers } from './omni-handlers'
+import { makeOmniHandoffRoutes } from './omni-handoff-routes'
+import { readOmniPublicProofBundleById } from './omni-public-proof-bundles'
 import { makeOmniRoutes } from './omni-routes'
 import {
   type AgentRunBundle,
@@ -188,9 +411,16 @@ import {
   listActiveAgentRunsForBilling,
   makeD1OmniRunStore,
 } from './omni-runs'
+import { makeOmniWorkroomLifecycleRoutes } from './omni-workroom-lifecycle-routes'
+import { makeOmniWorkroomRoutes } from './omni-workroom-routes'
 import { githubIdentityTokenKey } from './onboarding/github'
 import { readOnboardingStatusForUser } from './onboarding/repository'
 import { makeOnboardingRoutes } from './onboarding/routes'
+import {
+  handleLiquidityMarketSkeletonApi,
+  handleOpenMarketsSurfaceApi,
+  handleRiskMarketSkeletonApi,
+} from './open-markets-routes'
 import {
   handleOpenAgentsAgentOnboarding,
   handleOpenAgentsCompanionFile,
@@ -202,6 +432,7 @@ import {
   makeOperatorAdjutantRoutes,
 } from './operator-adjutant-routes'
 import { makeOperatorBillingHandlers } from './operator-billing-routes'
+import { makeOperatorBuyModeRoutes } from './operator-buy-mode-routes'
 import { makeOperatorEmailInspectionRoutes } from './operator-email-inspection-routes'
 import { makeOperatorOrderTriageRoutes } from './operator-order-triage-routes'
 import { makeOperatorProviderAccountRoutes } from './operator-provider-account-routes'
@@ -210,32 +441,92 @@ import { makeOperatorSitesRoutes } from './operator-sites-routes'
 import {
   type OperatorTargetUser,
   readOperatorTargetUser,
+  readSelectedInferenceCreditTargetUser as readSelectedInferenceCreditTargetUserBase,
 } from './operator-targets'
+import { makePartnerAgreementRoutes } from './partner-agreement-routes'
+import { PartnerPayoutDispatchError } from './partner-payout-dispatch'
+import { makePartnerPayoutLedgerRoutes } from './partner-payout-ledger-routes'
+import { handlePartnerPayoutsPublicApi } from './partner-payout-public-routes'
+import { makeD1PartnerPayoutReceiptStore } from './partner-payout-receipts'
+import { readAgentBalance } from './payments-ledger'
+import { makePrefilledWorkspaceService } from './prefilled-workspace'
+import { makePrefilledWorkspaceRoutes } from './prefilled-workspace-routes'
+import {
+  makeD1PrivateProjectWorkspaceStore,
+  makePrivateProjectWorkspaceRoutes,
+} from './private-project-workspace-routes'
 import { publicProductPromisesDocument } from './product-promises'
+import { handlePublicPromiseAuditApi } from './promise-transition-audit-routes'
 import {
   handleOperatorPromiseTransitionApi,
   handlePublicPromiseTransitionsApi,
   lastVerifiedAtByPromise,
   makeD1PromiseTransitionReceiptStore,
 } from './promise-transition-receipt-routes'
+import { probeProviderApiKey } from './provider-account-api-key'
 import { makeProviderAccountBrowserHandlers } from './provider-account-browser-routes'
+import { makeProviderAccountPoolRoutes } from './provider-account-pool-routes'
 import { makeProviderAccountRoutes } from './provider-account-routes'
 import { makeProviderAccountServiceHandlers } from './provider-account-service-routes'
+import { makeProviderAccountUsageRoutes } from './provider-account-usage-routes'
 import {
   type CodexOAuthAuth,
   type ProviderAccountBundle,
   listProviderAccountsForUser,
   makeD1ProviderAccountRepository,
 } from './provider-accounts'
+import {
+  handlePublicActivityTimelineApiForEnv,
+  handlePublicActivityTimelineStreamApiForEnv,
+} from './public-activity-timeline-routes'
+import { handlePublicForumActivityApiForEnv } from './public-forum-activity-routes'
 import { handlePublicAdjutantActivityApi } from './public-adjutant-activity-routes'
+import { makePublicCardCreditSpendReceiptRoutes } from './public-card-credit-spend-receipt-routes'
+import { makePublicInferenceReceiptRoutes } from './public-inference-receipt-routes'
 import { handlePublicLaunchDashboardApi } from './public-launch-dashboard-routes'
+import { makePublicNip90MarketReceiptRoutes } from './public-nip90-market-receipt-routes'
 import { handlePublicOtecProofApi } from './public-otec-proof-routes'
+import { makePublicPartnerPayoutReceiptRoutes } from './public-partner-payout-receipt-routes'
+import { handlePublicProofReplayBundleRequest } from './public-proof-replay-routes'
 import { handlePublicPylonStatsApi } from './public-pylon-stats-routes'
-import { handlePylonCapacityFunnelApi } from './pylon-capacity-funnel-live-routes'
-import { makeD1PylonApiStore } from './pylon-api'
+import { makePublicSiteReferralPayoutReceiptRoutes } from './public-site-referral-payout-receipt-routes'
+import { makePublicStripeCheckoutReceiptRoutes } from './public-stripe-checkout-receipt-routes'
+import { buildPublicTassadarRunSummaryEnvelopeForRequest } from './public-tassadar-run-summary-routes'
+import {
+  makeD1PylonApiStore,
+  makeD1PylonSparkPayoutTargetStore,
+  resolveSparkPayoutDestination,
+} from './pylon-api'
 import { makePylonApiRoutes } from './pylon-api-routes'
+import {
+  handlePylonCapacityFunnelApi,
+  handlePylonCapacityFunnelHistoryApi,
+  makeD1PylonCapacityFunnelSnapshotStore,
+  recordPylonCapacityFunnelSnapshots,
+} from './pylon-capacity-funnel-live-routes'
+import {
+  PylonLargestDecentralizedTrainingClaimEndpoint,
+  handlePylonLargestDecentralizedTrainingClaimStatusApi,
+} from './pylon-largest-decentralized-training-claim-status-routes'
 import { makeD1PylonMarketplaceJobStore } from './pylon-marketplace-service'
+import {
+  PylonMultiEarningNodeEndpoint,
+  handlePylonMultiEarningNodeApi,
+  isPylonMultiEarningProjectionEnabled,
+} from './pylon-multi-earning-node-routes'
+import {
+  type RelayHealthFetch,
+  canonicalMarketRelayUrl,
+  makeD1RelayHealthStore,
+  runRelayHealthProbeTick,
+} from './relay-health'
+import { handlePublicRelayHealthApi } from './relay-health-routes'
 import { handleResendWebhook } from './resend-webhooks'
+import { makeExactRouteRegistry } from './routing/exact-routes'
+import {
+  cleanProductRouteRedirectLocation,
+  githubWriteResultRedirectLocation,
+} from './routing/redirect-policy'
 import {
   OpenAgentsWorkerRequest,
   WorkerRequestLayer,
@@ -245,26 +536,50 @@ import {
 import {
   compactRandomId,
   currentDate,
+  currentEpochMillis,
   currentIsoTimestamp,
+  epochMillisToIsoTimestamp,
   isoTimestampAfter,
   randomUuid,
 } from './runtime-primitives'
+import {
+  SelfServeFanoutEndpoint,
+  handleSelfServeFanoutApi,
+  isSelfServeFanoutEnabled,
+} from './self-serve-fanout-routes'
 import { makeShareRoutes } from './share-routes'
 import { handleSignaturePackageValidationApi } from './signature-package-validation-routes'
+import {
+  SignatureUsageMeteringEndpoint,
+  handleSignatureUsageMeteringApi,
+  isSignatureUsageMeteringEnabled,
+} from './signature-usage-metering-routes'
 import { makeD1SiteCommerceReviewStore } from './site-commerce-review'
 import { makeSiteCommerceRoutes } from './site-commerce-routes'
+import { resolveSiteFormSpec } from './site-form-spec-registry'
 import { makeD1SiteMdkAccountBindingStore } from './site-mdk-account-bindings'
 import { makeD1SiteMdkCheckoutIntentStore } from './site-mdk-checkout-intents'
 import { omegaMdkDemoSitePaymentCatalog } from './site-mdk-demo-product'
+import {
+  isSiteFormCaptureEnabled,
+  makeSitePageFormCaptureRoutes,
+} from './site-page-form-capture-routes'
 import {
   type ReferralConsumptionResult,
   consumePendingReferralForUser,
 } from './site-referral-attribution-consumption'
 import { makeSiteReferralInspectionRoutes } from './site-referral-inspection-routes'
 import { sendSiteReferralOnboardingForConsumption } from './site-referral-onboarding'
+import { makeSiteReferralPayoutAdapter } from './site-referral-payout-adapter'
+import { makeSiteReferralPayoutLedgerRoutes } from './site-referral-payout-ledger-routes'
+import { handleSiteReferralPayoutsPublicApi } from './site-referral-payout-public-routes'
+import { makeD1SiteReferralPayoutReceiptStore } from './site-referral-payout-receipts'
 import { makeSiteReferralRoutes } from './site-referral-routes'
 import { PENDING_REFERRAL_COOKIE } from './site-referrals'
 import { makeSiteRuntimeRoutes } from './site-runtime-routes'
+import { makeSitesOrchestrationRoutes } from './sites-orchestration-routes'
+import { readBillingCreditPackages } from './stripe-billing'
+import { makeD1StripeCheckoutReceiptStore } from './stripe-checkout-receipts'
 import {
   type SyncNotificationContext,
   notifyAgentRunSyncScopes,
@@ -273,6 +588,31 @@ import {
   publishTeamThreadFileSync,
 } from './sync-notifier'
 import { type ParsedSyncPath, makeSyncRoutes } from './sync-routes'
+import { autoSettleVerifiedPair } from './tassadar-auto-settlement'
+import {
+  TASSADAR_COMPILED_MODULE_MARKETPLACE_ROUTE,
+  buildPublicTassadarCompiledModuleMarketplaceEnvelope,
+} from './tassadar-compiled-module-marketplace'
+import {
+  TassadarPerceptaArchitectureReceiptsEndpoint,
+  handleTassadarPerceptaArchitectureReceiptsApi,
+} from './tassadar-percepta-architecture-receipts-routes'
+import {
+  TassadarReplayRequest,
+  runTassadarReplayValidation,
+} from './tassadar-replay-validator'
+import {
+  readTassadarRealSettlementGate,
+  tassadarRealSettledSatsForDay,
+  tassadarRealSettlementUtcDayKey,
+} from './tassadar-run-settlement-gate'
+import {
+  buildSettledFeedEvents,
+  publishSettledFeedEvents,
+} from './tassadar-settled-feed-sync'
+import { makeD1TrainingTraceContributionStore } from './tassadar-trace-contribution-authority'
+import { makeTassadarTraceContributionRoutes } from './tassadar-trace-contribution-routes'
+import { runTassadarTracePairingScheduled } from './tassadar-trace-pairing'
 import {
   type TeamChatMessage,
   type TeamChatRunSummary,
@@ -293,6 +633,11 @@ import {
   readActiveTeamProject,
   readTeamsForUser,
 } from './team-repository'
+import { makeTeamWorkspaceInviteRoutes } from './team-workspace-invite-routes'
+import { makeD1TeamWorkspaceInviteStore } from './team-workspace-invites'
+import { makeTenantClientRoutes } from './tenant-client-routes'
+import { makeTenantHostnameSelfServeRoutes } from './tenant-custom-hostname-self-serve-routes'
+import { makeTenantCustomHostnames } from './tenant-custom-hostnames'
 import {
   type RouteAccessError,
   RouteAccessForbidden,
@@ -308,17 +653,105 @@ import {
   readThreadFileById,
 } from './thread-files'
 import {
+  type BufferPayFn,
+  checkTipsBufferBackingInvariant,
+  reconcileForwardingBufferPayments,
+  runTipsSweepScheduled,
+} from './tips-sweep'
+import {
   type AutopilotTokenLeaderboards,
   TokenUsageLeaderboards,
 } from './token-usage'
 import { makeTokenUsageLedgerRoutes } from './token-usage-ledger-routes'
+import {
+  TrainingAblationDeriskingLedgerEndpoint,
+  handleTrainingAblationDeriskingLedgerApi,
+} from './training-ablation-derisking-ledger-routes'
+import {
+  TrainingFullPipelineProgramEndpoint,
+  handleTrainingFullPipelineProgramApi,
+} from './training-full-pipeline-program-routes'
+import {
+  TrainingMarathonOperationsEndpoint,
+  handleTrainingMarathonOperationsApi,
+} from './training-marathon-operations-routes'
+import {
+  TrainingModelLadderRungsEndpoint,
+  handleTrainingModelLadderRungsApi,
+} from './training-model-ladder-rungs-routes'
+import {
+  TrainingPostTrainingDpoPreferenceWorkloadEndpoint,
+  handleTrainingPostTrainingDpoPreferenceWorkloadApi,
+} from './training-post-training-dpo-preference-workload-routes'
+import {
+  TrainingPostTrainingInstructSftEndpoint,
+  handleTrainingPostTrainingInstructSftApi,
+} from './training-post-training-instruct-sft-routes'
+import {
+  TrainingPostTrainingVibeTestRubricEndpoint,
+  handleTrainingPostTrainingVibeTestRubricApi,
+} from './training-post-training-vibe-test-rubric-routes'
+import {
+  TrainingPublicDistributedRunScaleEndpoint,
+  handleTrainingPublicDistributedRunScaleApi,
+} from './training-public-distributed-run-scale-routes'
+import {
+  TrainingPublicGradientWindowsEndpoint,
+  handleTrainingPublicGradientWindowsApi,
+} from './training-public-gradient-windows-routes'
+import {
+  buildTrainingWindowRecord,
+  makeD1TrainingAuthorityStore,
+  transitionTrainingWindowRecord,
+} from './training-run-window-authority'
+import {
+  dispatchRealRunSettlementCore,
+  makeTrainingRunWindowRoutes,
+} from './training-run-window-routes'
+import {
+  buildTrainingVerificationChallengeRecord,
+  finalizeTrainingVerificationChallengeRecord,
+  leaseTrainingVerificationChallengeRecord,
+  makeD1TrainingVerificationStore,
+  runTrainingVerificationClass,
+} from './training-verification'
+import { makeTrainingVerificationRoutes } from './training-verification-routes'
+import {
+  makeD1TreasuryTransactionStore,
+  makeTreasuryPageRoutes,
+} from './treasury-page-routes'
 import { makeTreasuryPaymentAuthority } from './treasury-payment-authority'
 import { makeHostedMdkPayoutAdapter } from './treasury-payment-hosted-mdk-payout-adapter'
+import { makeSparkTreasuryPayoutAdapter } from './treasury-payment-spark-payout-adapter'
+import {
+  TREASURY_SERVICE_TOKEN_HEADER,
+  handleOperatorSparkTreasuryFundingDestinationApi,
+  handleOperatorSparkTreasuryFundingInvoiceApi,
+  handleOperatorTreasuryFundingDestinationApi,
+  handleOperatorTreasuryPayoutApi,
+  handleOperatorTreasuryRecipientConfirmationApi,
+  handleOperatorTreasuryRecipientReportApi,
+  handleOperatorTreasuryStatusApi,
+  handleOperatorTreasuryTransactionReconcileApi,
+  handlePublicTreasuryLaunchStatusApi,
+  reconcilePendingTreasuryTransactions,
+} from './treasury-routes'
 import {
   type ViralAgentFunnelEventKind,
   recordViralAgentFunnelEvent,
 } from './viral-agent-funnel'
+import {
+  VoiceProgramIngestEndpoint,
+  handleVoiceProgramIngestApi,
+  isVoiceProgramIngestEnabled,
+} from './voice-program-ingest-routes'
 import { makeWorkerRouteRequest } from './worker-routes'
+import {
+  makeD1XClaimRewardTreasuryDispatchStore,
+  readXClaimRewardTreasuryDispatchConfig,
+  runXClaimRewardTreasuryDispatchScheduled,
+  xClaimRewardDispatchDayStartIso,
+} from './x-claim-reward-treasury-dispatcher'
 
 export type Env = WorkerBindings & OpenAgentsWorkerConfigEnv
 
@@ -338,13 +771,22 @@ export {
 
 export const OPENAGENTS_ADMIN_EMAILS = ['chris@openagents.com'] as const
 const OPENAGENTS_CORE_TEAM_ID = 'team_openagents_core'
-const MDK_SIDECAR_INSTANCE_NAME = 'openagents-mdk-sidecar-20260607-4'
+const MDK_SIDECAR_INSTANCE_NAME = 'openagents-mdk-sidecar-20260611-5'
+const MDK_TREASURY_INSTANCE_NAME = 'openagents-mdk-treasury-20260610-4'
 const SIMPLE_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const workerRuntime = {
   makeUuid: randomUuid,
   now: currentDate,
+  nowMs: currentEpochMillis,
   nowIso: currentIsoTimestamp,
 } as const
+const AUTH_EMAIL_OTP_SEND_UNAVAILABLE_MESSAGE =
+  "We couldn't send a sign-in code right now. Try again in a minute."
+const invalidAuthEmailOtpClaim = (email: string): CodeProviderError => ({
+  key: 'email',
+  type: 'invalid_claim',
+  value: email,
+})
 
 class MdkSidecarUnavailable extends S.TaggedErrorClass<MdkSidecarUnavailable>()(
   'MdkSidecarUnavailable',
@@ -359,31 +801,12 @@ class UnsupportedAuthProvider extends S.TaggedErrorClass<UnsupportedAuthProvider
   },
 ) {}
 
-const optionalMdkContainerSecret = (
-  value: string | undefined,
-): string | undefined => {
-  const trimmed = value?.trim()
-
-  return trimmed === undefined || trimmed === '' ? undefined : trimmed
-}
-
-const mdkContainerEnvVars = (
-  environment: OpenAgentsWorkerConfigEnv,
-): Record<string, string> => {
-  const accessToken = optionalMdkContainerSecret(environment.MDK_ACCESS_TOKEN)
-  const mnemonic = optionalMdkContainerSecret(environment.MDK_MNEMONIC)
-  const webhookSecret = optionalMdkContainerSecret(
-    environment.MDK_WEBHOOK_SECRET,
-  )
-
-  return {
-    ...(accessToken === undefined ? {} : { MDK_ACCESS_TOKEN: accessToken }),
-    ...(mnemonic === undefined ? {} : { MDK_MNEMONIC: mnemonic }),
-    ...(webhookSecret === undefined
-      ? {}
-      : { MDK_WEBHOOK_SECRET: webhookSecret }),
-  }
-}
+class AuthSignInError extends S.TaggedErrorClass<AuthSignInError>()(
+  'AuthSignInError',
+  {
+    reason: S.String,
+  },
+) {}
 
 export class MdkSidecarContainer extends Container<Env> {
   override defaultPort = 8080
@@ -395,6 +818,470 @@ export class MdkSidecarContainer extends Container<Env> {
     this.envVars = mdkContainerEnvVars(environment)
     this.labels = {
       service: 'openagents-mdk-sidecar',
+    }
+  }
+}
+
+class DurableMdkOutcomeContainer extends Container<Env> {
+  private async readPaymentOutcome(
+    paymentId: string,
+  ): Promise<DurableMdkPaymentOutcome | null> {
+    const value = await this.ctx.storage.get<DurableMdkPaymentOutcome>(
+      mdkPaymentOutcomeStorageKey(paymentId),
+    )
+
+    return value === undefined ? null : value
+  }
+
+  private async writePaymentOutcome(
+    paymentId: string,
+    outcome: DurableMdkPaymentOutcome,
+  ): Promise<void> {
+    await this.ctx.storage.put(mdkPaymentOutcomeStorageKey(paymentId), outcome)
+  }
+
+  override async fetch(request: Request) {
+    const url = new URL(request.url)
+
+    if (request.method === 'POST' && url.pathname === '/pay') {
+      const response = await this.containerFetch(request)
+      await journalMdkResponseOutcome(response, (paymentId, outcome) =>
+        this.writePaymentOutcome(paymentId, outcome),
+      )
+
+      return response
+    }
+
+    if (request.method === 'GET') {
+      const paymentId = mdkPaymentIdFromStatusPath(url.pathname)
+
+      if (paymentId !== null) {
+        try {
+          const response = await this.containerFetch(request)
+          const payload = await response
+            .clone()
+            .json()
+            .catch(() => null)
+          const outcome = mdkTerminalOutcomeFromPayload(
+            payload,
+            currentIsoTimestamp(),
+          )
+
+          if (outcome !== null) {
+            await this.writePaymentOutcome(paymentId, outcome)
+
+            return response
+          }
+
+          const stored = await this.readPaymentOutcome(paymentId)
+
+          return stored === null
+            ? response
+            : durableMdkPaymentOutcomeResponse(paymentId, stored)
+        } catch (error) {
+          const stored = await this.readPaymentOutcome(paymentId)
+
+          if (stored !== null) {
+            return durableMdkPaymentOutcomeResponse(paymentId, stored)
+          }
+
+          throw error
+        }
+      }
+    }
+
+    return this.containerFetch(request)
+  }
+}
+
+const mdkTreasuryContainerEnvVars = (
+  environment: OpenAgentsWorkerConfigEnv,
+): Record<string, string> => {
+  const accessToken = optionalMdkContainerSecret(
+    environment.MDK_TREASURY_ACCESS_TOKEN,
+  )
+  const mnemonic = optionalMdkContainerSecret(environment.MDK_TREASURY_MNEMONIC)
+  const serviceToken = optionalMdkContainerSecret(
+    environment.MDK_TREASURY_SERVICE_TOKEN,
+  )
+  const sparkApiKey = optionalMdkContainerSecret(
+    environment.SPARK_TREASURY_API_KEY ?? environment.OPENAGENTS_SPARK_API_KEY,
+  )
+  const sparkMnemonic = optionalMdkContainerSecret(
+    environment.SPARK_TREASURY_MNEMONIC ?? environment.MDK_TREASURY_MNEMONIC,
+  )
+  const sparkNetwork = optionalMdkContainerSecret(
+    environment.SPARK_TREASURY_NETWORK,
+  )
+  const sparkStorageDir = optionalMdkContainerSecret(
+    environment.SPARK_TREASURY_STORAGE_DIR,
+  )
+  const sparkTimeoutMs = optionalMdkContainerSecret(
+    environment.SPARK_TREASURY_TIMEOUT_MS,
+  )
+
+  return {
+    ...(accessToken === undefined
+      ? {}
+      : { MDK_TREASURY_ACCESS_TOKEN: accessToken }),
+    ...(mnemonic === undefined ? {} : { MDK_TREASURY_MNEMONIC: mnemonic }),
+    ...(serviceToken === undefined
+      ? {}
+      : { MDK_TREASURY_SERVICE_TOKEN: serviceToken }),
+    ...(sparkApiKey === undefined
+      ? {}
+      : { SPARK_TREASURY_API_KEY: sparkApiKey }),
+    ...(sparkMnemonic === undefined
+      ? {}
+      : { SPARK_TREASURY_MNEMONIC: sparkMnemonic }),
+    ...(sparkNetwork === undefined
+      ? {}
+      : { SPARK_TREASURY_NETWORK: sparkNetwork }),
+    ...(sparkStorageDir === undefined
+      ? {}
+      : { SPARK_TREASURY_STORAGE_DIR: sparkStorageDir }),
+    ...(sparkTimeoutMs === undefined
+      ? {}
+      : { SPARK_TREASURY_TIMEOUT_MS: sparkTimeoutMs }),
+  }
+}
+
+const MDK_TREASURY_CONTAINER_GENERATION_KEY =
+  'openagents.mdk_treasury.container_generation'
+const MDK_TREASURY_CONTAINER_GENERATION =
+  '2026-06-17.spark-treasury-funding-invoice'
+
+export class MdkTreasuryContainer extends DurableMdkOutcomeContainer {
+  override defaultPort = 8080
+  override sleepAfter = '30m'
+  override pingEndpoint = 'localhost:8080/healthz'
+
+  constructor(ctx: DurableObjectState<{}>, environment: Env) {
+    super(ctx, environment)
+    this.envVars = mdkTreasuryContainerEnvVars(environment)
+    this.labels = {
+      service: 'openagents-mdk-treasury',
+    }
+  }
+
+  private async ensureCurrentContainerGeneration(): Promise<void> {
+    const current = await this.ctx.storage.get<string>(
+      MDK_TREASURY_CONTAINER_GENERATION_KEY,
+    )
+
+    if (current === MDK_TREASURY_CONTAINER_GENERATION) {
+      return
+    }
+
+    const container = this.ctx.container
+    if (container?.running) {
+      await container.destroy('openagents-mdk-treasury-generation-bump')
+    }
+
+    await this.ctx.storage.put(
+      MDK_TREASURY_CONTAINER_GENERATION_KEY,
+      MDK_TREASURY_CONTAINER_GENERATION,
+    )
+  }
+
+  override async fetch(request: Request) {
+    await this.ensureCurrentContainerGeneration()
+
+    return super.fetch(request)
+  }
+}
+
+const fetchMdkTreasuryPath = (
+  environment: Env,
+): ContainerPathFetch | undefined => {
+  const namespace = environment.MDK_TREASURY as
+    | DurableObjectNamespace<MdkTreasuryContainer>
+    | undefined
+
+  if (namespace === undefined) {
+    return undefined
+  }
+
+  const serviceToken = optionalMdkContainerSecret(
+    environment.MDK_TREASURY_SERVICE_TOKEN,
+  )
+
+  return (path, init) =>
+    getContainer(namespace, MDK_TREASURY_INSTANCE_NAME).fetch(
+      new Request(`http://mdk-treasury${path}`, {
+        ...(init?.body === undefined ? {} : { body: init.body }),
+        headers: {
+          'content-type': 'application/json',
+          ...(serviceToken === undefined
+            ? {}
+            : { [TREASURY_SERVICE_TOKEN_HEADER]: serviceToken }),
+        },
+        method: init?.method ?? 'GET',
+        ...(init?.signal === undefined ? {} : { signal: init.signal }),
+      }),
+    )
+}
+
+const TIPS_BUFFER_SERVICE_TOKEN_HEADER = 'x-tips-buffer-service-token'
+const MDK_TIPS_BUFFER_INSTANCE_NAME = 'openagents-mdk-tips-buffer-20260610-1'
+
+const mdkTipsBufferContainerEnvVars = (
+  environment: OpenAgentsWorkerConfigEnv,
+): Record<string, string> => {
+  const accessToken = optionalMdkContainerSecret(
+    environment.MDK_TIPS_BUFFER_ACCESS_TOKEN,
+  )
+  const mnemonic = optionalMdkContainerSecret(
+    environment.MDK_TIPS_BUFFER_MNEMONIC,
+  )
+  const serviceToken = optionalMdkContainerSecret(
+    environment.MDK_TIPS_BUFFER_SERVICE_TOKEN,
+  )
+
+  return {
+    ...(accessToken === undefined
+      ? {}
+      : { MDK_TIPS_BUFFER_ACCESS_TOKEN: accessToken }),
+    ...(mnemonic === undefined ? {} : { MDK_TIPS_BUFFER_MNEMONIC: mnemonic }),
+    ...(serviceToken === undefined
+      ? {}
+      : { MDK_TIPS_BUFFER_SERVICE_TOKEN: serviceToken }),
+  }
+}
+
+export class MdkTipsBufferContainer extends DurableMdkOutcomeContainer {
+  override defaultPort = 8080
+  override sleepAfter = '30m'
+  override pingEndpoint = 'localhost:8080/healthz'
+
+  constructor(ctx: DurableObjectState<{}>, environment: Env) {
+    super(ctx, environment)
+    this.envVars = mdkTipsBufferContainerEnvVars(environment)
+    this.labels = {
+      service: 'openagents-mdk-tips-buffer',
+    }
+  }
+}
+
+const fetchMdkTipsBufferPath = (
+  environment: Env,
+): ContainerPathFetch | undefined => {
+  const namespace = (
+    environment as {
+      MDK_TIPS_BUFFER?: DurableObjectNamespace<MdkTipsBufferContainer>
+    }
+  ).MDK_TIPS_BUFFER
+
+  if (
+    namespace === undefined ||
+    optionalMdkContainerSecret(environment.MDK_TIPS_BUFFER_MNEMONIC) ===
+      undefined
+  ) {
+    return undefined
+  }
+
+  const serviceToken = optionalMdkContainerSecret(
+    environment.MDK_TIPS_BUFFER_SERVICE_TOKEN,
+  )
+
+  return (path, init) =>
+    getContainer(namespace, MDK_TIPS_BUFFER_INSTANCE_NAME).fetch(
+      new Request(`http://mdk-tips-buffer${path}`, {
+        ...(init?.body === undefined ? {} : { body: init.body }),
+        headers: {
+          'content-type': 'application/json',
+          ...(serviceToken === undefined
+            ? {}
+            : { [TIPS_BUFFER_SERVICE_TOKEN_HEADER]: serviceToken }),
+        },
+        method: init?.method ?? 'GET',
+        ...(init?.signal === undefined ? {} : { signal: init.signal }),
+      }),
+    )
+}
+
+const runArtanisForumRouteEffect = async (
+  effect: ReturnType<typeof forumRoutes.routeForumRequest> | undefined,
+) => (effect === undefined ? undefined : Effect.runPromise(effect))
+
+const artanisComposerForumPostForEnv =
+  (environment: Env) =>
+  async (input: {
+    topicId: string
+    bodyText: string
+    idempotencyKey: string
+  }): Promise<{ postId: string } | { error: string }> => {
+    const token = (environment as { ARTANIS_AGENT_TOKEN?: string })
+      .ARTANIS_AGENT_TOKEN
+    if (token === undefined || token === '') {
+      return { error: 'artanis_agent_token_missing' }
+    }
+    try {
+      const response = await runArtanisForumRouteEffect(
+        forumRoutes.routeForumRequest(
+          new Request(
+            `https://openagents.com/api/forum/topics/${input.topicId}/posts`,
+            {
+              body: JSON.stringify({ bodyText: input.bodyText }),
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'Idempotency-Key': input.idempotencyKey,
+              },
+              method: 'POST',
+            },
+          ),
+          openAgentsDatabase(environment),
+          {
+            agentStore: makeD1AgentRegistrationStore(
+              openAgentsDatabase(environment),
+            ),
+          },
+        ),
+      )
+      if (response === undefined) {
+        return { error: 'forum_route_unmatched' }
+      }
+      const payload = (await response.json()) as {
+        error?: string
+        post?: { postId?: string }
+      }
+      return payload.post?.postId === undefined
+        ? { error: String(payload.error ?? response.status) }
+        : { postId: payload.post.postId }
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error ? error.message.slice(0, 120) : 'post_failed',
+      }
+    }
+  }
+
+const artanisComposerTipForEnv =
+  (environment: Env) =>
+  async (input: {
+    postId: string
+    amountSat: number
+    idempotencyKey: string
+    publicReceiptRef: string
+  }): Promise<
+    | {
+        ladderReason: string
+        payInId: string
+        receiptRef: string
+        rung: string
+      }
+    | { error: string }
+  > => {
+    const token = (environment as { ARTANIS_AGENT_TOKEN?: string })
+      .ARTANIS_AGENT_TOKEN
+    if (token === undefined || token === '') {
+      return { error: 'artanis_agent_token_missing' }
+    }
+    try {
+      const response = await runArtanisForumRouteEffect(
+        forumRoutes.routeForumRequest(
+          new Request(
+            `https://openagents.com/api/forum/posts/${input.postId}/tips/ladder`,
+            {
+              body: JSON.stringify({
+                amountSat: input.amountSat,
+                publicReceiptRef: input.publicReceiptRef,
+              }),
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'Idempotency-Key': input.idempotencyKey,
+              },
+              method: 'POST',
+            },
+          ),
+          openAgentsDatabase(environment),
+          {
+            agentStore: makeD1AgentRegistrationStore(
+              openAgentsDatabase(environment),
+            ),
+            tipsBufferPay: tipsBufferPayFnForEnv(environment),
+          },
+        ),
+      )
+      if (response === undefined) {
+        return { error: 'forum_route_unmatched' }
+      }
+      const payload = (await response.json()) as {
+        error?: string
+        ladderReason?: string
+        payInId?: string
+        receiptRef?: string
+        rung?: string
+      }
+      return payload.rung === undefined ||
+        payload.receiptRef === undefined ||
+        payload.payInId === undefined ||
+        payload.ladderReason === undefined
+        ? { error: String(payload.error ?? response.status) }
+        : {
+            ladderReason: payload.ladderReason,
+            payInId: payload.payInId,
+            receiptRef: payload.receiptRef,
+            rung: payload.rung,
+          }
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error ? error.message.slice(0, 120) : 'tip_failed',
+      }
+    }
+  }
+
+const tipsBufferPayFnForEnv = (environment: Env): BufferPayFn | null => {
+  const fetchBuffer = fetchMdkTipsBufferPath(environment)
+
+  if (fetchBuffer === undefined) {
+    return null
+  }
+
+  return async ({ amountSat, destination }) => {
+    const attempt = async (destination: string) => {
+      const response = await fetchBuffer('/pay', {
+        body: JSON.stringify({ amountSat, destination }),
+        method: 'POST',
+      })
+      const result = (await response.json()) as {
+        error?: string
+        paymentId?: string
+        status?: string
+      }
+
+      if (response.ok && result.status === 'pending' && result.paymentId) {
+        return {
+          ok: false as const,
+          paymentId: String(result.paymentId),
+          pending: true as const,
+        }
+      }
+
+      if (!response.ok || result.status !== 'succeeded') {
+        return {
+          ok: false as const,
+          reason: String(result.error ?? result.status ?? response.status),
+        }
+      }
+
+      return {
+        ok: true as const,
+        paymentRef: `payment.tips_buffer.${String(result.paymentId ?? '').slice(0, 12)}`,
+      }
+    }
+
+    try {
+      return await attempt(destination)
+    } catch (error) {
+      return {
+        ok: false as const,
+        reason:
+          error instanceof Error ? error.message.slice(0, 80) : 'fetch_failed',
+      }
     }
   }
 }
@@ -442,9 +1329,10 @@ const EmailString = NonEmptyTrimmedString.check(
 
 const UserSubject = S.Struct({
   userId: NonEmptyTrimmedString,
-  provider: S.Literal('github'),
-  githubId: NonEmptyTrimmedString,
-  login: NonEmptyTrimmedString,
+  // 'github' carries githubId/login; 'email' (one-time code) has neither.
+  provider: S.Literals(['github', 'email']),
+  githubId: S.optionalKey(NonEmptyTrimmedString),
+  login: S.optionalKey(NonEmptyTrimmedString),
   email: EmailString,
   name: NonEmptyTrimmedString,
   avatarUrl: S.String,
@@ -485,6 +1373,8 @@ const GitHubOAuthToken = S.Struct({
 const GITHUB_LOGIN_SCOPES = ['read:user', 'user:email', 'repo'] as const
 const LOGIN_ORIGIN_COOKIE = 'oa_login_origin'
 const LOGIN_RETURN_TO_COOKIE = 'oa_login_return_to'
+const LOGIN_ERROR_COOKIE = 'oa_login_error'
+const LOGIN_ERROR_MAX_AGE_SECONDS = 60
 
 type GitHubUser = typeof GitHubUser.Type
 type GitHubEmail = typeof GitHubEmail.Type
@@ -861,6 +1751,13 @@ const upsertGitHubUser = async (
   db: D1Database,
   user: UserSubject,
 ): Promise<void> => {
+  if (user.githubId === undefined || user.login === undefined) {
+    throw new AuthSignInError({
+      reason: 'upsertGitHubUser requires a GitHub identity',
+    })
+  }
+  const githubId = user.githubId
+  const login = user.login
   const now = workerRuntime.nowIso()
 
   await db.batch([
@@ -891,15 +1788,257 @@ const upsertGitHubUser = async (
           deleted_at = NULL`,
       )
       .bind(
-        `auth_identity_github_${user.githubId}`,
+        `auth_identity_github_${githubId}`,
         user.userId,
-        user.githubId,
-        user.login,
+        githubId,
+        login,
         user.email,
         now,
         now,
       ),
   ])
+}
+
+const normalizeEmail = (email: string): string => email.trim().toLowerCase()
+
+// Build a session subject for an email (one-time-code) login. No GitHub identity;
+// the userId namespaces email accounts so they never collide with `github:` ids.
+const emailToSubject = (rawEmail: string): UserSubject => {
+  const email = normalizeEmail(rawEmail)
+  const localPart = email.split('@')[0] ?? email
+
+  return {
+    userId: `email:${email}`,
+    provider: 'email',
+    email,
+    name: localPart,
+    avatarUrl: '',
+  }
+}
+
+const upsertEmailUser = async (
+  db: D1Database,
+  user: UserSubject,
+): Promise<void> => {
+  const now = workerRuntime.nowIso()
+
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO users
+          (id, kind, display_name, primary_email, avatar_url, status, created_at, updated_at)
+         VALUES (?, 'human', ?, ?, ?, 'active', ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+          display_name = excluded.display_name,
+          primary_email = excluded.primary_email,
+          status = 'active',
+          updated_at = excluded.updated_at,
+          deleted_at = NULL`,
+      )
+      .bind(user.userId, user.name, user.email, user.avatarUrl, now, now),
+    db
+      .prepare(
+        `INSERT INTO auth_identities
+          (id, user_id, provider, provider_subject, provider_username, email, created_at, updated_at)
+         VALUES (?, ?, 'email', ?, ?, ?, ?, ?)
+         ON CONFLICT(provider, provider_subject) DO UPDATE SET
+          user_id = excluded.user_id,
+          email = excluded.email,
+          updated_at = excluded.updated_at,
+          deleted_at = NULL`,
+      )
+      .bind(
+        `auth_identity_email_${user.email}`,
+        user.userId,
+        user.email,
+        user.name,
+        user.email,
+        now,
+        now,
+      ),
+  ])
+}
+
+// Persist a session subject regardless of provider (session refresh paths can
+// carry either a GitHub or an email user).
+const upsertUser = async (db: D1Database, user: UserSubject): Promise<void> =>
+  user.provider === 'email'
+    ? upsertEmailUser(db, user)
+    : upsertGitHubUser(db, user)
+
+// Send the one-time sign-in code via Resend directly (auth email stays decoupled
+// from the CRM/marketing email-intent machinery). The auth OTP guard owns the
+// separate abuse/cost throttle for this path.
+const sendSignInCodeEmail = async (
+  env: Env,
+  rawEmail: string,
+  code: string,
+): Promise<void> => {
+  const config = getOpenAgentsWorkerConfig(env)
+  const resend = config.email.resend
+
+  if (resend === undefined) {
+    throw new AuthSignInError({
+      reason: 'Resend is not configured; cannot send sign-in code',
+    })
+  }
+
+  const email = normalizeEmail(rawEmail)
+  const apiKey = String(Redacted.value(resend.apiKey))
+  const from = String(resend.fromEmail)
+  const replyTo =
+    resend.replyToEmail === undefined ? undefined : String(resend.replyToEmail)
+
+  const response = await fetch('https://api.resend.com/emails', {
+    body: JSON.stringify({
+      from,
+      html: signInCodeEmailHtml(code),
+      ...(replyTo === undefined ? {} : { reply_to: replyTo }),
+      subject: 'Your OpenAgents sign-in code',
+      text: `Your OpenAgents sign-in code is ${code}.\n\nEnter it on the sign-in screen to continue. It expires in ${AUTH_EMAIL_OTP_CODE_TTL_SECONDS / 60} minutes. If you didn't request this, you can ignore this email.`,
+      to: email,
+    }),
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    throw new AuthSignInError({
+      reason: `Resend sign-in code send failed: ${response.status}`,
+    })
+  }
+}
+
+const signInCodeEmailHtml = (code: string): string =>
+  `<!doctype html><html><body style="margin:0;background:#000;color:#f1efe8;font-family:ui-sans-serif,system-ui,sans-serif;padding:40px 0">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+      <table role="presentation" width="420" cellpadding="0" cellspacing="0" style="max-width:420px;width:100%">
+        <tr><td style="font-size:18px;font-weight:600;padding-bottom:20px">OpenAgents</td></tr>
+        <tr><td style="font-size:15px;line-height:1.6;color:#c9c6bd;padding-bottom:24px">Use this one-time code to finish signing in:</td></tr>
+        <tr><td style="font-size:34px;font-weight:700;letter-spacing:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#d6f6ff;padding-bottom:24px">${code}</td></tr>
+        <tr><td style="font-size:13px;line-height:1.6;color:#8b8880">This code expires in ${AUTH_EMAIL_OTP_CODE_TTL_SECONDS / 60} minutes. If you didn't request it, you can safely ignore this email.</td></tr>
+      </table>
+    </td></tr></table>
+  </body></html>`
+
+const AUTH_EMAIL_OTP_HTML_ESCAPES: Readonly<Record<string, string>> = {
+  '&': '&amp;',
+  '"': '&quot;',
+  "'": '&#39;',
+  '<': '&lt;',
+  '>': '&gt;',
+}
+
+const authEmailOtpEscapeHtml = (value: string): string =>
+  value.replace(
+    /[&<>"']/g,
+    character => AUTH_EMAIL_OTP_HTML_ESCAPES[character] ?? '&#39;',
+  )
+
+const authEmailOtpPrefersJson = (request: Request): boolean => {
+  const accept = request.headers.get('accept') ?? ''
+
+  return accept.includes('application/json') && !accept.includes('text/html')
+}
+
+const authEmailOtpProblemResponse = (
+  request: Request,
+  input: Readonly<{
+    error: string
+    message: string
+    retryAfterSeconds?: number
+    status: number
+  }>,
+) => {
+  const headers = new Headers({
+    'cache-control': 'no-store',
+  })
+
+  if (input.retryAfterSeconds !== undefined) {
+    headers.set('retry-after', String(input.retryAfterSeconds))
+  }
+
+  if (authEmailOtpPrefersJson(request)) {
+    return noStoreJsonResponse(
+      {
+        error: input.error,
+        message: input.message,
+        retryAfterSeconds: input.retryAfterSeconds,
+      },
+      { headers, status: input.status },
+    )
+  }
+
+  return new Response(
+    `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenAgents sign-in</title></head><body style="margin:0;background:#050505;color:#f1efe8;font-family:ui-sans-serif,system-ui,sans-serif;display:grid;min-height:100vh;place-items:center"><main style="width:min(420px,calc(100vw - 48px));border:1px solid #2b2a26;padding:28px;background:#0b0b0a"><p style="margin:0 0 10px;color:#8b8880;font-size:12px;text-transform:uppercase;letter-spacing:.12em">OpenAgents</p><h1 style="margin:0 0 12px;font-size:22px">Sign-in code unavailable</h1><p style="margin:0 0 22px;color:#c9c6bd;line-height:1.55">${authEmailOtpEscapeHtml(input.message)}</p><a href="/login" style="color:#d6f6ff">Back to login</a></main></body></html>`,
+    {
+      headers: {
+        ...Object.fromEntries(headers),
+        'content-type': 'text/html; charset=utf-8',
+      },
+      status: input.status,
+    },
+  )
+}
+
+const authEmailOtpRateLimitResponse = (
+  request: Request,
+  decision: AuthEmailOtpRateLimitRejected,
+) =>
+  authEmailOtpProblemResponse(request, {
+    error: 'auth_email_otp_rate_limited',
+    message: `Too many sign-in code requests. Try again in ${decision.retryAfterSeconds} seconds.`,
+    retryAfterSeconds: decision.retryAfterSeconds,
+    status: 429,
+  })
+
+const maybeAuthEmailOtpGuardResponse = async (request: Request, env: Env) => {
+  const url = new URL(request.url)
+
+  if (request.method !== 'POST' || url.pathname !== '/code/authorize') {
+    return undefined
+  }
+
+  const formData = await request
+    .clone()
+    .formData()
+    .catch((): undefined => undefined)
+  const sendForm =
+    formData === undefined ? undefined : authEmailOtpSendForm(formData)
+
+  if (sendForm === undefined || !SIMPLE_EMAIL_PATTERN.test(sendForm.email)) {
+    return undefined
+  }
+
+  const decision = await reserveAuthEmailOtpSend(
+    openAgentsDatabase(env),
+    {
+      email: sendForm.email,
+      ipAddress: authEmailOtpClientIp(request),
+    },
+    workerRuntime,
+  ).catch(error => {
+    logWorkerRouteError('auth_email_otp_rate_limit_failed', error, {
+      errorName: errorName(error),
+    })
+
+    return undefined
+  })
+
+  if (decision === undefined) {
+    return authEmailOtpProblemResponse(request, {
+      error: 'auth_email_otp_temporarily_unavailable',
+      message: AUTH_EMAIL_OTP_SEND_UNAVAILABLE_MESSAGE,
+      status: 503,
+    })
+  }
+
+  return decision._tag === 'RateLimited'
+    ? authEmailOtpRateLimitResponse(request, decision)
+    : undefined
 }
 
 const readUserKindTotals = async (db: D1Database): Promise<UserKindTotals> => {
@@ -1689,8 +2828,28 @@ const hydrateTeamAutopilotContextFileExcerpts = async (
   return { ...bundle, selectedFiles }
 }
 
+export const authIssuerAllowsRedirectHostname = (hostname: string): boolean =>
+  hostname === 'openagents.com' ||
+  hostname === 'auth.openagents.com' ||
+  // Isolated staging Worker. WIDEN-ONLY: this lets the prod issuer accept the
+  // staging-origin auth callback so a human can sign in on staging and exercise
+  // the billing/credit flow. The staging Worker delegates auth to this same
+  // prod issuer (OPENAUTH_ISSUER_URL=auth.openagents.com), so the allowlist must
+  // live here. Prod hosts above are unchanged.
+  hostname === 'openagents-staging.openagents.workers.dev' ||
+  hostname === 'localhost' ||
+  hostname === '127.0.0.1'
+
 const makeAuthIssuer = (env: Env) => {
   const config = getOpenAgentsWorkerConfig(env)
+  const emailCodeUi = CodeUI({
+    copy: {
+      code_info: 'We sent a one-time sign-in code to your email.',
+      email_invalid: AUTH_EMAIL_OTP_SEND_UNAVAILABLE_MESSAGE,
+      email_placeholder: 'you@example.com',
+    },
+    sendCode: async () => undefined,
+  })
 
   return issuer({
     theme: {
@@ -1703,24 +2862,63 @@ const makeAuthIssuer = (env: Env) => {
         clientSecret: redactedValue(config.github.clientSecret) ?? '',
         scopes: [...GITHUB_LOGIN_SCOPES],
       }),
+      code: CodeProvider({
+        ...emailCodeUi,
+        sendCode: async (claims, code) => {
+          const email =
+            typeof claims.email === 'string'
+              ? normalizeAuthEmailOtpEmail(claims.email)
+              : ''
+          if (email === '' || !SIMPLE_EMAIL_PATTERN.test(email)) {
+            return invalidAuthEmailOtpClaim(email)
+          }
+          claims.email = email
+          stampAuthEmailOtpClaims(claims, workerRuntime)
+
+          return sendSignInCodeEmail(env, email, code)
+            .then(() => undefined)
+            .catch(error => {
+              logWorkerRouteError('auth_email_otp_send_failed', error, {
+                errorName: errorName(error),
+              })
+
+              return invalidAuthEmailOtpClaim(email)
+            })
+        },
+      }),
     },
     storage: makeD1Storage(openAgentsDatabase(env)),
     subjects,
     allow: async ({ redirectURI }) => {
       const hostname = new URL(redirectURI).hostname
 
-      return (
-        hostname === 'openagents.com' ||
-        hostname === 'auth.openagents.com' ||
-        hostname === 'localhost' ||
-        hostname === '127.0.0.1'
-      )
+      return authIssuerAllowsRedirectHostname(hostname)
     },
     success: async (ctx, response) => {
-      if (response.provider !== 'github') {
-        throw new UnsupportedAuthProvider({ provider: response.provider })
+      if (response.provider === 'code') {
+        const claimedEmail =
+          typeof response.claims.email === 'string' ? response.claims.email : ''
+        if (claimedEmail === '') {
+          throw new UnsupportedAuthProvider({ provider: 'code' })
+        }
+        if (!authEmailOtpClaimsAreFresh(response.claims, workerRuntime)) {
+          throw new AuthSignInError({
+            reason: 'Email sign-in code expired',
+          })
+        }
+        const subject = emailToSubject(claimedEmail)
+        await upsertEmailUser(openAgentsDatabase(env), subject)
+
+        return ctx.subject('user', subject, {
+          subject: subject.userId,
+          ttl: {
+            access: SESSION_MAX_AGE_SECONDS,
+            refresh: SESSION_MAX_AGE_SECONDS,
+          },
+        })
       }
 
+      // Only the github + code providers are registered; code handled above.
       const [user, emails] = await Promise.all([
         fetchGitHubJson(
           GitHubUser,
@@ -1764,7 +2962,7 @@ const makeIssuerAwareFetch =
     const issuerHost = new URL(getIssuerOrigin(env)).hostname
 
     if (url.hostname === issuerHost) {
-      return makeAuthIssuer(env).fetch(request, env, ctx)
+      return routeAuthIssuerRequest(request, env, ctx)
     }
 
     return fetch(request)
@@ -1855,7 +3053,7 @@ const scheduleSiteReferralOnboardingEmail = (
 
 const { appendRefreshedSessionCookies, requireBrowserSession } =
   makeBrowserSessionBoundary<UserSubject, Env>({
-    persistUser: (env, user) => upsertGitHubUser(openAgentsDatabase(env), user),
+    persistUser: (env, user) => upsertUser(openAgentsDatabase(env), user),
     verifySession,
   })
 
@@ -1883,7 +3081,7 @@ const authenticateRequestActor = async (
     return undefined
   }
 
-  await upsertGitHubUser(openAgentsDatabase(env), session.user)
+  await upsertUser(openAgentsDatabase(env), session.user)
 
   if (session.tokens === undefined) {
     return {
@@ -1943,7 +3141,10 @@ const handleAppShellPage = async (
     cookies.has(ACCESS_COOKIE) || cookies.has(REFRESH_COOKIE)
   const session = await verifySession(request, env, ctx)
   const tokens = session?.tokens
-  const assetResponse = await env.ASSETS.fetch(request)
+  const assetResponse = await fetchAppShellWithPylonStatsBootPayload(
+    request,
+    env,
+  )
 
   if (tokens !== undefined) {
     return cloneResponseWithHeaders(assetResponse, headers => {
@@ -1974,7 +3175,7 @@ const readAuthenticatedPageContext = async (
     onboarding: Awaited<ReturnType<typeof readOnboardingStatusForUser>>
   }>
 > => {
-  await upsertGitHubUser(openAgentsDatabase(env), session.user)
+  await upsertUser(openAgentsDatabase(env), session.user)
 
   const providerAccountRepository = makeD1ProviderAccountRepository(
     openAgentsDatabase(env),
@@ -2011,7 +3212,10 @@ const readAuthenticatedPageContext = async (
     providerAccounts,
     githubWriteConnections,
     tokenLeaderboards,
-    billing,
+    // Attach the purchasable credit catalog from the server Stripe config so the
+    // billing page renders buy buttons whose packageId the checkout endpoint
+    // accepts on first render, before any client-side billing refresh.
+    billing: withBillingCreditPackages(billing, readBillingCreditPackages(env)),
     onboarding,
   }
 }
@@ -2176,6 +3380,35 @@ const handleThreadPage = async (
 const isAgentClaimReturnPath = (pathname: string): boolean =>
   /^\/agents\/claims\/[^/]+$/.test(pathname)
 
+const isForumReturnPath = (pathname: string): boolean =>
+  pathname === '/forum' ||
+  /^\/forum\/(?:f|t)\/[^/]+$/.test(pathname) ||
+  /^\/forum\/receipts\/[^/]+$/.test(pathname)
+
+const serializeBrowserReadableCookie = (
+  name: string,
+  value: string,
+  maxAgeSeconds: number,
+  path = '/',
+): string =>
+  [
+    `${name}=${encodeURIComponent(value)}`,
+    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
+    `Path=${path}`,
+    'Secure',
+    'SameSite=Lax',
+  ].join('; ')
+
+const expiredBrowserReadableCookie = (name: string, path = '/'): string =>
+  serializeBrowserReadableCookie(name, '', 0, path)
+
+const loginFailedCookie = (): string =>
+  serializeBrowserReadableCookie(
+    LOGIN_ERROR_COOKIE,
+    'github_login_failed',
+    LOGIN_ERROR_MAX_AGE_SECONDS,
+  )
+
 const cleanLoginReturnPath = (value: string | null): string | undefined => {
   const raw = value?.trim()
 
@@ -2201,6 +3434,14 @@ const cleanLoginReturnPath = (value: string | null): string | undefined => {
       return undefined
     }
 
+    if (url.pathname === '/api/team-workspace-invites/accept') {
+      const token = url.searchParams.get('token')?.trim()
+
+      return token === undefined || token === ''
+        ? undefined
+        : `${url.pathname}?token=${encodeURIComponent(token)}`
+    }
+
     const isAgentClaimReturn = isAgentClaimReturnPath(url.pathname)
 
     if (
@@ -2208,6 +3449,7 @@ const cleanLoginReturnPath = (value: string | null): string | undefined => {
       url.pathname === '/billing' ||
       url.pathname === '/onboarding' ||
       url.pathname === '/order' ||
+      isForumReturnPath(url.pathname) ||
       isAgentClaimReturn ||
       url.pathname.startsWith('/orders/') ||
       url.pathname.startsWith('/share/')
@@ -2221,18 +3463,23 @@ const cleanLoginReturnPath = (value: string | null): string | undefined => {
   }
 }
 
-const handleGitHubStart = async (request: Request, env: Env) => {
+const handleLoginStart = async (
+  request: Request,
+  env: Env,
+  provider: 'github' | 'code',
+) => {
   const config = getOpenAgentsWorkerConfig(env)
   const redirectUri = `${getAppOrigin(env)}/auth/callback`
   const { challenge, url } = await createClient({
     clientID: config.openauth.clientId,
     issuer: getIssuerOrigin(env),
   }).authorize(redirectUri, 'code', {
-    provider: 'github',
+    provider,
   })
   const requestUrl = new URL(request.url)
   const maybeReturnTo = cleanLoginReturnPath(
-    requestUrl.searchParams.get('returnTo'),
+    requestUrl.searchParams.get('returnTo') ??
+      requestUrl.searchParams.get('return_to'),
   )
   const cookies = [
     serializeCookie(
@@ -2260,36 +3507,14 @@ const handleGitHubStart = async (request: Request, env: Env) => {
   return redirectResponse(url, cookies)
 }
 
-export const githubWriteResultRedirectLocation = (appOrigin: string): string =>
-  appOrigin
+const handleGitHubStart = (request: Request, env: Env) =>
+  handleLoginStart(request, env, 'github')
+
+const handleEmailStart = (request: Request, env: Env) =>
+  handleLoginStart(request, env, 'code')
 
 const githubWriteResultRedirect = (env: Env): Response =>
   redirectResponse(githubWriteResultRedirectLocation(getAppOrigin(env)))
-
-export const cleanProductRouteRedirectLocation = (
-  url: URL,
-): string | undefined => {
-  if (url.search === '') {
-    return undefined
-  }
-
-  if (url.pathname === '/login') {
-    return `${url.origin}/`
-  }
-
-  if (
-    url.pathname === '/' ||
-    url.pathname === '/billing' ||
-    url.pathname === '/onboarding' ||
-    url.pathname === '/order' ||
-    url.pathname.startsWith('/orders/') ||
-    url.pathname.startsWith('/share/')
-  ) {
-    return `${url.origin}${url.pathname}`
-  }
-
-  return undefined
-}
 
 const handleGitHubWriteStart = async (
   request: Request,
@@ -2303,6 +3528,12 @@ const handleGitHubWriteStart = async (
   const session = await requireBrowserSession(request, env, ctx)
 
   if (session === undefined) {
+    return redirectResponse(getAppOrigin(env))
+  }
+
+  // The GitHub-write connection binds to the signed-in GitHub identity. Email
+  // (one-time-code) accounts have none, so there is nothing to connect here.
+  if (session.user.githubId === undefined || session.user.login === undefined) {
     return redirectResponse(getAppOrigin(env))
   }
 
@@ -2467,6 +3698,10 @@ const handleGitHubWriteDisconnectApi = async (
     return noStoreJsonResponse({ error: 'unauthorized' }, { status: 401 })
   }
 
+  if (session.user.login === undefined) {
+    return noStoreJsonResponse({ error: 'no_github_identity' }, { status: 400 })
+  }
+
   const now = workerRuntime.nowIso()
   const repository = makeD1GitHubWriteRepository(openAgentsDatabase(env))
   const connection = await repository.disconnectConnection({
@@ -2629,18 +3864,22 @@ const handleAuthCallback = async (
     expiredCookie(AUTH_STATE_COOKIE, '/auth'),
     expiredCookie(LOGIN_ORIGIN_COOKIE, '/auth'),
     expiredCookie(LOGIN_RETURN_TO_COOKIE, '/auth'),
+    expiredBrowserReadableCookie(LOGIN_ERROR_COOKIE),
   ]
+  const maybeReturnTo = cleanLoginReturnPath(
+    cookies.get(LOGIN_RETURN_TO_COOKIE) ?? null,
+  )
 
   if (error !== null) {
-    return redirectResponse('/', cleanupCookies)
+    return redirectResponse(maybeReturnTo ?? '/', [
+      ...cleanupCookies,
+      loginFailedCookie(),
+    ])
   }
 
   const code = url.searchParams.get('code')
   const state = url.searchParams.get('state')
   const expectedState = cookies.get(AUTH_STATE_COOKIE)
-  const maybeReturnTo = cleanLoginReturnPath(
-    cookies.get(LOGIN_RETURN_TO_COOKIE) ?? null,
-  )
 
   if (
     code === null ||
@@ -2677,7 +3916,12 @@ const handleAuthCallback = async (
 }
 
 const handleLogout = (request: Request): Response => {
-  const response = redirectResponse('/')
+  const requestUrl = new URL(request.url)
+  const maybeReturnTo = cleanLoginReturnPath(
+    requestUrl.searchParams.get('returnTo') ??
+      requestUrl.searchParams.get('return_to'),
+  )
+  const response = redirectResponse(maybeReturnTo ?? '/')
   appendClearSessionCookies(response.headers, new URL(request.url).hostname)
 
   return response
@@ -2709,7 +3953,7 @@ const handleSessionApi = async (
     return response
   }
 
-  await upsertGitHubUser(openAgentsDatabase(env), session.user)
+  await upsertUser(openAgentsDatabase(env), session.user)
   const referralResult = await consumePendingReferralForUser(
     openAgentsDatabase(env),
     workerRuntime,
@@ -3276,6 +4520,66 @@ const cleanupCanceledAgentRunOnShc = async (
     logWorkerRouteWarning('shc_billing_cleanup_request_failed', {
       error: errorMessage(error),
       runId: run.id,
+    })
+  }
+}
+
+const sendAutopilotDecisionRequiredEmailOnce = async (
+  env: Env,
+  record: AutopilotWorkOrderRecord,
+): Promise<void> => {
+  const resend = getOpenAgentsWorkerConfig(env).email.resend
+
+  if (resend === undefined) {
+    logWorkerRouteWarning('autopilot_decision_email_config_missing', {
+      workOrderRef: record.workOrderRef,
+    })
+
+    return
+  }
+
+  const contact = await openAgentsDatabase(env)
+    .prepare(
+      `SELECT display_name, primary_email
+       FROM users
+       WHERE id = ?`,
+    )
+    .bind(record.ownerUserId)
+    .first<Readonly<{ display_name: string; primary_email: string | null }>>()
+  const email = contact?.primary_email?.trim()
+
+  if (email === undefined || email === '') {
+    logWorkerRouteWarning('autopilot_decision_email_missing_recipient', {
+      workOrderRef: record.workOrderRef,
+    })
+
+    return
+  }
+
+  const delivery = await observedEffect(
+    'Email.sendAutopilotDecisionEmailWithLedger',
+    sendAutopilotDecisionEmailWithLedger(
+      openAgentsDatabase(env),
+      resend,
+      new AutopilotDecisionEmailInput({
+        appOrigin: getAppOrigin(env),
+        displayName: contact?.display_name.trim() || 'there',
+        idempotencyKey: `autopilot:decision_required:${record.workOrderRef}`,
+        kind: 'decision_required',
+        to: email,
+        workOrderRef: record.workOrderRef,
+      }),
+      {
+        sourceAuthorityRef: 'system.autopilot_decision_notification.v1',
+        targetUserId: record.ownerUserId,
+      },
+    ),
+  )
+
+  if (!delivery.ok) {
+    logWorkerRouteWarning('autopilot_decision_email_failed', {
+      error: delivery.errorMessage,
+      workOrderRef: record.workOrderRef,
     })
   }
 }
@@ -4445,6 +5749,119 @@ const runArtanisScheduledTickScheduled = (
     Effect.catch(() => Effect.void),
   )
 
+const recordPylonCapacityFunnelSnapshotsScheduled = (
+  db: D1Database,
+  scheduledTime: number,
+): Effect.Effect<void, never> =>
+  Effect.tryPromise({
+    catch: () => 'pylon_capacity_funnel_snapshot_failed' as const,
+    try: () =>
+      recordPylonCapacityFunnelSnapshots({
+        nowIso: epochMillisToIsoTimestamp(scheduledTime),
+        snapshotStore: makeD1PylonCapacityFunnelSnapshotStore(db),
+        store: makeD1PylonApiStore(db),
+      }),
+  }).pipe(
+    Effect.asVoid,
+    Effect.catch(() => Effect.void),
+  )
+
+// Public relay health probe (#4865): scheduled NIP-11 + websocket
+// REQ/EOSE probe of the canonical market relay. The tick guards its own
+// 5-minute cadence internally because the worker cron fires every minute,
+// and the probe timestamp authority is the scheduled controller time.
+const runRelayHealthProbeScheduled = (
+  env: Env,
+  scheduledTime: number,
+): Effect.Effect<void, never> =>
+  Effect.tryPromise({
+    catch: () => 'relay_health_probe_failed' as const,
+    try: () =>
+      runRelayHealthProbeTick({
+        // Service binding preferred for the NIP-11 leg: same-zone plain-GET
+        // subrequests to the relay's custom domain fail from inside this
+        // worker; the binding invokes the relay worker directly (#4865).
+        fetchFn: env.MARKET_RELAY_SERVICE
+          ? (((url, init) =>
+              (env.MARKET_RELAY_SERVICE as Fetcher).fetch(
+                url,
+                init,
+              )) as RelayHealthFetch)
+          : undefined,
+        makeId: randomUuid,
+        relayUrl: canonicalMarketRelayUrl(env),
+        scheduledTimeMs: scheduledTime,
+        store: makeD1RelayHealthStore(openAgentsDatabase(env)),
+      }),
+  }).pipe(
+    Effect.asVoid,
+    Effect.catch(() => Effect.void),
+  )
+
+// Self-serve open-window producer (#5396). Keeps a small, hard-capped pool of
+// openly-claimable `auto_starter` windows on the live Tassadar run so a fresh
+// contributor's `pylon training claim` finds work instead of "no claimable
+// window". listClaimableWindows applies the exact active+unleased claimability
+// filter, so we only ever top up to TARGET claimable windows — bounding spend:
+// each window can settle at most one verified worker+validator pair (5+5 sats)
+// within the armed settlement-gate caps before it is consumed and replenished.
+const SELF_SERVE_WINDOW_RUN_REF = 'run.tassadar.executor.20260615'
+const SELF_SERVE_WINDOW_TARGET = 2
+
+const runSelfServeWindowProducerScheduled = (
+  env: Env,
+  scheduledTime: number,
+): Effect.Effect<void, never> =>
+  Effect.tryPromise({
+    catch: () => 'self_serve_window_producer_failed' as const,
+    try: async () => {
+      const store = makeD1TrainingAuthorityStore(openAgentsDatabase(env))
+      const nowIso = epochMillisToIsoTimestamp(scheduledTime)
+      const claimable = await store.listClaimableWindows(nowIso, 50)
+      const openSelfServe = claimable.filter(
+        window =>
+          window.trainingRunRef === SELF_SERVE_WINDOW_RUN_REF &&
+          window.homeworkKind === 'auto_starter',
+      )
+      const toCreate = Math.max(
+        0,
+        SELF_SERVE_WINDOW_TARGET - openSelfServe.length,
+      )
+
+      for (let index = 0; index < toCreate; index += 1) {
+        const planned = await store.planWindow(
+          buildTrainingWindowRecord({
+            makeId: randomUuid,
+            nowIso,
+            request: {
+              datasetRefs: ['dataset.public.tassadar.kernel_trace'],
+              homeworkKind: 'auto_starter',
+              priority: 1,
+              receiptRefs: [
+                'receipt.public.tassadar.window.self_serve_open.producer.plan',
+              ],
+              sourceRefs: ['source.public.tassadar.executor.self_serve_open'],
+              trainingRunRef: SELF_SERVE_WINDOW_RUN_REF,
+            },
+          }),
+        )
+        const transitioned = transitionTrainingWindowRecord({
+          actorRef: 'operator.openagents.self_serve_window_producer',
+          eventId: randomUuid(),
+          nextState: 'active',
+          nowIso,
+          receiptRef: `receipt.public.tassadar.window.self_serve_open.producer.activate.${planned.id}`,
+          transitionKind: 'window_activate',
+          window: planned,
+        })
+        await store.transitionWindow(transitioned.window, transitioned.event)
+      }
+    },
+  }).pipe(
+    Effect.asVoid,
+    Effect.catch(() => Effect.void),
+  )
+
 const readTokenUsageLeaderboardsForUser = (
   env: Env,
   userId: string,
@@ -4464,6 +5881,19 @@ const readSelectedOperatorTargetUser = (
   selector: Record<string, unknown>,
 ): Promise<OperatorTargetUser | undefined> =>
   readOperatorTargetUser(db, selector, OPENAGENTS_ADMIN_EMAILS[0])
+
+// Kind-agnostic target resolver for the inference-credit grant (human OR agent
+// account) — the bridge funds `agent:<userId>` for either, and an agent account
+// under test is a valid target.
+const readSelectedInferenceCreditTargetUser = (
+  db: D1Database,
+  selector: Record<string, unknown>,
+): Promise<OperatorTargetUser | undefined> =>
+  readSelectedInferenceCreditTargetUserBase(
+    db,
+    selector,
+    OPENAGENTS_ADMIN_EMAILS[0],
+  )
 
 const sweepActiveAgentRunBilling = async (
   env: Env,
@@ -4584,6 +6014,29 @@ const deleteStartedCodexDeviceLogin =
     await kv.delete(providerDeviceLoginSecretKey(attemptId))
   }
 
+const storeConnectedProviderApiKey =
+  (kv: KVNamespace) =>
+  async (
+    input: Readonly<{
+      providerAccountRef: string
+      provider: 'anthropic_claude' | 'google_gemini'
+      apiKey: string
+    }>,
+  ): Promise<void> => {
+    const providerField =
+      input.provider === 'anthropic_claude' ? 'anthropic' : 'google'
+
+    await kv.put(
+      providerAuthSecretKey(input.providerAccountRef),
+      JSON.stringify({
+        [providerField]: {
+          type: 'api_key',
+          key: input.apiKey,
+        },
+      }),
+    )
+  }
+
 const storeConnectedCodexAuth =
   (kv: KVNamespace) =>
   async (
@@ -4672,38 +6125,63 @@ export const handleProgrammaticAgentRegistration = async (
       parsed,
     )
 
-    if (parsed.bolt12Offer !== undefined && parsed.bolt12Offer !== null) {
-      // Automatically register the tip wallet so the user doesn't have to call claim-tip-wallet
-      const { upsertForumTipRecipientWallet } = await import('./forum/repository')
+    const autoClaimLightningAddress =
+      typeof parsed.lightningAddress === 'string' &&
+      parsed.lightningAddress.trim() !== ''
+        ? parsed.lightningAddress.trim()
+        : null
+    const autoClaimBolt12Offer =
+      typeof parsed.bolt12Offer === 'string' && parsed.bolt12Offer.trim() !== ''
+        ? parsed.bolt12Offer.trim()
+        : null
+
+    if (autoClaimLightningAddress !== null || autoClaimBolt12Offer !== null) {
+      // Automatically register the tip wallet so the user doesn't have to call
+      // claim-tip-wallet. Spark Lightning Address is the preferred agent path;
+      // BOLT 12 remains accepted for legacy registrations.
+      const { upsertForumTipRecipientWallet } =
+        await import('./forum/repository')
       const db = openAgentsDatabase(env)
-      
+      const sparkPrimary = autoClaimLightningAddress !== null
+
       await Effect.runPromise(
         upsertForumTipRecipientWallet(db, {
           actorRef: `agent:${registration.user.id}`,
-          bolt12Offer: parsed.bolt12Offer,
+          bolt12Offer: autoClaimBolt12Offer,
+          lightningAddress: autoClaimLightningAddress,
           caveatRefs: [
             'caveat.public.forum_tip_recipient.creator_settlement_pending',
           ],
           claimPolicyRefs: [
             'policy.public.forum_tip_recipient.agent_registration_auto_claimed',
           ],
-          custodyPolicyRefs: [
-            'policy.public.forum_tip_recipient.self_custody_mdk_agent_wallet',
-          ],
+          custodyPolicyRefs: sparkPrimary
+            ? ['policy.public.forum_tip_recipient.spark_self_custody']
+            : [
+                'policy.public.forum_tip_recipient.self_custody_mdk_agent_wallet',
+              ],
           disabledAt: null,
           id: `forum_tip_recipient_wallet.user_${registration.user.id}.auto_claim`,
           payoutTargetApprovalRef: null,
-          providerClass: 'mdk_agent_wallet',
-          readinessRefs: [
-            'readiness.public.mdk_agent.daemon_running',
-            'readiness.public.mdk_agent.receive_ready',
-            'readiness.public.mdk_agent.setup_present'
-          ],
+          providerClass: sparkPrimary
+            ? 'external_lightning'
+            : 'mdk_agent_wallet',
+          readinessRefs: sparkPrimary
+            ? [
+                'readiness.public.spark_lightning_address.receive_ready',
+                'readiness.public.spark_primary.agent_balance',
+              ]
+            : [
+                'readiness.public.mdk_agent.daemon_running',
+                'readiness.public.mdk_agent.receive_ready',
+                'readiness.public.mdk_agent.setup_present',
+              ],
           receiveCapabilityRef: `receive_capability.public.auto_${registration.user.id}.redacted`,
-          sourceRef: 'source.public.forum_tip_recipient.agent_registration_auto_claim',
+          sourceRef:
+            'source.public.forum_tip_recipient.agent_registration_auto_claim',
           state: 'ready',
-          walletRef: `wallet.public.auto_${registration.user.id}.redacted`
-        })
+          walletRef: `wallet.public.auto_${registration.user.id}.redacted`,
+        }),
       )
     }
 
@@ -4721,12 +6199,32 @@ export const handleProgrammaticAgentRegistration = async (
   }
 }
 
+const agentBalanceAuthForStore =
+  (store: ReturnType<typeof makeD1AgentRegistrationStore>) =>
+  async (request: Request): Promise<{ actorRef: string } | undefined> => {
+    const bearerToken = readBearerToken(request)
+    if (bearerToken === undefined) {
+      return undefined
+    }
+    const session = await authenticateProgrammaticAgent(store, bearerToken)
+    return session === undefined
+      ? undefined
+      : { actorRef: `agent:${session.user.id}` }
+  }
+
 const handleProgrammaticAgentMe = async (
   request: Request,
   env: Env,
 ): Promise<Response> => {
+  // #5333: self-serve agent displayName rename lives on PATCH /api/agents/me,
+  // the same agent-self surface that GET reads from. GET keeps returning the
+  // identity projection; PATCH updates the agent's own user row.
+  if (request.method === 'PATCH') {
+    return handleProgrammaticAgentSelfUpdate(request, openAgentsDatabase(env))
+  }
+
   if (request.method !== 'GET') {
-    return methodNotAllowed(['GET'])
+    return methodNotAllowed(['GET', 'PATCH'])
   }
 
   const bearerToken = readBearerToken(request)
@@ -4774,7 +6272,17 @@ const routeAuthHostRequest = async (
     }
   }
 
-  return makeAuthIssuer(env).fetch(request, env, ctx)
+  return routeAuthIssuerRequest(request, env, ctx)
+}
+
+const routeAuthIssuerRequest = async (
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+) => {
+  const maybeGuardResponse = await maybeAuthEmailOtpGuardResponse(request, env)
+
+  return maybeGuardResponse ?? makeAuthIssuer(env).fetch(request, env, ctx)
 }
 
 export { findAuthorizedAgentRunBundle } from './thread-access'
@@ -5002,16 +6510,30 @@ const syncRoutes = makeSyncRoutes({
 const providerAccountBrowserHandlers = makeProviderAccountBrowserHandlers({
   appendRefreshedSessionCookies,
   deleteStartedCodexDeviceLogin,
+  probeProviderApiKey: probeProviderApiKey(),
   providerAuthSecretKey,
   readStartedCodexDeviceLogin,
   requireBrowserSession,
   storeConnectedCodexAuth,
+  storeConnectedProviderApiKey,
   storeStartedCodexDeviceLogin,
 })
 
 const providerAccountServiceHandlers = makeProviderAccountServiceHandlers({
   readConnectedCodexAuthMaterial,
   requireProviderServiceActor,
+})
+
+const providerAccountPoolRoutes = makeProviderAccountPoolRoutes({
+  agentStore: env => makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+  appendRefreshedSessionCookies,
+  requireBrowserSession,
+})
+
+const providerAccountUsageRoutes = makeProviderAccountUsageRoutes({
+  appendRefreshedSessionCookies,
+  isOpenAgentsAdminEmail,
+  requireBrowserSession,
 })
 
 const operatorProviderAccountRoutes = makeOperatorProviderAccountRoutes({
@@ -5080,6 +6602,13 @@ const providerAccountRoutes = makeProviderAccountRoutes({
         env,
       ),
     ),
+  handleGoogleGeminiBuiltinGrantApi: (request, env) =>
+    routeEffect('handle_google_gemini_builtin_grant_api', () =>
+      providerAccountServiceHandlers.handleGoogleGeminiBuiltinGrantApi(
+        request,
+        env,
+      ),
+    ),
   handleGoogleGeminiGenerateContentApi: (request, env, ctx, model) =>
     routeEffect('handle_google_gemini_generate_content_api', () =>
       providerAccountServiceHandlers.handleGoogleGeminiGenerateContentApi(
@@ -5087,6 +6616,15 @@ const providerAccountRoutes = makeProviderAccountRoutes({
         env,
         ctx,
         model,
+      ),
+    ),
+  handleProviderApiKeyConnectApi: (request, env, ctx, providerRouteSegment) =>
+    routeEffect('handle_provider_api_key_connect_api', () =>
+      providerAccountBrowserHandlers.handleProviderApiKeyConnectApi(
+        request,
+        env,
+        ctx,
+        providerRouteSegment,
       ),
     ),
   handleProviderAccountHealthApi: (request, env, providerAccountRef) =>
@@ -5097,6 +6635,10 @@ const providerAccountRoutes = makeProviderAccountRoutes({
         providerAccountRef,
       ),
     ),
+  handleProviderAccountPoolApi: (request, env, ctx) =>
+    providerAccountPoolRoutes.handleProviderAccountPoolApi(request, env, ctx),
+  handleProviderAccountUsageApi: (request, env, ctx) =>
+    providerAccountUsageRoutes.handleProviderAccountUsageApi(request, env, ctx),
   handleProviderAccountsListApi: (request, env, ctx) =>
     routeEffect('handle_provider_accounts_list_api', () =>
       providerAccountBrowserHandlers.handleProviderAccountsListApi(
@@ -5166,6 +6708,61 @@ const siteReferralInspectionRoutes = makeSiteReferralInspectionRoutes({
   requireBrowserSession,
 })
 
+// Referral payout settlement adapter (RL-1 settle wire, #5511). This is the
+// PRODUCTION hosted-MDK programmatic-payout adapter the shared dispatcher
+// (`dispatchReferralPayoutSettlement`) invokes to record a `settled` referral
+// payout with a real, redacted, dereferenceable receipt ref -- replacing the
+// throwing placeholder that could never pay.
+//
+// OWNER-ARMED / INERT (the #5512 boundary): two independent gates keep this
+// inert until the owner arms live payouts:
+//   1. `readReadiness` below is the OWNER-ARMED OFF gate
+//      (`hostedMdkDirectPayoutDisabledGate` -> `livePayoutClaimAllowed: false`),
+//      so the dispatcher REFUSES before ever reaching the adapter; and
+//   2. the adapter's `client` is null (no funded programmatic-payout client
+//      armed) and its destination resolver returns null (no registered referrer
+//      destination), so even if reached it FAILS CLOSED (throws) -- no money
+//      moves and NO settled state is recorded.
+// Arming the gate + configuring a funded client + a registered destination is
+// the owner step (#5512); the rail itself is now wired and ready.
+const referralPayoutSettlementAdapter = makeSiteReferralPayoutAdapter({
+  // Not armed: no funded hosted-MDK programmatic-payout client is wired into the
+  // referral rail yet. Fail closed until the owner arms it (#5512).
+  client: null,
+  // Not armed: referrer payout-destination registration is owner-gated (#5512).
+  // Returns null so the adapter fails closed if ever reached.
+  resolveDestination: async () => null,
+})
+
+const siteReferralPayoutLedgerRoutes = makeSiteReferralPayoutLedgerRoutes({
+  dispatchDependencies: {
+    adapter: referralPayoutSettlementAdapter,
+    nowIso: currentIsoTimestamp,
+    readReadiness: async () => hostedMdkDirectPayoutDisabledGate(),
+  },
+  nowIso: currentIsoTimestamp,
+  requireAdminApiToken,
+})
+
+// Inference referral revshare routes (sub-EPIC #5475: #5491 dashboard read +
+// #5490 dispatch). The dispatch readiness gate defaults to the OWNER-ARMED OFF
+// gate, so the first real referral payout is owner-armed: dispatch REFUSES (no
+// money moves, the adapter is never reached) until the owner arms a live payout
+// mode. The adapter is now the real hosted-MDK rail (`referralPayoutSettlement
+// Adapter`), which also fails closed (unconfigured client) on the not-armed
+// path -- so the placeholder that could never pay is replaced by a real,
+// readiness-gated rail.
+const inferenceReferralRoutes = makeInferenceReferralRoutes({
+  appendRefreshedSessionCookies,
+  dispatchDependencies: {
+    adapter: referralPayoutSettlementAdapter,
+    nowIso: currentIsoTimestamp,
+    readReadiness: async () => hostedMdkDirectPayoutDisabledGate(),
+  },
+  requireAdminApiToken,
+  requireBrowserSession,
+})
+
 const agentGoalRoutes = makeAgentGoalRoutes({
   appendRefreshedSessionCookies,
   authenticateRequestActor,
@@ -5173,6 +6770,10 @@ const agentGoalRoutes = makeAgentGoalRoutes({
   readActiveTeamProject,
   requireAdminApiToken,
   requireBrowserSession,
+})
+
+const checkoutPageRoutes = makeCheckoutPageRoutes<WorkerBindings>({
+  hostedMdkClient: env => hostedMdkClientForEnv(env),
 })
 
 const agentOwnerClaimRoutes = makeAgentOwnerClaimRoutes({
@@ -5200,21 +6801,268 @@ const agentSearchRoutes = makeAgentSearchRoutes({
   agentStore: env => makeD1AgentRegistrationStore(openAgentsDatabase(env)),
 })
 
-const autopilotWorkRoutes = makeAutopilotWorkRoutes<WorkerBindings>({
-  agentStore: env => makeD1AgentRegistrationStore(openAgentsDatabase(env)),
-  l402SigningBoundary: env => forumL402SigningBoundaryForEnv(env),
-  makeBuyerPaymentLedgerStore: env =>
+const autopilotWorkRouteDependencies = {
+  agentStore: (env: WorkerBindings) =>
+    makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+  // Hosted Gemini executor binding (api.hosted_gemini.v1, yellow). DOUBLE-gated
+  // and INERT by default: resolves an executor ONLY when
+  // HOSTED_GEMINI_EXECUTOR_ENABLED is armed AND VERTEX_SA_KEY is present;
+  // otherwise it resolves `undefined` (no execution, no closeout) — exactly the
+  // prior behaviour when no executor was wired. Reads the config off the live
+  // `Env` the route already receives; carries no secret into any closeout.
+  executeReadyWork: makeHostedGeminiExecuteReadyWork(),
+  l402SigningBoundary: (env: WorkerBindings) =>
+    forumL402SigningBoundaryForEnv(env),
+  makeBuyerPaymentLedgerStore: (env: WorkerBindings) =>
     makeD1BuyerPaymentLedgerStore(openAgentsDatabase(env)),
-  makePylonApiStore: env => makeD1PylonApiStore(openAgentsDatabase(env)),
-  makeStore: env => makeD1AutopilotWorkStore(openAgentsDatabase(env)),
-  verifyL402PaymentProof: (env, input) =>
+  makePylonApiStore: (env: WorkerBindings) =>
+    makeD1PylonApiStore(openAgentsDatabase(env)),
+  makeStore: (env: WorkerBindings) =>
+    makeD1AutopilotWorkStore(openAgentsDatabase(env)),
+  // Feed the registered-pylon registry into the work-order placement selector
+  // so an owner's online, heartbeat-fresh Pylon is eligible for `requester_pylon`
+  // placement (own jobs run on the owner's own node). Without this the selector
+  // only ever sees an empty list and every order falls back to the SHC lane,
+  // which is what blocked the spare-capacity provider from picking up its
+  // owner's job (#4782). The selector itself enforces owner-match + active +
+  // fresh-heartbeat eligibility.
+  pylonRegistrations: (env: WorkerBindings) =>
+    makeD1PylonApiStore(openAgentsDatabase(env)).listRegistrations(100),
+  requireBrowserSession,
+  verifyL402PaymentProof: (
+    env: WorkerBindings,
+    input: Parameters<typeof verifyAutopilotL402PaymentProofFromBuyerLedger>[1],
+  ) =>
     verifyAutopilotL402PaymentProofFromBuyerLedger(
       makeD1BuyerPaymentLedgerStore(openAgentsDatabase(env)),
       input,
     ),
+}
+
+const autopilotWorkRoutes = makeAutopilotWorkRoutes<Env>(
+  autopilotWorkRouteDependencies,
+)
+
+const autopilotContinuationPolicyRoutes =
+  makeAutopilotContinuationPolicyRoutes<WorkerBindings>({
+    agentStore: env => makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+    makeStore: env => makeD1AutopilotContinuationStore(openAgentsDatabase(env)),
+    requireBrowserSession,
+  })
+
+const autopilotMorningReportRoutes =
+  makeAutopilotMorningReportRoutes<WorkerBindings>({
+    agentStore: env => makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+    makeContinuationStore: env =>
+      makeD1AutopilotContinuationStore(openAgentsDatabase(env)),
+    makeWorkStore: env => makeD1AutopilotWorkStore(openAgentsDatabase(env)),
+    requireBrowserSession,
+  })
+
+const autopilotDecisionRoutes = makeAutopilotDecisionRoutes<WorkerBindings>({
+  agentStore: env => makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+  makeStore: env => makeD1AutopilotWorkStore(openAgentsDatabase(env)),
+  requireBrowserSession,
+})
+
+const omniWorkroomRoutes = makeOmniWorkroomRoutes<WorkerBindings>({
+  db: env => openAgentsDatabase(env),
+  requireBrowserSession,
+})
+
+const omniWorkroomLifecycleRoutes =
+  makeOmniWorkroomLifecycleRoutes<WorkerBindings>({
+    makeDb: env => openAgentsDatabase(env),
+    requireBrowserSession,
+    requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+  })
+
+const omniBundleRoutes = makeOmniBundleRoutes<WorkerBindings>({
+  db: env => openAgentsDatabase(env),
+  requireOperator: (request, env) => requireAdminApiToken(request, env),
+  readEvidenceBundle: (db, id) => readOmniEvidenceBundleById(db, id),
+  readProofBundle: (db, id) => readOmniPublicProofBundleById(db, id),
+})
+
+const omniHandoffRoutes = makeOmniHandoffRoutes<WorkerBindings>({
+  db: env => openAgentsDatabase(env),
+  requireOperator: (request, env) => requireAdminApiToken(request, env),
+})
+
+const nativeListsRoutes = makeNativeListsRoutes<WorkerBindings>({
+  makeStore: env => makeNativeListsService(openAgentsDatabase(env)),
+  requireOperator: (request, env) => requireAdminApiToken(request, env),
+})
+
+// Site page form-capture wiring (#5523 / DE-9 #5532; promise
+// autopilot_sites.native_email_sequences.v1, yellow). Default OFF via
+// SITE_FORM_CAPTURE_ENABLED: when the flag is unset the route returns undefined
+// for every request and the omni chain falls through exactly as today. When
+// armed it resolves a page's FormCaptureSpec from the active site version's
+// metadata_json (via site-form-spec-registry) and persists captured leads
+// through the native-lists addSubscriber sink. The registry is the authority on
+// whether a formId is published (spec.id === formId); the SQL only narrows
+// candidate active versions whose metadata_json mentions the form key.
+const sitePageFormCaptureRoutes = makeSitePageFormCaptureRoutes<WorkerBindings>(
+  {
+    isEnabled: env =>
+      isSiteFormCaptureEnabled(
+        (env as unknown as { SITE_FORM_CAPTURE_ENABLED?: string })
+          .SITE_FORM_CAPTURE_ENABLED,
+      ),
+    makeSink: env => ({
+      addSubscriber: makeNativeListsService(openAgentsDatabase(env))
+        .addSubscriber,
+    }),
+    readSiteFormMetadata: async (env, formId) => {
+      const row = await openAgentsDatabase(env)
+        .prepare(
+          `SELECT site_versions.metadata_json AS metadata_json
+           FROM site_projects
+           JOIN site_versions
+             ON site_versions.id = site_projects.active_version_id
+            AND site_versions.site_id = site_projects.id
+          WHERE site_projects.archived_at IS NULL
+            AND site_projects.active_version_id IS NOT NULL
+            AND json_extract(site_versions.metadata_json, '$.formSpecs')
+                IS NOT NULL
+            AND instr(site_versions.metadata_json, ?1) > 0
+          ORDER BY site_versions.created_at DESC
+          LIMIT 25`,
+        )
+        .bind(formId)
+        .all<{ metadata_json: string }>()
+        .then(result => result.results)
+
+      // The registry validates spec.id === formId and decodes defensively, so the
+      // first candidate whose metadata actually publishes this formId wins; a
+      // metadata blob that merely mentions the id as a substring resolves to
+      // undefined here and is skipped.
+      for (const candidate of row) {
+        const spec = resolveSiteFormSpec(candidate.metadata_json, formId)
+        if (spec !== undefined) {
+          return candidate.metadata_json
+        }
+      }
+
+      return undefined
+    },
+  },
+)
+
+const prefilledWorkspaceRoutes = makePrefilledWorkspaceRoutes<WorkerBindings>({
+  makeStore: env => makePrefilledWorkspaceService(openAgentsDatabase(env)),
+  requireHolderUserId: async (request, env, ctx) => {
+    const session = await requireBrowserSession(request, env, ctx)
+
+    return session?.user.userId
+  },
+  requireOperator: (request, env) => requireAdminApiToken(request, env),
+})
+
+const teamWorkspaceInviteRoutes = makeTeamWorkspaceInviteRoutes<
+  WorkerBindings,
+  VerifiedSession
+>({
+  appendRefreshedSessionCookies,
+  appOrigin: getAppOrigin,
+  getResendEmailConfig,
+  makeStore: env => makeD1TeamWorkspaceInviteStore(openAgentsDatabase(env)),
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+  requireBrowserSession,
+  sendInviteEmailWithLedger: (env, config, input) =>
+    sendPrivateWorkspaceInviteEmailWithLedger(
+      openAgentsDatabase(env),
+      config,
+      input,
+    ),
+})
+
+const privateProjectWorkspaceRoutes =
+  makePrivateProjectWorkspaceRoutes<WorkerBindings>({
+    appOrigin: getAppOrigin,
+    getResendEmailConfig,
+    makeInviteStore: env =>
+      makeD1TeamWorkspaceInviteStore(openAgentsDatabase(env)),
+    makePrivateProjectStore: env =>
+      makeD1PrivateProjectWorkspaceStore(openAgentsDatabase(env)),
+    makeWorkspaceStore: env =>
+      makePrefilledWorkspaceService(openAgentsDatabase(env)),
+    requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+    sendInviteEmailWithLedger: (env, config, input) =>
+      sendPrivateWorkspaceInviteEmailWithLedger(
+        openAgentsDatabase(env),
+        config,
+        input,
+      ),
+  })
+
+const tenantClientRoutes = makeTenantClientRoutes({
+  database: (env: WorkerBindings) => openAgentsDatabase(env),
+  requireBrowserSession,
+  resolveTenant: async (request: Request, env: WorkerBindings) => {
+    const host = request.headers.get('Host') ?? ''
+    const tenant = await Effect.runPromise(
+      makeTenantCustomHostnames(
+        openAgentsDatabase(env),
+      ).resolveTenantByHostname(host),
+    )
+    return tenant ?? undefined
+  },
+})
+
+// CUSTOMER self-serve custom-hostname routes (#4988 follow-up). Browser-session
+// + team-role gated; writes only the tenant_custom_hostnames table (pending
+// rows), never live DNS/SSL/origin binding/spend. Live provisioning to `active`
+// stays the owner-gated provisioning core's job (default-OFF Cloudflare
+// secrets), so config stays INERT here (servingLive=false, no live DNS check).
+const tenantHostnameSelfServeRoutes = makeTenantHostnameSelfServeRoutes({
+  database: (env: WorkerBindings) => openAgentsDatabase(env),
+  requireBrowserSession,
+  readTeamRole: (db, teamId, userId) =>
+    readActiveTeamMembershipRole(db, teamId, userId),
+})
+
+const emailSequenceAuthoringRoutes = makeEmailSequenceAuthoringRoutes({
+  appendRefreshedSessionCookies,
+  isOpenAgentsAdminEmail,
+  requireAdminApiToken: (request: Request, env: WorkerBindings) =>
+    requireAdminApiToken(request, env),
+  requireBrowserSession,
+})
+
+const sitesOrchestrationRoutes = makeSitesOrchestrationRoutes({
+  appendRefreshedSessionCookies,
+  isOpenAgentsAdminEmail,
+  requireBrowserSession,
+})
+
+const partnerPayoutLedgerRoutes = makePartnerPayoutLedgerRoutes<WorkerBindings>(
+  {
+    dispatchDependencies: {
+      adapter: {
+        adapterKind: 'owner_armed_partner_payout',
+        dispatch: async () => {
+          throw new PartnerPayoutDispatchError(
+            'partner_payout_adapter_unconfigured: owner has not armed a live partner payout rail',
+          )
+        },
+      },
+      nowIso: currentIsoTimestamp,
+      readReadiness: async () => hostedMdkDirectPayoutDisabledGate(),
+    },
+    nowIso: currentIsoTimestamp,
+    requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+  },
+)
+
+const partnerAgreementRoutes = makePartnerAgreementRoutes<WorkerBindings>({
+  nowIso: currentIsoTimestamp,
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
 })
 
 const agentScopedGrantRoutes = makeAgentScopedGrantRoutes({
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
   appOrigin: getAppOrigin,
   appendRefreshedSessionCookies,
   makeStore: env => makeD1AgentScopedGrantStore(openAgentsDatabase(env)),
@@ -5232,9 +7080,89 @@ const shareRoutes = makeShareRoutes({
 })
 
 const operatorBillingHandlers = makeOperatorBillingHandlers({
+  readSelectedInferenceCreditTargetUser,
   readSelectedOperatorTargetUser,
   requireAdminApiToken,
 })
+
+const operatorBuyModeRoutes = makeOperatorBuyModeRoutes<Env>({
+  makeStore: env => makeD1BuyModeDispatcherStore(openAgentsDatabase(env)),
+  requireAdminApiToken,
+})
+
+const ecommerceCampaignSelfServeRoutes = makeEcommerceCampaignSelfServeRoutes<Env>({
+  makeStore: env => makePrefilledWorkspaceService(openAgentsDatabase(env)),
+  enabled: true, // INERT self-serve enabled
+})
+
+const ecommerceCampaignReceiptRoutes = makeEcommerceCampaignReceiptRoutes<Env>({
+  makeStore: env =>
+    makeD1EcommerceCampaignReceiptStore(
+      openAgentsDatabase(env),
+      currentIsoTimestamp,
+    ),
+  makeClaimStore: () =>
+    makeInMemoryEcommerceCampaignPaidDeliveryClaimStore([
+      {
+        document: firstPaidEcommerceCampaignDeliveryReceiptFixture,
+        receiptRef: firstPaidEcommerceCampaignDeliveryReceiptFixture.receipt.workItemRef,
+        ownerSignOffRef: 'owner.signoff.fixture.1',
+      },
+    ]),
+})
+
+const ecommerceCampaignReceiptOperatorRoutes = makeEcommerceCampaignReceiptOperatorRoutes<Env>({
+  makeStore: env =>
+    makeD1EcommerceCampaignReceiptStore(
+      openAgentsDatabase(env),
+      currentIsoTimestamp,
+    ),
+  requireAdminApiToken: requireAdminApiToken,
+})
+
+const publicNip90MarketReceiptRoutes = makePublicNip90MarketReceiptRoutes<Env>({
+  makeStore: env => makeD1Nip90MarketReceiptStore(openAgentsDatabase(env)),
+})
+
+const publicInferenceReceiptRoutes = makePublicInferenceReceiptRoutes<Env>({
+  makeStore: env => makeD1InferenceReceiptStore(openAgentsDatabase(env)),
+  nowIso: currentIsoTimestamp,
+})
+
+const marketingAgencyReceiptPublicRoutes =
+  makeMarketingAgencyReceiptPublicRoutes<Env>({
+    makeClaimStore: _env => makeInMemoryMarketingAgencyPaidDeliveryClaimStore([])
+  })
+const marketingAgencySelfServePublicRoutes =
+  makeMarketingAgencySelfServePublicRoutes<Env>({
+    makeClaimStore: _env => makeInMemoryMarketingAgencySelfServeClaimStore([])
+  })
+
+const publicCardCreditSpendReceiptRoutes =
+  makePublicCardCreditSpendReceiptRoutes<Env>({
+    makeStore: env =>
+      makeD1CardCreditSpendReceiptStore(openAgentsDatabase(env)),
+    nowIso: currentIsoTimestamp,
+  })
+
+const publicStripeCheckoutReceiptRoutes =
+  makePublicStripeCheckoutReceiptRoutes<Env>({
+    makeStore: env => makeD1StripeCheckoutReceiptStore(openAgentsDatabase(env)),
+    nowIso: currentIsoTimestamp,
+  })
+
+const publicSiteReferralPayoutReceiptRoutes =
+  makePublicSiteReferralPayoutReceiptRoutes<Env>({
+    makeStore: env =>
+      makeD1SiteReferralPayoutReceiptStore(openAgentsDatabase(env)),
+    nowIso: currentIsoTimestamp,
+  })
+
+const publicPartnerPayoutReceiptRoutes =
+  makePublicPartnerPayoutReceiptRoutes<Env>({
+    makeStore: env => makeD1PartnerPayoutReceiptStore(openAgentsDatabase(env)),
+    nowIso: currentIsoTimestamp,
+  })
 
 const blueprintRoutes = makeBlueprintRoutes<Env>({
   listActionSubmissions: env =>
@@ -5415,6 +7343,8 @@ const nexusPylonVisibilityRoutes = makeNexusPylonVisibilityRoutes({
   appendRefreshedSessionCookies,
   currentIsoTimestamp,
   isOpenAgentsAdminEmail,
+  makeArtanisAdminCloseoutReceiptStore: env =>
+    makeD1ArtanisAdminCloseoutReceiptStore(openAgentsDatabase(env)),
   makeLedgerStore: env =>
     makeD1NexusTreasuryPayoutLedgerStore(openAgentsDatabase(env)),
   makePaymentAuthority: (env, context) => {
@@ -5434,11 +7364,24 @@ const nexusPylonVisibilityRoutes = makeNexusPylonVisibilityRoutes({
                   Effect.succeed(context.privatePayoutDestination ?? ''),
               }),
             ]
-          : [],
+          : context.adapterKind === 'spark_treasury'
+            ? [
+                makeSparkTreasuryPayoutAdapter({
+                  fetchTreasury: fetchMdkTreasuryPath(env),
+                  providerRef: context.providerRef,
+                  resolveDestination: () =>
+                    Effect.succeed(context.privatePayoutDestination ?? ''),
+                }),
+              ]
+            : [],
       ledgerStore,
     })
   },
   makePylonApiStore: env => makeD1PylonApiStore(openAgentsDatabase(env)),
+  makeTipRecipientReadinessReader: env => ({
+    readForActor: actorRef =>
+      readForumTipRecipientReadinessForActor(openAgentsDatabase(env), actorRef),
+  }),
   requireAdminApiToken,
   requireBrowserSession,
 })
@@ -5446,13 +7389,473 @@ const nexusPylonVisibilityRoutes = makeNexusPylonVisibilityRoutes({
 const pylonApiRoutes = makePylonApiRoutes<WorkerBindings>({
   agentStore: env => makeD1AgentRegistrationStore(openAgentsDatabase(env)),
   makeStore: env => makeD1PylonApiStore(openAgentsDatabase(env)),
-  recordAutopilotWorkerCloseout: (env, input) =>
-    recordAutopilotWorkerCloseoutFromPylon(
+  // #5252: private operator-only store for raw Spark payout targets.
+  makeSparkPayoutTargetStore: env =>
+    makeD1PylonSparkPayoutTargetStore(openAgentsDatabase(env)),
+  recordAutopilotWorkerCloseout: async (env, input) => {
+    const delivered = await recordAutopilotWorkerCloseoutFromPylon(
       makeD1AutopilotWorkStore(openAgentsDatabase(env)),
       input,
-    ),
+    )
+
+    if (delivered?.state === 'delivered') {
+      try {
+        await sendAutopilotDecisionRequiredEmailOnce(env, delivered)
+      } catch (error) {
+        logWorkerRouteWarning('autopilot_decision_email_failed', {
+          error: errorMessage(error),
+          workOrderRef: delivered.workOrderRef,
+        })
+      }
+    }
+
+    return delivered
+  },
   requireAdminApiToken,
 })
+
+const trainingRunWindowRoutes = makeTrainingRunWindowRoutes<WorkerBindings>({
+  createVerificationChallenge: (env, request) => {
+    const built = buildTrainingVerificationChallengeRecord({
+      makeId: randomUuid,
+      nowIso: currentIsoTimestamp(),
+      request,
+    })
+
+    return makeD1TrainingVerificationStore(
+      openAgentsDatabase(env),
+    ).createChallenge(built.challenge, built.event)
+  },
+  makePayoutLedgerStore: env =>
+    makeD1NexusTreasuryPayoutLedgerStore(openAgentsDatabase(env)),
+  // REAL Bitcoin settlement wiring (openagents #5232, Gate 2). INERT by default:
+  // these are only consulted on the real branch, which is unreachable unless the
+  // owner sets OPENAGENTS_REAL_SETTLEMENT_GATE (enabled + allowlisted + capped).
+  // The rail is the proven Spark treasury payout adapter driven through the
+  // treasury payment authority (idempotency-keyed dispatch, dedupe, redaction,
+  // pause/cap/wallet-readiness gates).
+  makeSettlementPaymentAuthority: (env, context) =>
+    makeTreasuryPaymentAuthority({
+      adapters: [
+        makeSparkTreasuryPayoutAdapter({
+          fetchTreasury: fetchMdkTreasuryPath(env),
+          providerRef: context.providerRef,
+          resolveDestination: () =>
+            Effect.succeed(context.privatePayoutDestination),
+        }),
+      ],
+      ledgerStore: context.ledgerStore,
+    }),
+  // Wallet readiness for the gated payout: the treasury Spark rail is ready only
+  // when its container is reachable and reports a spendable balance. Any failure
+  // fails closed to 'absent' (no payout).
+  readSettlementWalletReadiness: async env => {
+    const fetchTreasury = fetchMdkTreasuryPath(env)
+
+    if (fetchTreasury === undefined) {
+      return 'absent'
+    }
+
+    try {
+      const response = await fetchTreasury('/spark/balance')
+
+      return response.ok ? 'ready' : 'absent'
+    } catch {
+      return 'absent'
+    }
+  },
+  // #5252: resolve the (private, never-projected) payout destination for the
+  // gated recipient (the contributor at lease.pylonRef) from the recipient's
+  // OWN registered raw Spark address. The raw `spark1…` lives only in the
+  // private operator store keyed to its pylonRef; we return it here as the
+  // native Spark send destination so #5232's real settlement (and #5225 native
+  // send) pay it natively over Spark. The destination never enters any receipt
+  // projection — only the adapter's redacted refs do.
+  //
+  // Fails closed: when the recipient has no registered Spark target (or the
+  // store read fails), this returns undefined and the real settlement branch
+  // does not send. The owner may later add a BOLT12/Lightning-Address fallback
+  // resolver here; until then, no vetted Spark target == no native send.
+  resolveSettlementPayoutDestination: (env, contributorRef) =>
+    resolveSparkPayoutDestination(
+      makeD1PylonSparkPayoutTargetStore(openAgentsDatabase(env)),
+      contributorRef,
+      pylonRef =>
+        makeD1PylonApiStore(openAgentsDatabase(env))
+          .readRegistration(pylonRef)
+          .then(registration => registration?.ownerAgentUserId),
+    ),
+  makeStore: env => makeD1TrainingAuthorityStore(openAgentsDatabase(env)),
+  requireAdminApiToken,
+})
+
+// Honest hygiene-lane settlement DISPATCH route (openagents #5372, EPIC #5335).
+// Settles ONE merged, benchmark-verified hygiene debt receipt to the
+// contributor's registered Spark target through the SAME proven #5232 Spark
+// treasury rail and the SAME owner gate as the Tassadar run settlement, but with
+// an HONEST `hygiene_merged_reviewed` verification basis (merged PR + reviewer
+// acceptance + debt receipt) instead of a fabricated exact_trace_replay verdict.
+//
+// INERT by default: with the owner gate OFF (the default everywhere) every
+// settle resolves to the simulation chain. The real branch is unreachable until
+// the owner arms OPENAGENTS_REAL_SETTLEMENT_GATE with the hygiene run-ref.
+//
+// Create-side (#5335 process step 1): POST /api/hygiene-lane/debt-receipts is
+// admin-only and persists a PAYABLE funded debt receipt in the durable D1 store
+// (one row per DebtReceiptKey, #5340). `resolveDebtReceiptProjection` reads that
+// store as the single source of truth for payability — an operator cannot assert
+// payability through the settle request body. It is fail-closed: no row, or a
+// retired row, yields a non-payable projection so the route reports
+// `debt_receipt_not_found` / `duplicate_replay` and never pays. Once real bitcoin
+// moves, the settle route marks the key retired, so a second settle on the same
+// key is `duplicate_replay`.
+const hygieneLaneSettlementRoutes =
+  makeHygieneLaneSettlementRoutes<WorkerBindings>({
+    makePayoutLedgerStore: env =>
+      makeD1NexusTreasuryPayoutLedgerStore(openAgentsDatabase(env)),
+    // REAL Bitcoin settlement wiring (openagents #5232): the SAME proven Spark
+    // treasury rail the Tassadar run settlement uses. INERT unless the gate is
+    // armed.
+    makeSettlementPaymentAuthority: (env, context) =>
+      makeTreasuryPaymentAuthority({
+        adapters: [
+          makeSparkTreasuryPayoutAdapter({
+            fetchTreasury: fetchMdkTreasuryPath(env),
+            providerRef: context.providerRef,
+            resolveDestination: () =>
+              Effect.succeed(context.privatePayoutDestination),
+          }),
+        ],
+        ledgerStore: context.ledgerStore,
+      }),
+    readSettlementWalletReadiness: async env => {
+      const fetchTreasury = fetchMdkTreasuryPath(env)
+
+      if (fetchTreasury === undefined) {
+        return 'absent'
+      }
+
+      try {
+        const response = await fetchTreasury('/spark/balance')
+
+        return response.ok ? 'ready' : 'absent'
+      } catch {
+        return 'absent'
+      }
+    },
+    resolveSettlementPayoutDestination: (env, contributorRef) =>
+      resolveSparkPayoutDestination(
+        makeD1PylonSparkPayoutTargetStore(openAgentsDatabase(env)),
+        contributorRef,
+        pylonRef =>
+          makeD1PylonApiStore(openAgentsDatabase(env))
+            .readRegistration(pylonRef)
+            .then(registration => registration?.ownerAgentUserId),
+      ),
+    // Durable, payable debt-receipt store (#5335 process step 1, #5372). The
+    // admin create endpoint (POST /api/hygiene-lane/debt-receipts) persists a
+    // payable funded receipt here; the settle route reads payability from it
+    // and marks it retired once real bitcoin moves, so a second settle on the
+    // same DebtReceiptKey reprojects to duplicate_replay.
+    makeDebtReceiptStore: env =>
+      makeD1HygieneDebtReceiptStore(openAgentsDatabase(env)),
+    // The settle route's source of truth for payability: the durable store.
+    // Fail-closed — no row (or a retired row) yields a non-payable projection,
+    // so the operator cannot assert payability through the request body.
+    resolveDebtReceiptProjection: (env, debtReceiptKeyRef) =>
+      makeD1HygieneDebtReceiptStore(openAgentsDatabase(env)).resolveProjection(
+        debtReceiptKeyRef,
+      ),
+    requireAdminApiToken,
+  })
+
+// Firm-up escrow -> real Bitcoin settlement DISPATCH route (openagents #5459,
+// EPIC #5457). Settles ONE firmed-up, EXECUTED-verified labor job to the
+// worker's registered Spark target through the SAME proven #5232 Spark treasury
+// rail and the SAME owner gate as the Tassadar + hygiene lanes, but against an
+// EXECUTED verification verdict (not a manual attestation).
+//
+// INERT by default: with the owner gate OFF (the default everywhere) every
+// settle resolves to the simulation chain. The real branch is unreachable until
+// the owner deliberately arms OPENAGENTS_REAL_SETTLEMENT_GATE with a firm-up
+// run-ref (run.firmup.lane.YYYYMMDD). No firm-up run-ref is armed by this code;
+// the first real firm-up payout is a separate, deliberate prod event.
+//
+// `resolveSettleableEscrow` is the SOURCE OF TRUTH for settleability: it reads
+// the escrow + acceptance + work request server-side. Fail-closed — the escrow
+// must be a `reserved` firm-up escrow with an accepted offer (the provider) and
+// a declared verification command. The operator cannot assert settleability
+// through the request body.
+const firmupBitcoinSettlementRoutes =
+  makeFirmupBitcoinSettlementRoutes<WorkerBindings>({
+    makePayoutLedgerStore: env =>
+      makeD1NexusTreasuryPayoutLedgerStore(openAgentsDatabase(env)),
+    resolveSettleableEscrow: (env, escrowRef) =>
+      readFirmupSettleableEscrow(openAgentsDatabase(env), escrowRef),
+    // REAL Bitcoin settlement wiring (openagents #5232): the SAME proven Spark
+    // treasury rail. INERT unless the gate is armed.
+    makeSettlementPaymentAuthority: (env, context) =>
+      makeTreasuryPaymentAuthority({
+        adapters: [
+          makeSparkTreasuryPayoutAdapter({
+            fetchTreasury: fetchMdkTreasuryPath(env),
+            providerRef: context.providerRef,
+            resolveDestination: () =>
+              Effect.succeed(context.privatePayoutDestination),
+          }),
+        ],
+        ledgerStore: context.ledgerStore,
+      }),
+    readSettlementWalletReadiness: async env => {
+      const fetchTreasury = fetchMdkTreasuryPath(env)
+
+      if (fetchTreasury === undefined) {
+        return 'absent'
+      }
+
+      try {
+        const response = await fetchTreasury('/spark/balance')
+
+        return response.ok ? 'ready' : 'absent'
+      } catch {
+        return 'absent'
+      }
+    },
+    resolveSettlementPayoutDestination: (env, contributorRef) =>
+      resolveSparkPayoutDestination(
+        makeD1PylonSparkPayoutTargetStore(openAgentsDatabase(env)),
+        contributorRef,
+        pylonRef =>
+          makeD1PylonApiStore(openAgentsDatabase(env))
+            .readRegistration(pylonRef)
+            .then(registration => registration?.ownerAgentUserId),
+      ),
+    requireAdminApiToken,
+  })
+
+// #5052 (epic #5051): agent-gated worker -> validator executor-trace completion
+// routes. These add the contributor-callable submit/verify path; they are inert
+// with respect to existing admin/closeout/settlement behavior until the pairing
+// orchestration (#5053) and Pylon client (#5054) wire them.
+const tassadarTraceContributionRoutes =
+  makeTassadarTraceContributionRoutes<WorkerBindings>({
+    agentStore: env => makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+    createVerificationChallenge: async (env, input) => {
+      const store = makeD1TrainingVerificationStore(openAgentsDatabase(env))
+      const built = buildTrainingVerificationChallengeRecord({
+        makeId: randomUuid,
+        nowIso: currentIsoTimestamp(),
+        request: input.request,
+      })
+      const created = await store.createChallenge(built.challenge, built.event)
+      const leased = leaseTrainingVerificationChallengeRecord({
+        challenge: created,
+        eventId: randomUuid(),
+        nowIso: currentIsoTimestamp(),
+        request: {
+          leaseSeconds: 60,
+          validatorRef: input.validatorDeviceRef,
+        },
+      })
+      const storedLeased = await store.leaseChallenge(
+        leased.challenge,
+        leased.event,
+      )
+      const verdict = await runTrainingVerificationClass({
+        challenge: storedLeased,
+      })
+      const finalized = finalizeTrainingVerificationChallengeRecord({
+        challenge: storedLeased,
+        eventId: randomUuid(),
+        nowIso: currentIsoTimestamp(),
+        request: { receiptRefs: [] },
+        validatorRef: input.validatorDeviceRef,
+        verdict,
+      })
+
+      return store.transitionChallenge(finalized.challenge, finalized.event)
+    },
+    makeContributionStore: env =>
+      makeD1TrainingTraceContributionStore(openAgentsDatabase(env)),
+    makeStore: env => makeD1TrainingAuthorityStore(openAgentsDatabase(env)),
+    // Hands-off auto-stream of the real per-window reward on each Verified
+    // exact_trace_replay pair (openagents #5309 + #5310): worker 5 sats AND
+    // validator 5 sats, NO operator POST. INERT until the owner arms
+    // OPENAGENTS_REAL_SETTLEMENT_GATE — every leg resolves to skip while the
+    // gate is OFF (the default everywhere). FAIL-SOFT: the verdict route wraps
+    // this in catchAll so a blocked/failed settlement never breaks the verdict.
+    onVerifiedExactTraceReplayPair: (env, input) =>
+      Effect.gen(function* () {
+        const db = openAgentsDatabase(env)
+        const ledger = makeD1NexusTreasuryPayoutLedgerStore(db)
+        const sparkTargetStore = makeD1PylonSparkPayoutTargetStore(db)
+        const contributionStore = makeD1TrainingTraceContributionStore(db)
+        const run = yield* Effect.promise(() =>
+          makeD1TrainingAuthorityStore(db).readRun(input.lease.trainingRunRef),
+        )
+
+        if (run === undefined) {
+          return
+        }
+
+        // Owner resolver for the Spark payout destination (#5306/#5310). The
+        // WORKER leg's contributorRef is the verified registered `pylonRef`, so
+        // the direct registration lookup resolves its owner. The VALIDATOR leg's
+        // contributorRef is the validator's device-ref (its nodeId) — NOT a
+        // `pylonRef` — so the direct lookup misses; we then map that device-ref
+        // to the most recent `pylon_ref` it acted as a worker under and resolve
+        // THAT pylon's owner. This binds the validator strictly to its own
+        // owning agent (its own historical worker pylon), never crosses agent
+        // ownership, and arms no new authority — it only lets the owner-scoped
+        // `readByOwner` fallback in resolveSparkPayoutDestination find the
+        // validator's OWN registered Spark target so the autostream pays it with
+        // NO operator step.
+        const resolveContributorOwnerAgentUserId = async (
+          contributorRef: string,
+        ): Promise<string | undefined> => {
+          const pylonApiStore = makeD1PylonApiStore(db)
+          const direct = await pylonApiStore
+            .readRegistration(contributorRef)
+            .then(registration => registration?.ownerAgentUserId)
+
+          if (direct !== undefined && direct.trim() !== '') {
+            return direct
+          }
+
+          const pylonRefForDevice =
+            await contributionStore.readMostRecentPylonRefByDeviceRef(
+              contributorRef,
+            )
+
+          if (pylonRefForDevice === undefined) {
+            return undefined
+          }
+
+          return pylonApiStore
+            .readRegistration(pylonRefForDevice)
+            .then(registration => registration?.ownerAgentUserId)
+        }
+
+        const settlementOutcome = yield* autoSettleVerifiedPair<WorkerBindings>(
+          {
+            dispatchRealSettlement: dispatchInput =>
+              dispatchRealRunSettlementCore<WorkerBindings>(
+                {
+                  env,
+                  makeSettlementPaymentAuthority: (authorityEnv, context) =>
+                    makeTreasuryPaymentAuthority({
+                      adapters: [
+                        makeSparkTreasuryPayoutAdapter({
+                          fetchTreasury: fetchMdkTreasuryPath(authorityEnv),
+                          providerRef: context.providerRef,
+                          resolveDestination: () =>
+                            Effect.succeed(context.privatePayoutDestination),
+                        }),
+                      ],
+                      ledgerStore: context.ledgerStore,
+                    }),
+                  readSettlementWalletReadiness: async authorityEnv => {
+                    const fetchTreasury = fetchMdkTreasuryPath(authorityEnv)
+
+                    if (fetchTreasury === undefined) {
+                      return 'absent'
+                    }
+
+                    try {
+                      const response = await fetchTreasury('/spark/balance')
+
+                      return response.ok ? 'ready' : 'absent'
+                    } catch {
+                      return 'absent'
+                    }
+                  },
+                  resolveSettlementPayoutDestination: (_authorityEnv, ref) =>
+                    resolveSparkPayoutDestination(
+                      sparkTargetStore,
+                      ref,
+                      resolveContributorOwnerAgentUserId,
+                    ),
+                },
+                {
+                  contributorRef: dispatchInput.contributorRef,
+                  ledger,
+                  settlement: dispatchInput.settlement,
+                },
+              ),
+            ledger,
+            nowIso: currentIsoTimestamp(),
+            readGate: () => readTassadarRealSettlementGate(env),
+            resolvePayoutDestination: ref =>
+              resolveSparkPayoutDestination(
+                sparkTargetStore,
+                ref,
+                resolveContributorOwnerAgentUserId,
+              ),
+            run,
+          },
+          {
+            challenge: input.challenge,
+            lease: input.lease,
+            validatorContributorRef: input.validatorContributorRef,
+          },
+        )
+
+        // ADDITIVE + FAIL-SOFT live settled feed (openagents #5311): broadcast
+        // ONE public-safe event per actually-settled leg onto the public sync
+        // room so the homepage updates in real-time as sats stream. This never
+        // touches the settlement dispatch above; any failure is swallowed so a
+        // broadcast problem can never break or slow settlement.
+        const settledLegs = settlementOutcome.legs.filter(leg => leg.settled)
+
+        if (settledLegs.length > 0) {
+          const settledAt = currentIsoTimestamp()
+          const workerContributorRef = input.lease.pylonRef.trim()
+          const contributorRefForParty = (party: 'validator' | 'worker') =>
+            party === 'worker'
+              ? workerContributorRef
+              : input.validatorContributorRef.trim()
+          const dayReceipts = yield* Effect.tryPromise({
+            catch: () => [],
+            try: () => ledger.listPaymentAuthorityReceipts(5000),
+          }).pipe(Effect.orElseSucceed(() => []))
+          const priorSettledSats =
+            tassadarRealSettledSatsForDay(
+              dayReceipts,
+              tassadarRealSettlementUtcDayKey(settledAt),
+            ) - settledLegs.reduce((sum, leg) => sum + leg.amountSats, 0)
+          const events = buildSettledFeedEvents({
+            legs: settledLegs.map(leg => ({
+              amountSats: leg.amountSats,
+              challengeRef: input.challenge.challengeRef,
+              contributorRef: contributorRefForParty(leg.party),
+              party: leg.party,
+              runRef: run.trainingRunRef,
+              windowRef: input.lease.windowRef,
+            })),
+            priorCount: 0,
+            priorSettledSats: Math.max(0, priorSettledSats),
+            settledAt,
+          })
+
+          yield* Effect.promise(() =>
+            publishSettledFeedEvents(env, events).catch(() => undefined),
+          )
+        }
+      }),
+    resolvePylonOwnerUserId: async (env, pylonRef) => {
+      const registration = await makeD1PylonApiStore(
+        openAgentsDatabase(env),
+      ).readRegistration(pylonRef)
+
+      return registration?.ownerAgentUserId
+    },
+  })
+
+const trainingVerificationRoutes =
+  makeTrainingVerificationRoutes<WorkerBindings>({
+    makeStore: env => makeD1TrainingVerificationStore(openAgentsDatabase(env)),
+    requireAdminApiToken,
+  })
 
 const omniRoutes = makeOmniRoutes({
   handleAutopilotFleetApi: (request, env, ctx) =>
@@ -5467,6 +7870,18 @@ const omniRoutes = makeOmniRoutes({
     routeEffect('handle_billing_checkout_api', () =>
       billingApiHandlers.handleBillingCheckoutApi(request, env, ctx),
     ),
+  handleBillingInferenceCreditApi: (request, env, ctx) =>
+    routeEffect('handle_billing_inference_credit_api', () =>
+      billingApiHandlers.handleBillingInferenceCreditApi(request, env, ctx),
+    ),
+  handleBillingAutoTopUpPolicyApi: (request, env, ctx) =>
+    routeEffect('handle_billing_auto_top_up_policy_api', () =>
+      billingApiHandlers.handleBillingAutoTopUpPolicyApi(request, env, ctx),
+    ),
+  handleBillingAutoTopUpRunApi: (request, env, ctx) =>
+    routeEffect('handle_billing_auto_top_up_run_api', () =>
+      billingApiHandlers.handleBillingAutoTopUpRunApi(request, env, ctx),
+    ),
   handleBillingCouponRedeemApi: (request, env, ctx) =>
     routeEffect('handle_billing_coupon_redeem_api', () =>
       billingApiHandlers.handleBillingCouponRedeemApi(request, env, ctx),
@@ -5480,6 +7895,18 @@ const omniRoutes = makeOmniRoutes({
       billingApiHandlers.handleBillingStripeCheckoutReturnApi(
         request,
         environment,
+      ),
+    ),
+  handleBillingStripeSetupIntentApi: (request, env, ctx) =>
+    routeEffect('handle_billing_stripe_setup_intent_api', () =>
+      billingApiHandlers.handleBillingStripeSetupIntentApi(request, env, ctx),
+    ),
+  handleBillingStripeSetupIntentSaveApi: (request, env, ctx) =>
+    routeEffect('handle_billing_stripe_setup_intent_save_api', () =>
+      billingApiHandlers.handleBillingStripeSetupIntentSaveApi(
+        request,
+        env,
+        ctx,
       ),
     ),
   handleBillingStripeWebhookApi: (request, environment) =>
@@ -5525,6 +7952,13 @@ const omniRoutes = makeOmniRoutes({
   handleOmniOperatorBillingCreditsApi: (request, env) =>
     routeEffect('handle_omni_operator_billing_credits_api', () =>
       operatorBillingHandlers.handleOmniOperatorBillingCreditsApi(request, env),
+    ),
+  handleOmniOperatorInferenceCreditApi: (request, env) =>
+    routeEffect('handle_omni_operator_inference_credit_api', () =>
+      operatorBillingHandlers.handleOmniOperatorInferenceCreditApi(
+        request,
+        env,
+      ),
     ),
   handleOmniOperatorDeploymentsApi: (request, env) =>
     routeEffect('handle_omni_operator_deployments_api', () =>
@@ -5583,7 +8017,144 @@ const recordPublicAgentFunnelRead = (
   )
 }
 
-const exactRoutes: ReadonlyArray<ExactRoute<Env>> = [
+// Inference gateway provider registry (EPIC #5474, #5476). Seeded with the
+// stub/echo adapter so the route works end-to-end while the gateway is inert.
+// Phase-2 provider issues register their adapter exactly once here:
+//   #5479 Fireworks, #5480 Vertex Anthropic, #5481 partner passthrough.
+const inferenceProviderRegistry = new InferenceProviderRegistry()
+inferenceProviderRegistry.register(stubEchoAdapter)
+inferenceProviderRegistry.register(fireworksAdapter)
+
+// Partner passthrough adapters (#5481). Registered from Worker secrets at
+// request time (env is per-request in Workers); `register` replaces by id, so
+// repeated calls are idempotent. INERT under the flag: when a partner secret is
+// absent the adapter is never registered, and even when registered the route is
+// only reachable with INFERENCE_GATEWAY_ENABLED on. The redacted key never
+// leaves this closure except onto the outbound partner request header.
+const passthroughAdaptersRegistered = new WeakSet<object>()
+
+// Only the partner-secret slice of the Worker env is read here, so we accept a
+// narrow shape rather than the full Cloudflare `Env` (which the zero-debt check
+// keeps off new business surfaces).
+type PassthroughSecretsEnv = Readonly<{
+  ANTHROPIC_API_KEY?: string | undefined
+  ANTHROPIC_BASE_URL?: string | undefined
+  OPENAI_API_KEY?: string | undefined
+  OPENAI_BASE_URL?: string | undefined
+}>
+
+const registerPassthroughAdapters = (
+  registry: InferenceProviderRegistry,
+  env: PassthroughSecretsEnv,
+): void => {
+  if (passthroughAdaptersRegistered.has(env)) {
+    return
+  }
+  passthroughAdaptersRegistered.add(env)
+
+  const anthropicKey = env.ANTHROPIC_API_KEY?.trim()
+  if (anthropicKey !== undefined && anthropicKey !== '') {
+    const config: PassthroughAdapterConfig = {
+      apiKey: Redacted.make(anthropicKey),
+      baseUrl: env.ANTHROPIC_BASE_URL?.trim() || 'https://api.anthropic.com',
+      id: 'passthrough-anthropic',
+      wireFormat: 'anthropic',
+    }
+    registry.register(makePassthroughAdapter(config))
+  }
+
+  const openaiKey = env.OPENAI_API_KEY?.trim()
+  if (openaiKey !== undefined && openaiKey !== '') {
+    const config: PassthroughAdapterConfig = {
+      apiKey: Redacted.make(openaiKey),
+      baseUrl: env.OPENAI_BASE_URL?.trim() || 'https://api.openai.com',
+      id: 'passthrough-openai',
+      wireFormat: 'openai',
+    }
+    registry.register(makePassthroughAdapter(config))
+  }
+}
+
+// Per-request env holder for env-dependent inference adapters. A Cloudflare
+// Worker has no env at module scope, so the module-level adapter registry reads
+// the live env (set by the /v1/chat/completions handler before dispatch) when
+// it needs to mint credentials. Within a single request the isolate is
+// single-threaded, so this is not racy.
+// Typed as OpenAgentsWorkerConfigEnv (a subset of the full worker env) so this
+// holder reads only the VERTEX_* config fields it needs, not the full
+// Cloudflare binding surface.
+let inferenceAdapterEnv: OpenAgentsWorkerConfigEnv | undefined
+const setInferenceAdapterEnv = (env: OpenAgentsWorkerConfigEnv): void => {
+  inferenceAdapterEnv = env
+}
+
+// #5480 Vertex Anthropic (Claude lane) — registered exactly once. INERT until
+// the VERTEX_SA_KEY Worker secret is present: with no key, `tokenProvider` is
+// undefined and every call returns a typed non-retryable error (mapped by the
+// route to a stable provider_error). The route itself stays flag-gated off via
+// INFERENCE_GATEWAY_ENABLED. Project/location/key are read from the live env at
+// call time via the per-request holder above.
+inferenceProviderRegistry.register(
+  makeVertexAnthropicAdapter({
+    // Lane defaults: project openagentsgemini, global location (broadest
+    // shared-lineage quota, no regional premium — gateway business doc §3a).
+    // VERTEX_PROJECT_ID / VERTEX_LOCATION env overrides are reserved for a
+    // follow-up; the module-level registry is constructed once, before any env
+    // is captured, so it pins these defaults.
+    location: 'global',
+    project: 'openagentsgemini',
+    resolveModelId: undefined,
+    tokenProvider: () => {
+      const env = inferenceAdapterEnv
+      const provider =
+        env === undefined
+          ? undefined
+          : tokenProviderFromSecret(env.VERTEX_SA_KEY)
+      return provider === undefined
+        ? Effect.fail(
+            new InferenceAdapterError({
+              adapterId: VERTEX_ANTHROPIC_ADAPTER_ID,
+              reason:
+                'Vertex Anthropic adapter is not configured (missing VERTEX_SA_KEY).',
+              retryable: false,
+            }),
+          )
+        : provider()
+    },
+  }),
+)
+
+// Vertex Gemini (Google's own model) — the default/free-tier lane (Gemini 3.5
+// Flash). Registered exactly once, sharing the SAME VERTEX_SA_KEY token path as
+// the Anthropic lane. INERT until the secret is present: with no key the adapter
+// returns a typed non-retryable error, and the route stays flag-gated off via
+// INFERENCE_GATEWAY_ENABLED. Project/location pin the same lane defaults.
+inferenceProviderRegistry.register(
+  makeVertexGeminiAdapter({
+    location: 'global',
+    project: 'openagentsgemini',
+    resolveModelId: undefined,
+    tokenProvider: () => {
+      const env = inferenceAdapterEnv
+      const provider =
+        env === undefined
+          ? undefined
+          : tokenProviderFromSecret(env.VERTEX_SA_KEY)
+      return provider === undefined
+        ? Effect.fail(
+            new InferenceAdapterError({
+              adapterId: VERTEX_GEMINI_ADAPTER_ID,
+              reason:
+                'Vertex Gemini adapter is not configured (missing VERTEX_SA_KEY).',
+              retryable: false,
+            }),
+          )
+        : provider()
+    },
+  }),
+)
+
+const exactRouteRegistry = makeExactRouteRegistry<Env>([
   {
     path: '/',
     handler: (request, env, ctx) =>
@@ -5592,6 +8163,60 @@ const exactRoutes: ReadonlyArray<ExactRoute<Env>> = [
   {
     path: '/api/public/home',
     handler: request => handlePublicHomeApi(request),
+  },
+  {
+    path: '/api/public/business-signup',
+    handler: (request, env) =>
+      handleBusinessSignupApi(request, openAgentsDatabase(env)),
+  },
+  {
+    path: '/api/public/tassadar-run-summary',
+    handler: (request, env) =>
+      Effect.promise(() =>
+        buildPublicTassadarRunSummaryEnvelopeForRequest(request, env),
+      ).pipe(Effect.map(envelope => noStoreJsonResponse(envelope))),
+  },
+  {
+    path: TrainingPublicDistributedRunScaleEndpoint,
+    handler: (request, env) =>
+      handleTrainingPublicDistributedRunScaleApi(request, env),
+  },
+  {
+    path: PylonLargestDecentralizedTrainingClaimEndpoint,
+    handler: (request, env) =>
+      handlePylonLargestDecentralizedTrainingClaimStatusApi(request, env),
+  },
+  {
+    path: '/api/public/activity-timeline',
+    handler: (request, env) =>
+      handlePublicActivityTimelineApiForEnv(request, env),
+  },
+  {
+    path: '/api/public/activity-timeline/stream',
+    handler: (request, env) =>
+      handlePublicActivityTimelineStreamApiForEnv(request, env),
+  },
+  {
+    path: '/api/public/forum-activity',
+    handler: (request, env) =>
+      handlePublicForumActivityApiForEnv(request, env),
+  },
+  {
+    path: TASSADAR_COMPILED_MODULE_MARKETPLACE_ROUTE,
+    handler: () =>
+      Effect.promise(() =>
+        buildPublicTassadarCompiledModuleMarketplaceEnvelope(),
+      ).pipe(Effect.map(envelope => noStoreJsonResponse(envelope))),
+  },
+  {
+    path: '/api/public/tassadar-replays/first-real-settlement',
+    handler: (request, env) =>
+      Effect.promise(() => handlePublicProofReplayBundleRequest(request, env)),
+  },
+  {
+    path: '/api/public/proof-replays',
+    handler: (request, env) =>
+      Effect.promise(() => handlePublicProofReplayBundleRequest(request, env)),
   },
   {
     path: '/api/public/product-promises',
@@ -5606,6 +8231,330 @@ const exactRoutes: ReadonlyArray<ExactRoute<Env>> = [
       }),
   },
   {
+    // Enterprise claim-upgrade audit projection (proof.claim_upgrade_receipts.v1).
+    // Read-only: joins the transition-receipt feed against the live registry so
+    // a third party can audit every green flip (promiseId, from->to,
+    // registryVersion, receiptRef, lastVerifiedAt) with filtering + summary.
+    path: '/api/public/product-promises/audit',
+    handler: (request, env) =>
+      handlePublicPromiseAuditApi(request, {
+        store: makeD1PromiseTransitionReceiptStore(openAgentsDatabase(env)),
+      }),
+  },
+  {
+    path: '/api/public/metrics/accepted-outcomes-per-kwh',
+    handler: request => handleAcceptedOutcomesPerKwhApi(request),
+  },
+  {
+    // Contributor accrual bundle dereference, addressed by accepted-outcome
+    // economics id (?economicsId=...) for payments.accepted_outcome_economics.v1
+    // (blocker.product_promises.contributor_ledger_missing). Read-only public
+    // projection: returns the reconciled gross-margin receipt + contributor
+    // accrual ledger with lifecycle/evidence labels visible and internal monetary
+    // figures dropped. No dispatch, spend, settlement, or payout — every entry's
+    // payable/settlement state stays honestly not_yet_evidenced.
+    path: '/api/public/payments/contributor-accrual-bundle',
+    handler: (request, env) =>
+      handleOmniContributorAccrualBundleApi(request, openAgentsDatabase(env)),
+  },
+  {
+    // Full training-pipeline program status (#5523 / DE-5 #5528; promise
+    // training.full_pipeline_program.v1, planned). Read-only stage map: exposes
+    // current stage receipt surfaces and blockers while keeping the umbrella
+    // blocker active. No dispatch, spend, settlement, model promotion, or green
+    // claim.
+    path: TrainingFullPipelineProgramEndpoint,
+    handler: request => handleTrainingFullPipelineProgramApi(request),
+  },
+  {
+    // Marathon-operations status projection (#5523 / DE-5 #5528; promise
+    // training.marathon_operations.v1, planned). Read-only status surface:
+    // exposes durable-seal and standby predicates while real checkpoint
+    // read-back, standby-promotion, and curtailment-drill receipts remain false.
+    path: TrainingMarathonOperationsEndpoint,
+    handler: request => handleTrainingMarathonOperationsApi(request),
+  },
+  {
+    // Model-ladder rung status projection (#5523 / DE-5 #5528; promise
+    // training.model_ladder.v1, planned). Read-only ladder surface: exposes R0,
+    // the published R1 closeout criteria, and the economics-gate format while
+    // keeping R1/R2 closeout receipts and green authority false.
+    path: TrainingModelLadderRungsEndpoint,
+    handler: request => handleTrainingModelLadderRungsApi(request),
+  },
+  {
+    // Public gradient-window status projection (#5523 / DE-5 #5528; promise
+    // training.public_gradient_windows.v1, planned). Read-only regime/receipt
+    // surface: exposes the gate and promoted-window receipt emitter while no
+    // live public window, promotion receipt, settlement, or green claim exists.
+    path: TrainingPublicGradientWindowsEndpoint,
+    handler: request => handleTrainingPublicGradientWindowsApi(request),
+  },
+  {
+    // Training ablation derisking ledger projection (#5523 / DE-5 #5528;
+    // promise training.ablation_system.v1, planned). Read-only candidate
+    // ledger: clears the projection + one-delta harness + eval-reproduction
+    // blockers while paid dispatch and verdict gates remain false. No ablation
+    // execution, spend, settlement, model promotion, or green claim.
+    path: TrainingAblationDeriskingLedgerEndpoint,
+    handler: request => handleTrainingAblationDeriskingLedgerApi(request),
+  },
+  {
+    // Post-training instruct SFT lane receipt (#5523 / DE-5 #5528;
+    // promise training.post_training_arc.v1, planned). Read-only fixture-scale
+    // lane receipt: clears only the generic instruct-SFT lane blocker while
+    // paid dispatch, preference rollout, and vibe-test gates remain false. No
+    // assignment, spend, settlement, model promotion, service, or green claim.
+    path: TrainingPostTrainingInstructSftEndpoint,
+    handler: request => handleTrainingPostTrainingInstructSftApi(request),
+  },
+  {
+    // Post-training DPO preference workload projection (#5523 / DE-5 #5528;
+    // promise training.post_training_arc.v1, planned). Read-only deterministic
+    // reference grading receipt: exposes the DPO pair workload while paid
+    // preference dispatch, real log-probs, settlement, and green gates remain
+    // false. No assignment, spend, model update, service, or green claim.
+    path: TrainingPostTrainingDpoPreferenceWorkloadEndpoint,
+    handler: request =>
+      handleTrainingPostTrainingDpoPreferenceWorkloadApi(request),
+  },
+  {
+    // Post-training vibe-test rubric projection (#5523 / DE-5 #5528; promise
+    // training.post_training_arc.v1, planned). Read-only deterministic rubric
+    // and fixture closeout digest; real model transcripts, reviewer signature,
+    // promotion, service, and green gates remain false. No assignment, spend,
+    // settlement, model promotion, reviewed artifact, or green claim.
+    path: TrainingPostTrainingVibeTestRubricEndpoint,
+    handler: request => handleTrainingPostTrainingVibeTestRubricApi(request),
+  },
+  {
+    // Tassadar Percepta executor architecture receipts (#5523 / DE-5 #5528;
+    // promise models.tassadar_percepta_executor.v1, red). Read-only refs and
+    // digest projection: clears only the architecture-receipt blocker while
+    // Pylon CPU-transform training receipts remain missing. No trained model,
+    // inference endpoint, spend, settlement, promotion, or green claim.
+    path: TassadarPerceptaArchitectureReceiptsEndpoint,
+    handler: request => handleTassadarPerceptaArchitectureReceiptsApi(request),
+  },
+  {
+    path: '/api/public/demand-provenance',
+    handler: request => handleDemandProvenanceApi(request),
+  },
+  {
+    path: '/api/public/markets/open-markets',
+    handler: request => handleOpenMarketsSurfaceApi(request),
+  },
+  {
+    path: '/api/public/markets/liquidity/skeleton',
+    handler: request => handleLiquidityMarketSkeletonApi(request),
+  },
+  {
+    path: '/api/public/markets/risk/skeleton',
+    handler: request => handleRiskMarketSkeletonApi(request),
+  },
+  {
+    // Compose-and-list marketplace MVP listing surface (#5510, #5515). INERT:
+    // the store is empty unless MARKETPLACE_COMPOSE_AND_LIST_ENABLED is armed,
+    // and the response always reports inert/planned. Read-only.
+    path: MarketplaceComposeListEndpoint,
+    handler: (request, env) =>
+      handleMarketplaceCompositionApi(request, {
+        enabled: isMarketplaceComposeAndListEnabled(
+          env.MARKETPLACE_COMPOSE_AND_LIST_ENABLED,
+        ),
+      }),
+  },
+  {
+    // Signature usage-metering surface (#5523 / DE-6 #5529; promise
+    // marketplace.signature_monetization.v1, red). INERT: the store is empty
+    // unless SIGNATURE_USAGE_METERING_ENABLED is armed, and the response always
+    // reports inert/red with the settlement blocker still open. It PRODUCES the
+    // public-safe usage-evidence refs the signature revenue gate consumes
+    // (clearing blocker.product_promises.signature_usage_metering_missing) and
+    // makes no live-revenue or settlement claim. Read-only.
+    path: SignatureUsageMeteringEndpoint,
+    handler: (request, env) =>
+      handleSignatureUsageMeteringApi(request, {
+        enabled: isSignatureUsageMeteringEnabled(
+          env.SIGNATURE_USAGE_METERING_ENABLED,
+        ),
+      }),
+  },
+  {
+    // Pylon multi-earning-node projection (#5523 / DE-4 #5527; promise
+    // pylon.v0_3_multi_earning_node.v1, red). INERT: the store is empty unless
+    // PYLON_MULTI_EARNING_PROJECTION_ENABLED is armed, and the response always
+    // reports inert/red. It is the safe public projection deliverable — it
+    // distinguishes modeled/observed/pending/paid/settled amounts per earning
+    // mode (clearing blocker.product_promises.safe_public_projection_missing)
+    // and surfaces the install/receipt/settlement blockers as still owner-gated.
+    // It records no earnings, moves no money, and makes no install-closed or
+    // live-earning claim. Read-only.
+    path: PylonMultiEarningNodeEndpoint,
+    handler: (request, env) =>
+      handlePylonMultiEarningNodeApi(request, {
+        enabled: isPylonMultiEarningProjectionEnabled(
+          env.PYLON_MULTI_EARNING_PROJECTION_ENABLED,
+        ),
+      }),
+  },
+  {
+    // Mobile workroom approval projection (promise
+    // mobile.voice_approval_companion.v1, yellow). INERT by default: the store
+    // is empty unless MOBILE_WORKROOM_APPROVAL_PROJECTION_ENABLED is armed. When
+    // armed it returns the existing read-only mobile approval-card projection:
+    // no approval, execution, notification, payment, provider mutation, runner
+    // launch, or public-claim upgrade. This clears ONLY
+    // blocker.product_promises.mobile_projection_missing; voice-command
+    // approval receipts and cross-device sync stay open, and the promise stays
+    // yellow. GET only.
+    path: MobileWorkroomApprovalProjectionEndpoint,
+    handler: (request, env) =>
+      handleMobileWorkroomApprovalProjectionApi(request, {
+        enabled: isMobileWorkroomApprovalProjectionEnabled(
+          env.MOBILE_WORKROOM_APPROVAL_PROJECTION_ENABLED,
+        ),
+        nowIso: currentIsoTimestamp,
+      }),
+  },
+  {
+    // Omni client-delivery business-object projection (DE-9 / EPIC #5532;
+    // promise workrooms.omni_client_delivery_workrooms.v1, yellow). INERT by
+    // default: the store is empty unless OMNI_CLIENT_DELIVERY_PROJECTION_ENABLED
+    // is armed. When armed it projects the existing source-authorized
+    // business-object delivery seam (buildOmniBusinessObjectDeliveryPlan) over
+    // an injected client-delivery workroom store: per-write approval-gated
+    // decisions plus the integration gate verdict. It applies no write, sends,
+    // settles, spends, mutates a connector, notifies, launches a runner, or
+    // upgrades a public claim (effectsApplied is always false). This clears ONLY
+    // blocker.product_promises.omni_client_delivery_projection_missing; the
+    // live-integration, owner-sign-off, and closeout-receipt blockers stay
+    // owner-gated and the promise stays yellow. GET only.
+    path: OmniClientDeliveryProjectionEndpoint,
+    handler: (request, env) =>
+      Effect.succeed(
+        handleOmniClientDeliveryProjectionApi(request, {
+          enabled: isOmniClientDeliveryProjectionEnabled(
+            env.OMNI_CLIENT_DELIVERY_PROJECTION_ENABLED,
+          ),
+          nowIso: currentIsoTimestamp,
+        }),
+      ),
+  },
+  {
+    // Voice-session transcript ingestion endpoint (#5523 / DE-7 #5530; promise
+    // mobile.voice_session_evidence_transcript_ingest.v1, red). INERT by
+    // default: when VOICE_PROGRAM_INGEST_ENABLED is OFF the endpoint returns an
+    // honest inert/red payload and never runs the ingest core. When armed it
+    // decodes already-transcribed, redacted, ref-only segments and runs the
+    // existing pure buildVoiceProgramIngestProposal core to return an
+    // approval-gated program-input proposal (no STT, no audio capture, no
+    // mutation, no execution, no settlement). This clears ONLY
+    // blocker.product_promises.voice_ingestion_endpoint_missing; the
+    // transcription-service and approval-UI blockers stay owner/product-gated
+    // and the promise stays red. POST only.
+    path: VoiceProgramIngestEndpoint,
+    handler: (request, env) =>
+      Effect.promise(() =>
+        handleVoiceProgramIngestApi(request, {
+          enabled: isVoiceProgramIngestEnabled(
+            env.VOICE_PROGRAM_INGEST_ENABLED,
+          ),
+        }),
+      ),
+  },
+  {
+    // Autopilot all-in-one composed-run scaffold (#5510, #5519). INERT: the
+    // store is empty unless AUTOPILOT_COMPOSED_RUN_ENABLED is armed, and the
+    // response always reports inert/planned over BOTH capstone promises
+    // (autopilot.all_in_one_business_system.v1 + cloud.primitives_suite.v1). It
+    // shows the composition shape (one balance, one receipt envelope across the
+    // primitive scaffolds) and makes no live/billable claim. Read-only.
+    path: AutopilotComposedRunEndpoint,
+    handler: (request, env) =>
+      handleAutopilotComposedRunApi(request, {
+        enabled: isAutopilotComposedRunEnabled(
+          env.AUTOPILOT_COMPOSED_RUN_ENABLED,
+        ),
+      }),
+  },
+  {
+    // Agentic labor-product flow scaffold (promise
+    // autopilot.agentic_labor_products.v1, yellow). INERT: the store is empty
+    // unless AGENTIC_LABOR_PRODUCTS_ENABLED is armed, and the response always
+    // reports inert/yellow. It models the end-to-end labor-product flow (post ->
+    // order -> dispatch -> deliver -> settle) with a settlement receipt seam that
+    // is flag-gated INERT and owner-gated; it makes no live-sale claim.
+    // GET lists flows (read-only); GET ?receiptRef= dereferences a published
+    // settlement receipt (empty store in prod => receipt:null, INERT);
+    // GET ?view=real-sale-claims surfaces the claim-upgrade verdict over
+    // published evidence bundles (empty store in prod => nothing substantiated,
+    // blocker surfaced, never flips a promise). POST is
+    // the SELF-SERVE order-planning path: a buyer/agent posts a listing and
+    // orders it in one request and gets back the typed `ordered`-stage flow plan
+    // with no operator staging (still INERT — dispatches nothing, debits nothing,
+    // settles nothing). POST returns 503 unless the flag is armed.
+    path: AgenticLaborProductEndpoint,
+    handler: (request, env) =>
+      handleAgenticLaborProductApi(request, {
+        enabled: isAgenticLaborProductsEnabled(
+          env.AGENTIC_LABOR_PRODUCTS_ENABLED,
+        ),
+      }),
+  },
+  {
+    // Coding quick win self-serve pipeline orchestrator (promise business.coding_quick_win.v1).
+    // POST is the self-serve path: accepts step-by-step evidence (scope,
+    // provisioning, invocation, delivery, acceptance, payment) and returns
+    // a valid receipt. INERT: it creates no new state, moves no money, and
+    // serves strictly to orchestrate verifiable structures into a pipeline.
+    path: CodingQuickWinPipelineEndpoint,
+    handler: (request) => handleCodingQuickWinPipelineApi(request),
+  },
+  {
+    // Self-serve control-center fanout scaffold (promise
+    // autopilot.control_center_fanout_marketplace.v1, yellow). INERT: the store
+    // is empty unless SELF_SERVE_FANOUT_ENABLED is armed, and the response
+    // always reports inert/yellow/selfServe with workClass code_task. It models
+    // a customer-initiated single-action fanout plan (gate decision + the linked
+    // market work-request the fanout would list) over the existing lane-C gate;
+    // the dispatch seam (dispatchSelfServeFanout) lists nothing. It clears only
+    // the self-serve blocker (the plugin-marketplace-beyond-code_task blocker
+    // stays uncleared) and makes no broad-live-marketplace claim. Read-only.
+    path: SelfServeFanoutEndpoint,
+    handler: (request, env) =>
+      handleSelfServeFanoutApi(request, {
+        enabled: isSelfServeFanoutEnabled(env.SELF_SERVE_FANOUT_ENABLED),
+      }),
+  },
+  {
+    // Marketplace work-class catalog (promise
+    // autopilot.control_center_fanout_marketplace.v1, yellow). Read-only registry
+    // view: it lists every registered work class with its status, names the single
+    // live class (code_task), and always reports the still-uncleared
+    // plugin-marketplace-beyond-code_task blocker. No flag, no store, nothing
+    // executable — the projection's assertCatalogInvariants throws rather than let
+    // any plugin class silently flip live. Makes no broad-live-marketplace claim.
+    path: MarketplaceWorkClassCatalogEndpoint,
+    handler: request => handleMarketplaceWorkClassCatalogApi(request),
+  },
+  {
+    path: CustomerOneCohortEndpoint,
+    handler: (request, env) =>
+      handlePublicCustomerOneCohortApi(request, {
+        store: makeD1CustomerOneCohortRowStore(openAgentsDatabase(env)),
+      }),
+  },
+  {
+    path: '/api/operator/customer-one-cohort/rows',
+    handler: (request, env) =>
+      handleOperatorCustomerOneCohortRowsApi(request, {
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+        store: makeD1CustomerOneCohortRowStore(openAgentsDatabase(env)),
+      }),
+  },
+  {
     path: '/api/operator/product-promises/transitions',
     handler: (request, env) =>
       handleOperatorPromiseTransitionApi(request, {
@@ -5614,12 +8563,194 @@ const exactRoutes: ReadonlyArray<ExactRoute<Env>> = [
       }),
   },
   {
+    path: '/api/operator/artanis/mind/smoke',
+    handler: (request, env) =>
+      Effect.gen(function* () {
+        if (request.method !== 'POST') {
+          return noStoreJsonResponse(
+            { error: 'method_not_allowed' },
+            { status: 405 },
+          )
+        }
+        const authorized = yield* Effect.promise(() =>
+          requireAdminApiToken(request, env),
+        )
+        if (!authorized) {
+          return noStoreJsonResponse({ error: 'unauthorized' }, { status: 401 })
+        }
+        const apiKey = (env as { GEMINI_API_KEY?: string }).GEMINI_API_KEY
+        if (apiKey === undefined || apiKey === '') {
+          return noStoreJsonResponse(
+            { error: 'gemini_api_key_missing' },
+            { status: 503 },
+          )
+        }
+        const body = yield* Effect.promise(async () => {
+          try {
+            return (await request.json()) as {
+              forumPost?: boolean
+              gatewayId?: string
+              model?: string
+              prompt?: string
+            }
+          } catch {
+            return {}
+          }
+        })
+        const prompt =
+          body.prompt ??
+          'State in one sentence what the Artanis administrator should verify before dispatching executor-trace work to an idle Pylon.'
+        const gatewayToken = (env as { CF_AIG_TOKEN?: string }).CF_AIG_TOKEN
+        const result = yield* Effect.promise(() =>
+          artanisMindComplete({
+            apiKey,
+            ...(body.gatewayId === undefined
+              ? {}
+              : { gatewayId: body.gatewayId }),
+            ...(gatewayToken === undefined || gatewayToken === ''
+              ? {}
+              : { gatewayToken }),
+            ...(body.model === undefined ? {} : { model: body.model }),
+            prompt,
+            system: ArtanisMindSmokeSystem,
+          }),
+        )
+        if ('error' in result) {
+          return noStoreJsonResponse(result, { status: 502 })
+        }
+        let forumPost: { postRef?: string; error?: string } | null = null
+        if (body.forumPost === true) {
+          // In-process delivery through the shipped Artanis publication
+          // queue (never fetch-to-self): the mind's decision lands as an
+          // Artanis status post in forum.public.artanis.
+          const nowIso = currentIsoTimestamp()
+          const suffix = nowIso.replace(/[-:]/g, '').slice(0, 13)
+          const intent = new ArtanisForumPublicationIntentRecord({
+            ...exampleArtanisForumPublicationQueue().intents[0]!,
+            artifactRefs: ['artifact.public.artanis.mind_smoke'],
+            bodyText: [
+              'Automated update from the Artanis cloud mind running inside the OpenAgents worker.',
+              `Inference served via ${result.servedVia}${result.gatewayId === null ? '' : ` (gateway ${result.gatewayId})`}, model ${result.model}.`,
+              `Decision sample: ${result.text.slice(0, 400)}`,
+              'Boundary: the mind proposes; typed schemas validate; approval gates hold.',
+            ].join(' '),
+            createdAtIso: nowIso,
+            deliveredAtIso: null,
+            deliveryReceiptRefs: [],
+            deliveryState: 'ready' as const,
+            goalRefs: ['goal.public.artanis.cloud_mind_smoke'],
+            idempotencyKey: `artanis-forum:mind-smoke:${suffix}:v1`,
+            intentRef: `forum.public.artanis.mind_smoke_intent.${suffix}`,
+            postRef: null,
+            receiptRefs: ['receipt.public.artanis.mind_smoke'],
+            updatedAtIso: nowIso,
+          })
+          forumPost = yield* saveArtanisForumPublicationIntent(
+            openAgentsDatabase(env),
+            intent,
+            nowIso,
+          ).pipe(
+            Effect.flatMap(() =>
+              deliverArtanisForumPublicationIntent(
+                openAgentsDatabase(env),
+                intent,
+              ),
+            ),
+            Effect.map((post): { postRef?: string; error?: string } => ({
+              postRef: post.postRef,
+            })),
+            Effect.catch(error =>
+              Effect.succeed({
+                error: `forum_delivery_failed: ${String(
+                  (error as { reason?: string }).reason ?? error,
+                )}`.slice(0, 160),
+              }),
+            ),
+          )
+        }
+        return noStoreJsonResponse({
+          forumPost,
+          gatewayId: result.gatewayId,
+          model: result.model,
+          promptChars: result.promptChars,
+          responseChars: result.responseChars,
+          servedVia: result.servedVia,
+          text: result.text.slice(0, 600),
+        })
+      }),
+  },
+  {
+    path: '/api/operator/tassadar/replay',
+    handler: (request, env) =>
+      Effect.promise(async () => {
+        if (request.method !== 'POST') {
+          return noStoreJsonResponse(
+            { error: 'method_not_allowed' },
+            { status: 405 },
+          )
+        }
+        if (!(await requireAdminApiToken(request, env))) {
+          return noStoreJsonResponse({ error: 'unauthorized' }, { status: 401 })
+        }
+        try {
+          const body = S.decodeUnknownSync(TassadarReplayRequest)(
+            await request.json(),
+          )
+          const verdict = await runTassadarReplayValidation(body)
+          return noStoreJsonResponse({ verdict })
+        } catch (error) {
+          return noStoreJsonResponse(
+            {
+              error: 'bad_request',
+              reason: error instanceof Error ? error.message : String(error),
+            },
+            { status: 400 },
+          )
+        }
+      }),
+  },
+  {
+    path: '/api/operator/buy-mode',
+    handler: (request, env) =>
+      operatorBuyModeRoutes.handleOperatorBuyModeStatusApi(request, env),
+  },
+  {
+    path: '/api/operator/buy-mode/start',
+    handler: (request, env) =>
+      operatorBuyModeRoutes.handleOperatorBuyModeStartApi(request, env),
+  },
+  {
+    path: '/api/operator/buy-mode/stop',
+    handler: (request, env) =>
+      operatorBuyModeRoutes.handleOperatorBuyModeStopApi(request, env),
+  },
+  {
+    path: '/api/operator/buy-mode/dispatch',
+    handler: (request, env) =>
+      operatorBuyModeRoutes.handleOperatorBuyModeDispatchApi(request, env),
+  },
+  {
+    path: '/api/operator/buy-mode/results/settle',
+    handler: (request, env) =>
+      operatorBuyModeRoutes.handleOperatorBuyModeSettleApi(request, env),
+  },
+  {
     path: '/chat',
     handler: () => Effect.succeed(notFound()),
   },
   {
+    path: '/discord',
+    handler: () =>
+      Effect.succeed(redirectResponse('https://discord.gg/4RrjGCuQAZ')),
+  },
+  {
     path: '/login',
     handler: () => Effect.succeed(redirectResponse('/')),
+  },
+  {
+    path: '/login/email',
+    handler: (request, env) =>
+      Effect.promise(() => handleEmailStart(request, env)),
   },
   {
     path: '/login/github',
@@ -5693,6 +8824,24 @@ const exactRoutes: ReadonlyArray<ExactRoute<Env>> = [
       Effect.promise(() => handleAuthTeamsApi(request, env, ctx)),
   },
   {
+    path: '/api/autopilot/continuation-policy',
+    handler: (request, env, ctx) =>
+      autopilotContinuationPolicyRoutes.routeAutopilotContinuationPolicyRequest(
+        request,
+        env,
+        ctx,
+      ),
+  },
+  {
+    path: '/api/autopilot/morning-report',
+    handler: (request, env, ctx) =>
+      autopilotMorningReportRoutes.routeAutopilotMorningReportRequest(
+        request,
+        env,
+        ctx,
+      ),
+  },
+  {
     path: '/api/public/pylon-stats',
     handler: (request, env) => handlePublicPylonStatsApi(request, env),
   },
@@ -5701,12 +8850,441 @@ const exactRoutes: ReadonlyArray<ExactRoute<Env>> = [
     handler: (request, env) => handlePylonCapacityFunnelApi(request, env),
   },
   {
+    path: '/api/public/pylon-capacity-funnel/history',
+    handler: (request, env) =>
+      handlePylonCapacityFunnelHistoryApi(request, env),
+  },
+  {
+    path: '/api/public/site-referral-payouts',
+    handler: (request, env) => handleSiteReferralPayoutsPublicApi(request, env),
+  },
+  {
+    path: '/api/public/partner-payouts',
+    handler: (request, env) => handlePartnerPayoutsPublicApi(request, env),
+  },
+  {
+    path: '/api/public/relay-health',
+    handler: (request, env) =>
+      handlePublicRelayHealthApi(request, {
+        relayUrl: canonicalMarketRelayUrl(env),
+        store: makeD1RelayHealthStore(openAgentsDatabase(env)),
+      }),
+  },
+  {
     path: '/api/public/launch-dashboard',
     handler: (request, env) => handlePublicLaunchDashboardApi(request, env),
   },
   {
+    path: '/api/public/treasury/launch-status',
+    handler: (request, env) =>
+      handlePublicTreasuryLaunchStatusApi(request, {
+        fetchTreasury: fetchMdkTreasuryPath(env),
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+      }),
+  },
+  {
+    path: '/api/operator/treasury/status',
+    handler: (request, env) =>
+      handleOperatorTreasuryStatusApi(request, {
+        fetchTreasury: fetchMdkTreasuryPath(env),
+        readRewardDispatchStats: () => {
+          const nowIso = currentIsoTimestamp()
+          const dispatchConfig = readXClaimRewardTreasuryDispatchConfig(
+            env,
+            nowIso,
+          )
+
+          return makeD1XClaimRewardTreasuryDispatchStore(
+            openAgentsDatabase(env),
+          ).readDispatchStats(
+            xClaimRewardDispatchDayStartIso(nowIso),
+            dispatchConfig,
+          )
+        },
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+      }),
+  },
+  {
+    path: '/api/operator/treasury/funding-destination',
+    handler: (request, env) =>
+      handleOperatorTreasuryFundingDestinationApi(request, {
+        fetchTreasury: fetchMdkTreasuryPath(env),
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+      }),
+  },
+  {
+    path: '/api/operator/treasury/spark-funding-destination',
+    handler: (request, env) =>
+      handleOperatorSparkTreasuryFundingDestinationApi(request, {
+        fetchSparkTreasury: fetchMdkTreasuryPath(env),
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+      }),
+  },
+  {
+    path: '/api/operator/treasury/spark-funding-invoice',
+    handler: (request, env) =>
+      handleOperatorSparkTreasuryFundingInvoiceApi(request, {
+        fetchSparkTreasury: fetchMdkTreasuryPath(env),
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+      }),
+  },
+  {
+    path: '/api/operator/treasury/transactions/reconcile',
+    handler: (request, env) =>
+      handleOperatorTreasuryTransactionReconcileApi(request, {
+        fetchTipsBuffer: fetchMdkTipsBufferPath(env),
+        fetchTreasury: fetchMdkTreasuryPath(env),
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+        transactionStore: makeD1TreasuryTransactionStore(
+          openAgentsDatabase(env),
+        ),
+      }),
+  },
+  {
+    path: '/api/operator/treasury/recipient-report',
+    handler: (request, env) =>
+      handleOperatorTreasuryRecipientReportApi(request, {
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+        transactionStore: makeD1TreasuryTransactionStore(
+          openAgentsDatabase(env),
+        ),
+      }),
+  },
+  {
+    path: '/api/operator/treasury/recipient-confirmations',
+    handler: (request, env) =>
+      handleOperatorTreasuryRecipientConfirmationApi(request, {
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+        transactionStore: makeD1TreasuryTransactionStore(
+          openAgentsDatabase(env),
+        ),
+      }),
+  },
+  {
+    path: '/api/operator/tips-buffer/status',
+    handler: (request, env) =>
+      handleOperatorTreasuryStatusApi(request, {
+        fetchTreasury: fetchMdkTipsBufferPath(env),
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+        serviceLabel: 'mdk_tips_buffer',
+      }),
+  },
+  {
+    path: '/api/operator/tips-buffer/funding-destination',
+    handler: (request, env) =>
+      handleOperatorTreasuryFundingDestinationApi(request, {
+        fetchTreasury: fetchMdkTipsBufferPath(env),
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+        serviceLabel: 'mdk_tips_buffer',
+      }),
+  },
+  {
+    path: '/api/operator/artanis/spend-decision',
+    handler: (request, env) =>
+      Effect.gen(function* () {
+        if (request.method !== 'POST') {
+          return noStoreJsonResponse(
+            { error: 'method_not_allowed' },
+            { status: 405 },
+          )
+        }
+        const authorized = yield* Effect.promise(() =>
+          requireAdminApiToken(request, env),
+        )
+        if (!authorized) {
+          return noStoreJsonResponse({ error: 'unauthorized' }, { status: 401 })
+        }
+        const body = yield* Effect.promise(async () => {
+          try {
+            return (await request.json()) as {
+              recipientActorRef?: string
+              context?: string
+              suggestedMaxSat?: number
+            }
+          } catch {
+            return {}
+          }
+        })
+        if (
+          typeof body.recipientActorRef !== 'string' ||
+          typeof body.context !== 'string' ||
+          typeof body.suggestedMaxSat !== 'number'
+        ) {
+          return noStoreJsonResponse({ error: 'bad_request' }, { status: 400 })
+        }
+        // Registered destinations only: the recipient's tip-recipient
+        // wallet claim is the public-safe source of the offer.
+        const wallet = yield* Effect.promise(
+          async () =>
+            (await openAgentsDatabase(env)
+              .prepare(
+                `SELECT wallet_ref, bolt12_offer, lightning_address FROM forum_tip_recipient_wallets
+               WHERE actor_ref = ? AND state = 'ready' AND archived_at IS NULL
+                 AND (lightning_address IS NOT NULL OR bolt12_offer IS NOT NULL)`,
+              )
+              .bind(body.recipientActorRef)
+              .first()) as {
+              wallet_ref: string
+              bolt12_offer: string | null
+              lightning_address: string | null
+            } | null,
+        )
+        if (wallet === null) {
+          return noStoreJsonResponse(
+            { error: 'recipient_destination_not_registered' },
+            { status: 409 },
+          )
+        }
+        const outcome = yield* Effect.promise(() =>
+          runArtanisSpendDecision(openAgentsDatabase(env), {
+            candidate: {
+              destination: wallet.lightning_address ?? wallet.bolt12_offer!,
+              context: body.context!,
+              destinationSourceRef: wallet.wallet_ref,
+              recipientRef: body.recipientActorRef!,
+              suggestedMaxSat: Math.floor(body.suggestedMaxSat!),
+            },
+            gatewayToken: (env as { CF_AIG_TOKEN?: string }).CF_AIG_TOKEN,
+            geminiApiKey:
+              (env as { GEMINI_API_KEY?: string }).GEMINI_API_KEY ?? null,
+            nowIso: currentIsoTimestamp(),
+            treasury: {
+              fetchSparkTreasury: fetchMdkTreasuryPath(env),
+              fetchTreasury: fetchMdkTreasuryPath(env),
+              recordPayoutTransaction: async input => {
+                await makeD1TreasuryTransactionStore(
+                  openAgentsDatabase(env),
+                ).insert({
+                  amountSat: input.amountSat,
+                  bolt11: null,
+                  createdAt: currentIsoTimestamp(),
+                  direction: 'out',
+                  expiresAt: null,
+                  failureReasonRef: input.failureReasonRef ?? null,
+                  id: randomUuid(),
+                  owedRef: input.owedRef ?? null,
+                  owedSat: input.owedSat ?? null,
+                  paymentRef: input.paymentRef,
+                  recipientConfirmationRef: null,
+                  recipientConfirmationState: 'unconfirmed',
+                  recipientConfirmedAt: null,
+                  recipientRef: input.recipientRef ?? null,
+                  redactedDestinationRef: input.redactedDestinationRef ?? null,
+                  settledAt: input.settled ? currentIsoTimestamp() : null,
+                  state:
+                    input.failureReasonRef !== undefined &&
+                    input.failureReasonRef !== null
+                      ? 'failed'
+                      : input.settled
+                        ? 'settled'
+                        : 'pending',
+                })
+              },
+              requireAdminApiToken: async () => true,
+            },
+          }),
+        )
+        return noStoreJsonResponse({ outcome })
+      }),
+  },
+  {
+    path: '/api/operator/treasury/payout',
+    handler: (request, env) =>
+      handleOperatorTreasuryPayoutApi(request, {
+        fetchSparkTreasury: fetchMdkTreasuryPath(env),
+        fetchTreasury: fetchMdkTreasuryPath(env),
+        recordPayoutTransaction: async input => {
+          await makeD1TreasuryTransactionStore(openAgentsDatabase(env)).insert({
+            amountSat: input.amountSat,
+            bolt11: null,
+            createdAt: currentIsoTimestamp(),
+            direction: 'out',
+            expiresAt: null,
+            failureReasonRef: input.failureReasonRef ?? null,
+            id: `treasury_payout_${randomUuid()}`,
+            owedRef: input.owedRef ?? null,
+            owedSat: input.owedSat ?? null,
+            paymentRef: input.paymentRef,
+            recipientConfirmationRef: null,
+            recipientConfirmationState: 'unconfirmed',
+            recipientConfirmedAt: null,
+            recipientRef: input.recipientRef ?? null,
+            redactedDestinationRef: input.redactedDestinationRef ?? null,
+            settledAt: input.settled ? currentIsoTimestamp() : null,
+            state:
+              input.failureReasonRef !== undefined &&
+              input.failureReasonRef !== null
+                ? 'failed'
+                : input.settled
+                  ? 'settled'
+                  : 'pending',
+          })
+        },
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+      }),
+  },
+  {
+    // Operator payout from the tips-buffer wallet (mirrors the treasury payout
+    // against the tips-buffer MDK wallet). Used to pay BOLT12 offers from the
+    // buffer directly — e.g. operator-directed recognition rewards — without the
+    // tip-ladder's per-sender ledger-balance requirement.
+    path: '/api/operator/tips-buffer/payout',
+    handler: (request, env) =>
+      handleOperatorTreasuryPayoutApi(request, {
+        fetchTreasury: fetchMdkTipsBufferPath(env),
+        recordPayoutTransaction: async input => {
+          await makeD1TreasuryTransactionStore(openAgentsDatabase(env)).insert({
+            amountSat: input.amountSat,
+            bolt11: null,
+            createdAt: currentIsoTimestamp(),
+            direction: 'out',
+            expiresAt: null,
+            failureReasonRef: input.failureReasonRef ?? null,
+            id: `tips_buffer_payout_${randomUuid()}`,
+            owedRef: input.owedRef ?? null,
+            owedSat: input.owedSat ?? null,
+            paymentRef: input.paymentRef,
+            recipientConfirmationRef: null,
+            recipientConfirmationState: 'unconfirmed',
+            recipientConfirmedAt: null,
+            recipientRef: input.recipientRef ?? null,
+            redactedDestinationRef: input.redactedDestinationRef ?? null,
+            settledAt: input.settled ? currentIsoTimestamp() : null,
+            state:
+              input.failureReasonRef !== undefined &&
+              input.failureReasonRef !== null
+                ? 'failed'
+                : input.settled
+                  ? 'settled'
+                  : 'pending',
+          })
+        },
+        requireAdminApiToken: adminRequest =>
+          requireAdminApiToken(adminRequest, env),
+      }),
+  },
+  {
     path: '/api/public/artanis/report',
     handler: (request, env) => handlePublicArtanisReportApi(request, env),
+  },
+  {
+    path: '/api/public/labor-earnings',
+    handler: (request, env) =>
+      handlePublicLaborEarningsApi(request, {
+        db: openAgentsDatabase(env),
+      }),
+  },
+  {
+    path: '/api/public/labor-earnings/payout',
+    handler: (request, env) =>
+      handleSelfServeLaborPayoutApi(request, {
+        db: openAgentsDatabase(env),
+        authenticate: agentBalanceAuthForStore(
+          makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+        ),
+        // INERT flag: defaults to false so it plans but lists nothing.
+        enabled: env.LABOR_SELF_SERVE_PAYOUT_ENABLED === 'true',
+      }),
+  },
+  {
+    path: '/api/public/artanis/labor-receipts',
+    handler: (request, env) =>
+      handlePublicArtanisLaborReceiptsApi(request, {
+        nowIso: currentIsoTimestamp,
+        store: makeD1ArtanisLaborUnattendedReceiptStore(
+          openAgentsDatabase(env),
+          currentIsoTimestamp,
+        ),
+      }),
+  },
+  {
+    path: '/api/public/artanis/admin-ticks',
+    handler: (request, env) =>
+      Effect.promise(async () => {
+        if (request.method !== 'GET') {
+          return Response.json({ error: 'method_not_allowed' }, { status: 405 })
+        }
+        const monitor = await readArtanisTickMonitor(openAgentsDatabase(env), {
+          limit: boundedTickMonitorLimit(
+            new URL(request.url).searchParams.get('limit'),
+          ),
+          nowIso: currentIsoTimestamp(),
+        })
+        return Response.json(monitor, {
+          headers: { 'cache-control': 'no-store' },
+        })
+      }),
+  },
+  {
+    path: '/api/public/artanis/tick-streak',
+    handler: (request, env) =>
+      Effect.promise(async () => {
+        if (request.method !== 'GET') {
+          return Response.json({ error: 'method_not_allowed' }, { status: 405 })
+        }
+        const streak = await readArtanisTickStreak(openAgentsDatabase(env), {
+          limit: boundedTickStreakLimit(
+            new URL(request.url).searchParams.get('limit'),
+          ),
+          nowIso: currentIsoTimestamp(),
+        })
+        return Response.json(streak, {
+          headers: { 'cache-control': 'no-store' },
+        })
+      }),
+  },
+  {
+    path: '/api/public/artanis/tassadar-distillation-dataset',
+    handler: (request, env) =>
+      Effect.promise(async () => {
+        if (request.method !== 'GET') {
+          return Response.json({ error: 'method_not_allowed' }, { status: 405 })
+        }
+        const receipt = await readArtanisDistillationDatasetReceipt(
+          openAgentsDatabase(env),
+          {
+            limit: boundedDistillationDatasetLimit(
+              new URL(request.url).searchParams.get('limit'),
+            ),
+            nowIso: currentIsoTimestamp(),
+          },
+        )
+        return Response.json(receipt, {
+          headers: { 'cache-control': 'no-store' },
+        })
+      }),
+  },
+  {
+    path: '/api/public/artanis/responder-support',
+    handler: (request, env) =>
+      Effect.promise(async () => {
+        if (request.method !== 'GET') {
+          return Response.json({ error: 'method_not_allowed' }, { status: 405 })
+        }
+        const projection = await readArtanisResponderSupport(
+          openAgentsDatabase(env),
+          {
+            limit: boundedResponderSupportLimit(
+              new URL(request.url).searchParams.get('limit'),
+            ),
+            nowIso: currentIsoTimestamp(),
+          },
+        )
+        return Response.json(projection, {
+          headers: { 'cache-control': 'no-store' },
+        })
+      }),
   },
   {
     path: '/api/blueprint/program-registry',
@@ -5737,6 +9315,11 @@ const exactRoutes: ReadonlyArray<ExactRoute<Env>> = [
       blueprintRoutes.handleBlueprintContractExportApi(request, env),
   },
   {
+    path: '/api/blueprint/tassadar-modules',
+    handler: (request, env) =>
+      blueprintRoutes.handleBlueprintTassadarModuleRegistryApi(request, env),
+  },
+  {
     path: '/.well-known/openagents.json',
     handler: (request, env, ctx) => {
       recordPublicAgentFunnelRead(
@@ -5748,6 +9331,24 @@ const exactRoutes: ReadonlyArray<ExactRoute<Env>> = [
       )
 
       return handleOpenAgentsCapabilityManifestApi(request)
+    },
+  },
+  {
+    path: '/AGENTS-CORE.md',
+    handler: (request, env, ctx) => {
+      recordPublicAgentFunnelRead(
+        request,
+        openAgentsDatabase(env),
+        ctx,
+        'agent_doc_read',
+        '/AGENTS-CORE.md',
+      )
+
+      return handleOpenAgentsCompanionFile(
+        request,
+        env.ASSETS,
+        '/AGENTS-CORE.md',
+      )
     },
   },
   {
@@ -5845,17 +9446,334 @@ const exactRoutes: ReadonlyArray<ExactRoute<Env>> = [
       Effect.promise(() => handleProgrammaticAgentMe(request, env)),
   },
   {
+    path: '/api/agents/me/balance',
+    handler: (request, env) =>
+      handleAgentBalanceApi(request, {
+        authenticate: agentBalanceAuthForStore(
+          makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+        ),
+        db: openAgentsDatabase(env),
+      }),
+  },
+  {
+    path: '/api/agents/me/balance/preferences',
+    handler: (request, env) =>
+      handleAgentBalancePreferencesApi(request, {
+        authenticate: agentBalanceAuthForStore(
+          makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+        ),
+        db: openAgentsDatabase(env),
+      }),
+  },
+  {
     path: '/api/agents/home',
     handler: (request, env) =>
       Effect.promise(() =>
         handleProgrammaticAgentHome(request, openAgentsDatabase(env)),
       ),
   },
-]
+  {
+    path: '/api/public/inference/batch-job-receipts/:receiptRef',
+    handler: (request, env) =>
+      handleBatchJobReceiptRead(request, {
+        authenticate: async () => undefined,
+        db: openAgentsDatabase(env),
+        enabled: isInferenceGatewayEnabled(env.INFERENCE_GATEWAY_ENABLED),
+        nowIso: currentIsoTimestamp,
+      }),
+  },
+  {
+    path: '/v1/inference/batches',
+    handler: (request, env) =>
+      handleBatchJobsSubmit(request, {
+        authenticate: async authRequest => {
+          const token = readBearerToken(authRequest)
+          if (token === undefined) {
+            return undefined
+          }
+          const session = await authenticateProgrammaticAgent(
+            makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+            token,
+          )
+          return session === undefined
+            ? undefined
+            : { accountRef: `agent:${session.user.id}` }
+        },
+        db: openAgentsDatabase(env),
+        enabled: isInferenceGatewayEnabled(env.INFERENCE_GATEWAY_ENABLED),
+        nowIso: currentIsoTimestamp,
+      }),
+  },
+  {
+    path: '/v1/inference/batches/:jobId',
+    handler: (request, env) =>
+      handleBatchJobStatusRead(request, {
+        authenticate: async authRequest => {
+          const token = readBearerToken(authRequest)
+          if (token === undefined) {
+            return undefined
+          }
+          const session = await authenticateProgrammaticAgent(
+            makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+            token,
+          )
+          return session === undefined
+            ? undefined
+            : { accountRef: `agent:${session.user.id}` }
+        },
+        db: openAgentsDatabase(env),
+        enabled: isInferenceGatewayEnabled(env.INFERENCE_GATEWAY_ENABLED),
+        nowIso: currentIsoTimestamp,
+      }),
+  },
+  {
+    // Inference gateway (EPIC #5474, #5476). INERT by default: gated behind
+    // INFERENCE_GATEWAY_ENABLED (default off). Ships wired to the stub/echo
+    // adapter + no-op metering stub; Phase-2 issues register real adapters
+    // (#5479/#5480/#5481), routing (#5482), and live metering/credits (#5477).
+    path: '/v1/chat/completions',
+    handler: (request, env) => {
+      registerPassthroughAdapters(inferenceProviderRegistry, env)
+      // Capture the live env so env-dependent adapters (Vertex #5480) can mint
+      // credentials from Worker secrets at call time. INERT regardless: the
+      // gateway is gated by INFERENCE_GATEWAY_ENABLED below.
+      setInferenceAdapterEnv(env)
+      // Free-tier identity resolver (EPIC #5474 §1/§2): maps an authenticated
+      // account ref to its VERIFIED owner-claim identity (the SAME surface the
+      // #5486 light-KYC gate reads), so the Sybil-resistant free pool and the
+      // premium allowlist both key on one owner across all of that owner's
+      // accounts. INERT regardless — only reached when the gateway is enabled.
+      const ownerClaimStore = makeD1AgentOwnerClaimStore(
+        openAgentsDatabase(env),
+      )
+      const resolveOwnerIdentity = makeVerifiedOwnerIdentityResolver(
+        ownerClaimStore.readVerifiedPublicIdentityForAgentUserId,
+      )
+      return handleChatCompletions(request, {
+        authenticate: async authRequest => {
+          const token = readBearerToken(authRequest)
+          if (token === undefined) {
+            return undefined
+          }
+          const session = await authenticateProgrammaticAgent(
+            makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+            token,
+          )
+          return session === undefined
+            ? undefined
+            : { accountRef: `agent:${session.user.id}` }
+        },
+        enabled: isInferenceGatewayEnabled(env.INFERENCE_GATEWAY_ENABLED),
+        // Live credit metering (#5477): decrement the account's balance from
+        // real provider usage through the existing PayIn-shaped credit ledger.
+        // The route never reaches the hook on the inert (flag-off) path, so this
+        // is safe to wire unconditionally; it only fires when the gateway is on
+        // AND a real adapter served a completion.
+        //
+        // Referral accrual on ALL inference (#5488): wrap the live ledger hook so
+        // that AFTER a real, non-zero charge settles, the referrer's ongoing cut
+        // (the referrer share of the three-way margin split, #5489) is recorded
+        // into the existing RL-1 referral payout ledger — ongoing/indefinite, one
+        // accrual per paid request, idempotent, and never failing the inference
+        // call. INERT when no real charge occurred (stub hook / zero charge / flag
+        // off) and a no-op when the account was not referred.
+        //
+        // Free-allowance gate (EPIC #5474 §1): the OUTERMOST wrapper. For a
+        // free-eligible model (Gemini Flash) whose priced charge fits under the
+        // resolving owner's Sybil-resistant free pool ($10/verified owner, ~$0.50
+        // taste/unclaimed account, + earned allowance), it EATS the cost and
+        // short-circuits BEFORE the referral+ledger inner hook — no credit
+        // decrement, no referral accrual. Over allowance (or any non-free model)
+        // it falls through to the normal referral+ledger path. INERT on the
+        // flag-off path (the route never reaches the hook) and idempotent per
+        // request.
+        meteringHook: withFreeAllowance(
+          withReferralAccrual(
+            makeLedgerMeteringHook({ db: openAgentsDatabase(env) }),
+            { db: openAgentsDatabase(env) },
+          ),
+          { db: openAgentsDatabase(env), resolveOwnerIdentity },
+        ),
+        readAvailableMsat: async accountRef => {
+          const balance = await readAgentBalance(
+            openAgentsDatabase(env),
+            accountRef,
+          )
+          return balance === null ? 0 : balance.availableMsat
+        },
+        // FREE-ALLOWANCE PRE-FLIGHT (EPIC #5474 §1): read-only mirror of the
+        // gate inside `withFreeAllowance` (wired just above as the metering
+        // hook). It lets the balance gate admit a zero-balance account when the
+        // (account, model) is free-eligible and the resolving owner still has
+        // remaining free allowance, so a genuinely-free request (Gemini Flash
+        // under the owner's Sybil-resistant pool) is reachable WITHOUT a funded
+        // balance — the metering hook then eats and accrues the cost. Uses the
+        // SAME owner-identity resolver as the metering hook so the bypass and
+        // the accrual agree on the owner/pool.
+        checkFreeAllowance: checkFreeAllowancePreflight({
+          db: openAgentsDatabase(env),
+          resolveOwnerIdentity,
+        }),
+        // Routing & supply selection (#5482): cheapest-viable lane plan per
+        // model with bounded-backoff overflow to the next viable lane on a
+        // retryable provider failure (429 / 503 / 5xx / transport). INERT
+        // regardless — the gateway is gated by INFERENCE_GATEWAY_ENABLED above.
+        lanePlan: selectAdapterPlan,
+        // Provider serving policy (public_paid_model_gateway_missing on
+        // api.hosted_gemini.v1): the SAME presence-derived lane arming the
+        // public catalog (/v1/models) and the pre-purchase quote (/v1/quote)
+        // are gated on. A request for a KNOWN model whose supply lane is not
+        // armed (e.g. an absent VERTEX_SA_KEY / FIREWORKS_API_KEY) is rejected
+        // with a clean model_unavailable before dispatch, so the LIVE gateway
+        // serves exactly what it advertises and quotes. INERT regardless — the
+        // gateway is gated by INFERENCE_GATEWAY_ENABLED above.
+        laneArming: resolveSupplyLaneArming(env),
+        // Abuse / fair-share / spend-cap gates (#5486): the route exposes
+        // `checkFairShare` and `checkSpendCap` seams whose pure deciders live in
+        // inference-abuse-controls.ts (`decideFairShare` / `decideSpendCap`).
+        // They are deliberately LEFT UNWIRED here (=> the gate is OPEN / no-op)
+        // until a per-account rolling-window counter store (D1/KV keyed by account
+        // + window bucket) lands; wiring them then is a one-line dep add with no
+        // route change. The enforceable money-side abuse control (chargeback /
+        // refund credit clawback, `clawbackInferenceCredits`) hangs off the
+        // Stripe dispute/refund webhook path, not this hot route.
+        //
+        // Premium-model owner-grant gate (EPIC #5474 §2): premium models (Claude
+        // / GPT / partner passthrough) require the requesting account's resolved
+        // OWNER identity to be on the owner-controlled allowlist
+        // (`inference_premium_allowlist`); a non-allowlisted premium request is
+        // denied (403) with an actionable message before any dispatch. Non-premium
+        // models (the Gemini free default, Fireworks open) always pass. INERT on
+        // the flag-off path.
+        checkPremiumAccess: makePremiumAccessGate({
+          db: openAgentsDatabase(env),
+          resolveOwnerIdentity,
+        }),
+        registry: inferenceProviderRegistry,
+      })
+    },
+  },
+  {
+    // Public model catalog (OpenAI-compatible GET /v1/models) for the inference
+    // gateway. INERT by default: gated behind the SAME INFERENCE_GATEWAY_ENABLED
+    // flag as /v1/chat/completions, so it 404s when the gateway is off. Public,
+    // unauthenticated, public-safe (published sell prices + free-tier flag only,
+    // no prompts/credentials/balances) — the pre-purchase discovery surface a
+    // credits customer reads to learn what each model costs before funding a
+    // balance. Derived from the SAME pricing table the metering hook charges
+    // against, so the published price cannot drift from the billed price. No
+    // promise state changes; the paid loop is still secrets-gated.
+    path: '/v1/models',
+    handler: (request, env) =>
+      handleModelsList(request, {
+        enabled: isInferenceGatewayEnabled(env.INFERENCE_GATEWAY_ENABLED),
+        laneArming: resolveSupplyLaneArming(env),
+      }),
+  },
+  {
+    // Pre-purchase cost quote (POST /v1/quote) for the inference gateway. INERT
+    // by default: gated behind the SAME INFERENCE_GATEWAY_ENABLED flag as
+    // /v1/chat/completions and /v1/models, so it 404s when the gateway is off.
+    // Public, unauthenticated, public-safe — like /v1/models it reads only the
+    // published catalog price (the estimator omits our cost basis / margin),
+    // moves no money, and writes no ledger row. It returns the exact
+    // credit/USD/msat charge the metering hook WOULD settle for a given model +
+    // token estimate + funding rail (`isEstimate: true`), so a credits customer
+    // can size a deliberate spend before funding a balance. Additively, when the
+    // body carries `budgetCredits` it answers the INVERSE affordability question
+    // ("how many such requests does N credits buy?") via `estimateBudgetCapacity`,
+    // embedding the same per-request estimate under `perRequest`. Computed from the
+    // SAME pricing engine (`priceRequest`) the metering hook bills against, so a
+    // quote cannot drift from the eventual billed charge. No promise state
+    // changes; the paid loop is still secrets-gated.
+    path: '/v1/quote',
+    handler: (request, env) =>
+      handleQuote(request, {
+        enabled: isInferenceGatewayEnabled(env.INFERENCE_GATEWAY_ENABLED),
+        laneArming: resolveSupplyLaneArming(env),
+      }),
+  },
+  {
+    // Public gateway readiness summary (GET /v1/gateway/readiness). INERT by
+    // default: gated behind the SAME INFERENCE_GATEWAY_ENABLED flag as the rest
+    // of the gateway, so it 404s when the gateway is off. Public, unauthenticated,
+    // public-safe — it exposes the SINGLE readiness fact projected from the SAME
+    // catalog + serving policy the /v1/models, /v1/quote, and /v1/chat/completions
+    // surfaces gate on (servable/hidden model COUNTS + per-lane arming booleans +
+    // dereferenceable reason refs only; no prompts/credentials/prices/balances).
+    // So an operator (or the launch dashboard) can verify "can the paid gateway
+    // serve anything right now, and how degraded is its catalog?" in one read
+    // instead of replaying each surface. No promise state changes.
+    path: '/v1/gateway/readiness',
+    handler: (request, env) =>
+      handleGatewayReadiness(request, {
+        enabled: isInferenceGatewayEnabled(env.INFERENCE_GATEWAY_ENABLED),
+        laneArming: resolveSupplyLaneArming(env),
+      }),
+  },
+  {
+    // Fine-tuning service (EPIC #5510, #5516) — sellable Cloud primitive
+    // SCAFFOLD. INERT by default: gated behind CLOUD_FINE_TUNING_ENABLED
+    // (default off). Ships wired to the stub/accepting runtime adapter + no-op
+    // metering stub; #5516 registers the real training-lane runtime adapter and
+    // live credit metering. The promise `cloud.fine_tuning_service.v1` STAYS red
+    // — this surface produces no paid/servable result and no green flip lands
+    // without a dereferenceable paid receipt.
+    path: '/v1/fine_tuning/jobs',
+    handler: (request, env) =>
+      handleFineTuningJobSubmit(request, {
+        authenticate: async authRequest => {
+          const token = readBearerToken(authRequest)
+          if (token === undefined) {
+            return undefined
+          }
+          const session = await authenticateProgrammaticAgent(
+            makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+            token,
+          )
+          return session === undefined
+            ? undefined
+            : { accountRef: `agent:${session.user.id}` }
+        },
+        enabled: isFineTuningServiceEnabled(env.CLOUD_FINE_TUNING_ENABLED),
+      }),
+  },
+  {
+    // Sandbox compute service (EPIC #5510, #5517) — sellable Cloud primitive
+    // SCAFFOLD. INERT by default: gated behind CLOUD_SANDBOX_COMPUTE_ENABLED
+    // (default off). Ships wired to the stub/accepting runtime adapter + no-op
+    // metering stub; #5517 registers the real isolated-session runtime adapter
+    // and live credit metering. The promise `cloud.sandbox_compute_service.v1`
+    // STAYS red — this surface provisions no real sandbox and no green flip
+    // lands without a dereferenceable paid receipt.
+    path: '/v1/sandboxes',
+    handler: (request, env) =>
+      handleSandboxRequest(request, {
+        authenticate: async authRequest => {
+          const token = readBearerToken(authRequest)
+          if (token === undefined) {
+            return undefined
+          }
+          const session = await authenticateProgrammaticAgent(
+            makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+            token,
+          )
+          return session === undefined
+            ? undefined
+            : { accountRef: `agent:${session.user.id}` }
+        },
+        enabled: isSandboxComputeServiceEnabled(
+          env.CLOUD_SANDBOX_COMPUTE_ENABLED,
+        ),
+      }),
+  },
+])
+
+export const exactRoutePathManifest = exactRouteRegistry.paths
 
 const routeRequest = makeWorkerRouteRequest({
   cleanProductRouteRedirectLocation,
-  exactRoutes,
+  exactRoutes: exactRouteRegistry.routes,
   handleAppShellPage: (request, env, ctx) =>
     routeEffect('handle_app_shell_page', () =>
       handleAppShellPage(request, env, ctx),
@@ -5866,12 +9784,54 @@ const routeRequest = makeWorkerRouteRequest({
     routeEffect('handle_thread_page', () =>
       handleThreadPage(request, env, ctx, threadId),
     ),
+  handleForumThreadPage: (request, env, ctx, topicId) =>
+    routeEffect('handle_forum_thread_page', () =>
+      handleForumThreadDocument({
+        db: openAgentsDatabase(env),
+        fetchAppShell: () => handleAppShellPage(request, env, ctx),
+        topicId,
+      }),
+    ),
   optionalUuid,
-  routeAutopilotWorkRequest:
-    autopilotWorkRoutes.routeAutopilotWorkRequest,
+  routeAutopilotWorkRequest: (request, env, ctx) =>
+    autopilotDecisionRoutes.routeAutopilotDecisionRequest(request, env, ctx) ??
+    autopilotWorkRoutes.routeAutopilotWorkRequest(request, env, ctx),
+  // Cloud coding-session surface (autopilot.cloud_coding_sessions.v1, red).
+  // INERT behind CLOUD_CODING_SESSIONS_ENABLED (default off). Wired to the same
+  // programmatic-agent auth the inference gateway / sandbox / fine-tuning
+  // surfaces use; ships defaulted to the stub runtime adapter + no-op metering
+  // stub, so on prod every route returns 404 and nothing is provisioned or
+  // billed. The managed GCE control-plane adapter + live receipt-first metering
+  // hook plug into the module's seams when the EPIC lands.
+  routeCloudCodingSessionRequest: (request, env) =>
+    routeCloudCodingSessionRequestImpl(request, {
+      authenticate: async authRequest => {
+        const token = readBearerToken(authRequest)
+        if (token === undefined) {
+          return undefined
+        }
+        const session = await authenticateProgrammaticAgent(
+          makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+          token,
+        )
+        return session === undefined
+          ? undefined
+          : { accountRef: `agent:${session.user.id}` }
+      },
+      enabled: isCloudCodingSessionsEnabled(env.CLOUD_CODING_SESSIONS_ENABLED),
+    }),
   routeAgentGoalRequest: agentGoalRoutes.routeAgentGoalRequest,
   routeAgentOwnerClaimRequest:
     agentOwnerClaimRoutes.routeAgentOwnerClaimRequest,
+  routeCheckoutPageRequest: (request, env) =>
+    checkoutPageRoutes.routeCheckoutPageRequest(request, env),
+  routeTreasuryPageRequest: (request, env) =>
+    makeTreasuryPageRoutes({
+      fetchTreasury: fetchMdkTreasuryPath(env),
+      makeUuid: randomUuid,
+      nowIso: currentIsoTimestamp,
+      store: makeD1TreasuryTransactionStore(openAgentsDatabase(env)),
+    }).routeTreasuryPageRequest(request),
   routeAgentProposalRequest: agentProposalRoutes.routeAgentProposalRequest,
   routeAgentSearchRequest: agentSearchRoutes.routeAgentSearchRequest,
   routeAgentScopedGrantRequest:
@@ -5879,11 +9839,24 @@ const routeRequest = makeWorkerRouteRequest({
   routeAgentSiteRequest: agentSiteRoutes.routeAgentSiteRequest,
   routeForumRequest: (request, env, ctx) =>
     forumRoutes.routeForumRequest(request, openAgentsDatabase(env), {
+      tipsBufferPay: tipsBufferPayFnForEnv(env),
       agentStore: makeD1AgentRegistrationStore(openAgentsDatabase(env)),
+      ...(() => {
+        const forumWorkRequestRelayPublisher =
+          forumWorkRequestRelayPublisherForEnv(env)
+
+        return forumWorkRequestRelayPublisher === undefined
+          ? {}
+          : { forumWorkRequestRelayPublisher }
+      })(),
       hostedMdkClient: hostedMdkClientForEnv(env),
       l402SigningBoundary: () => forumL402SigningBoundaryForEnv(env),
       mdkWebhookConfig: hostedMdkWebhookConfigForEnv(env),
       publicIdentityClaimStore: makeD1AgentOwnerClaimStore(
+        openAgentsDatabase(env),
+      ),
+      pylonApiStore: makeD1PylonApiStore(openAgentsDatabase(env)),
+      pylonSparkPayoutTargetStore: makeD1PylonSparkPayoutTargetStore(
         openAgentsDatabase(env),
       ),
       resolveModeratorActor: async request => {
@@ -5905,23 +9878,113 @@ const routeRequest = makeWorkerRouteRequest({
           actor: {
             displayName: session.user.name,
             operatorId: session.user.userId,
-            slug: session.user.login,
+            slug: session.user.login ?? session.user.userId,
           },
         }
       },
     }),
   routeImageGenerationRequest:
     imageGenerationRoutes.routeImageGenerationRequest,
+  // OpenAI-compatible GET /v1/models/{model} retrieve. Gated by the SAME
+  // INFERENCE_GATEWAY_ENABLED flag as the list and chat-completions routes, so
+  // it 404s when the gateway is off. Public + unauthenticated (published price
+  // and policy only — public-safe pre-purchase discovery), serving prices
+  // derived from the same pricing table the metering hook charges against. No
+  // promise state changes; the paid loop is still secrets-gated.
+  routeModelRetrieveRequest: (request, env) =>
+    routeModelRetrieveRequest(request, {
+      enabled: isInferenceGatewayEnabled(env.INFERENCE_GATEWAY_ENABLED),
+      laneArming: resolveSupplyLaneArming(env),
+    }),
   routeMulletRequest: mulletRoutes.routeMulletRequest,
-  routeOmniRequest: omniRoutes.routeOmniRequest,
+  routeOmniRequest: (request, env, ctx) =>
+    omniRoutes.routeOmniRequest(request, env, ctx) ??
+    omniWorkroomRoutes.routeOmniWorkroomRequest(request, env, ctx) ??
+    omniWorkroomLifecycleRoutes.routeOmniWorkroomLifecycleRequest(
+      request,
+      env,
+      ctx,
+    ) ??
+    omniBundleRoutes.routeOmniBundleRequest(request, env, ctx) ??
+    omniHandoffRoutes.routeOmniHandoffRequest(request, env, ctx) ??
+    nativeListsRoutes.routeNativeListsRequest(request, env, ctx) ??
+    sitePageFormCaptureRoutes.routeSitePageFormCaptureRequest(
+      request,
+      env,
+      ctx,
+    ) ??
+    prefilledWorkspaceRoutes.routePrefilledWorkspaceRequest(
+      request,
+      env,
+      ctx,
+    ) ??
+    privateProjectWorkspaceRoutes.routePrivateProjectWorkspaceRequest(
+      request,
+      env,
+      ctx,
+    ) ??
+    teamWorkspaceInviteRoutes.routeTeamWorkspaceInviteRequest(
+      request,
+      env,
+      ctx,
+    ) ??
+    tenantClientRoutes.routeTenantClientRequest(request, env, ctx) ??
+    tenantHostnameSelfServeRoutes.routeTenantHostnameSelfServeRequest(
+      request,
+      env,
+      ctx,
+    ) ??
+    emailSequenceAuthoringRoutes.routeEmailSequenceAuthoringRequest(
+      request,
+      env,
+      ctx,
+    ) ??
+    sitesOrchestrationRoutes.routeSitesOrchestrationRequest(
+      request,
+      env,
+      ctx,
+    ) ??
+    partnerPayoutLedgerRoutes.routePartnerPayoutLedgerRequest(
+      request,
+      env,
+      ctx,
+    ) ??
+    partnerAgreementRoutes.routePartnerAgreementRequest(request, env, ctx),
   routeOnboardingRequest: onboardingRoutes.routeOnboardingRequest,
   routeNexusPylonVisibilityRequest:
     nexusPylonVisibilityRoutes.routeNexusPylonVisibilityRequest,
+  routePublicCardCreditSpendReceiptRequest:
+    publicCardCreditSpendReceiptRoutes.routePublicCardCreditSpendReceiptRequest,
+  routePublicInferenceReceiptRequest:
+    publicInferenceReceiptRoutes.routePublicInferenceReceiptRequest,
+  routePublicNip90MarketReceiptRequest:
+    publicNip90MarketReceiptRoutes.routePublicNip90MarketReceiptRequest,
+  routePublicPartnerPayoutReceiptRequest:
+    publicPartnerPayoutReceiptRoutes.routePublicPartnerPayoutReceiptRequest,
+  routePublicSiteReferralPayoutReceiptRequest:
+    publicSiteReferralPayoutReceiptRoutes
+      .routePublicSiteReferralPayoutReceiptRequest,
+  routePublicStripeCheckoutReceiptRequest:
+    publicStripeCheckoutReceiptRoutes.routePublicStripeCheckoutReceiptRequest,
+  routeEcommerceCampaignReceiptRequest:
+    ecommerceCampaignReceiptRoutes.routeEcommerceCampaignReceiptRequest,
+  routeEcommerceCampaignReceiptOperatorRequest:
+    ecommerceCampaignReceiptOperatorRoutes.routeEcommerceCampaignReceiptOperatorRequest,
+  routeEcommerceCampaignSelfServeRequest:
+    ecommerceCampaignSelfServeRoutes.routeEcommerceCampaignSelfServeRequest,
+  routeMarketingAgencyReceiptRequest:
+    marketingAgencyReceiptPublicRoutes.routeMarketingAgencyReceiptRequest,
+  routeMarketingAgencySelfServeRequest:
+    marketingAgencySelfServePublicRoutes.routeMarketingAgencySelfServeRequest,
   routePylonApiRequest: pylonApiRoutes.routePylonApiRequest,
   routeSiteCommerceRequest: (request, _env, _ctx) =>
     siteCommerceRoutesForEnv(_env).routeSiteCommerceRequest(request),
   routeSiteReferralInspectionRequest:
     siteReferralInspectionRoutes.routeSiteReferralInspectionRequest,
+  routeSiteReferralPayoutLedgerRequest:
+    siteReferralPayoutLedgerRoutes.routeSiteReferralPayoutLedgerRequest,
+  routeInferenceReferralRequest:
+    inferenceReferralRoutes.routeInferenceReferralRequest,
   routeSiteReferralRequest: siteReferralRoutes.routeSiteReferralRequest,
   routeOperatorAdjutantRequest:
     operatorAdjutantRoutes.routeOperatorAdjutantRequest,
@@ -5956,6 +10019,19 @@ const routeRequest = makeWorkerRouteRequest({
   routeSyncRequest: syncRoutes.routeSyncRequest,
   routeTeamChatRequest: teamChatRoutes.routeTeamChatRequest,
   routeThreadFileRequest: threadFileRoutes.routeThreadFileRequest,
+  routeHygieneLaneSettlementRequest: (request, env) =>
+    hygieneLaneSettlementRoutes.routeHygieneLaneSettlementRequest(request, env),
+  routeFirmupLaneSettlementRequest: (request, env) =>
+    firmupBitcoinSettlementRoutes.routeFirmupLaneSettlementRequest(
+      request,
+      env,
+    ),
+  routeTassadarTraceContributionRequest:
+    tassadarTraceContributionRoutes.routeTassadarTraceContributionRequest,
+  routeTrainingRunWindowRequest:
+    trainingRunWindowRoutes.routeTrainingRunWindowRequest,
+  routeTrainingVerificationRequest:
+    trainingVerificationRoutes.routeTrainingVerificationRequest,
 })
 
 type SyncSocketAttachment = Readonly<{
@@ -6213,8 +10289,341 @@ export default {
         ),
       ),
       observedEffect(
+        'PylonCapacityFunnel.recordSnapshots',
+        recordPylonCapacityFunnelSnapshotsScheduled(
+          openAgentsDatabase(env),
+          event.scheduledTime,
+        ),
+      ),
+      observedEffect(
+        'RelayHealth.probeTick',
+        runRelayHealthProbeScheduled(env, event.scheduledTime),
+      ),
+      observedEffect(
+        'SelfServeWindowProducer.topUp',
+        runSelfServeWindowProducerScheduled(env, event.scheduledTime),
+      ),
+      observedEffect(
         'EmailCampaignDispatcher.dispatchDue',
         dispatchDueEmailCampaignSendsScheduled(env),
+      ),
+      observedEffect(
+        'AutopilotScheduledLaunches.dispatchDue',
+        dispatchDueScheduledAutopilotWork(autopilotWorkRouteDependencies, env, {
+          nowIso: epochMillisToIsoTimestamp(event.scheduledTime),
+        }),
+      ),
+      observedEffect(
+        'AutopilotContinuationPolicy.sweep',
+        runAutopilotContinuationSweep({
+          billingAllowsContinuation: async userId => {
+            const result = await requireMinimumRunCredits(
+              openAgentsDatabase(env),
+              userId,
+            )
+
+            return result.ok
+              ? { ok: true, reasonRef: 'continuation.billing_ok' }
+              : {
+                  ok: false,
+                  reasonRef: 'continuation.skipped.billing_blocked',
+                }
+          },
+          dispatchFollowUpTurn: async candidate => {
+            const result = await omniHandlers.continueUserAutopilotRun(
+              env,
+              ctx,
+              {
+                prompt:
+                  'Continue the active OpenAgents goal from the latest durable run state.',
+                runId: candidate.runId,
+                userId: candidate.userId,
+              },
+            )
+
+            return result.ok
+              ? {
+                  ok: true,
+                  reasonRef: 'continuation.dispatched.follow_up_turn',
+                }
+              : {
+                  ok: false,
+                  reasonRef: 'continuation.failed.follow_up_turn',
+                }
+          },
+          dispatchGoalContinuation: async candidate => {
+            await omniHandlers.requestGoalContinuationAfterCompletedRun(
+              env,
+              ctx,
+              candidate.runId,
+            )
+
+            return {
+              ok: true,
+              reasonRef: 'continuation.dispatched.goal_continuation',
+            }
+          },
+          listStoppedRunsForUser: (userId, sinceIso, limit) =>
+            listAutopilotContinuationRunCandidates(openAgentsDatabase(env), {
+              limit,
+              sinceIso,
+              userId,
+            }),
+          nowIso: epochMillisToIsoTimestamp(event.scheduledTime),
+          store: makeD1AutopilotContinuationStore(openAgentsDatabase(env)),
+        }),
+      ),
+      observedEffect(
+        'TipsSweep.runTick',
+        runTipsSweepScheduled(openAgentsDatabase(env), {
+          makeId: randomUuid,
+          nowIso: epochMillisToIsoTimestamp(event.scheduledTime),
+          payFromBuffer: tipsBufferPayFnForEnv(env),
+        }),
+      ),
+      observedEffect(
+        'XClaimRewardTreasuryDispatcher.runTick',
+        runXClaimRewardTreasuryDispatchScheduled(openAgentsDatabase(env), {
+          config: readXClaimRewardTreasuryDispatchConfig(
+            env,
+            epochMillisToIsoTimestamp(event.scheduledTime),
+          ),
+          fetchTreasury: fetchMdkTreasuryPath(env),
+        }),
+      ),
+      observedEffect(
+        'ArtanisResponder.scan',
+        runArtanisResponderScanScheduled(openAgentsDatabase(env), {
+          artanisActorRefs: [ARTANIS_REGISTERED_ACTOR_REF],
+          enabled:
+            (env as { ARTANIS_FORUM_RESPONDER_ENABLED?: string })
+              .ARTANIS_FORUM_RESPONDER_ENABLED === 'true',
+          gatewayToken: (env as { CF_AIG_TOKEN?: string }).CF_AIG_TOKEN,
+          geminiApiKey:
+            (env as { GEMINI_API_KEY?: string }).GEMINI_API_KEY ?? null,
+          nowIso: epochMillisToIsoTimestamp(event.scheduledTime),
+        }),
+      ),
+      observedEffect(
+        'ArtanisAdmin.tick',
+        runArtanisAdminTickScheduled(openAgentsDatabase(env), {
+          dispatch: async body => {
+            const adminToken = (env as { OPENAGENTS_ADMIN_API_TOKEN?: string })
+              .OPENAGENTS_ADMIN_API_TOKEN
+            if (adminToken === undefined) {
+              return { detail: 'admin_token_missing', ok: false }
+            }
+            const response = await runArtanisForumRouteEffect(
+              pylonApiRoutes.routePylonApiRequest(
+                new Request(
+                  'https://openagents.com/api/operator/pylons/assignments',
+                  {
+                    body: JSON.stringify(body),
+                    headers: {
+                      Authorization: `Bearer ${adminToken}`,
+                      'Content-Type': 'application/json',
+                      'Idempotency-Key': String(
+                        (body as { assignmentRef?: string }).assignmentRef ??
+                          'artanis-admin-dispatch',
+                      ),
+                    },
+                    method: 'POST',
+                  },
+                ),
+                env,
+              ),
+            )
+            if (response === undefined) {
+              return { detail: 'route_unmatched', ok: false }
+            }
+            const detail = (await response.text()).slice(0, 200)
+            return { detail, ok: response.ok }
+          },
+          enabled:
+            (env as { ARTANIS_ADMIN_TICK_ENABLED?: string })
+              .ARTANIS_ADMIN_TICK_ENABLED === 'true',
+          gatewayToken: (env as { CF_AIG_TOKEN?: string }).CF_AIG_TOKEN,
+          geminiApiKey:
+            (env as { GEMINI_API_KEY?: string }).GEMINI_API_KEY ?? null,
+          nowIso: epochMillisToIsoTimestamp(event.scheduledTime),
+        }),
+      ),
+      observedEffect(
+        'ArtanisAdmin.closeoutVerifier',
+        runArtanisCloseoutVerifierScheduled(openAgentsDatabase(env), {
+          accept: async input => {
+            const adminToken = (env as { OPENAGENTS_ADMIN_API_TOKEN?: string })
+              .OPENAGENTS_ADMIN_API_TOKEN
+            if (adminToken === undefined) {
+              return { detail: 'admin_token_missing', ok: false }
+            }
+            const response = await runArtanisForumRouteEffect(
+              pylonApiRoutes.routePylonApiRequest(
+                new Request(
+                  `https://openagents.com/api/operator/pylons/assignments/${encodeURIComponent(input.assignmentRef)}/closeout`,
+                  {
+                    body: JSON.stringify({
+                      accepted: input.accepted,
+                      acceptedWorkRefs: input.accepted ? input.refs : [],
+                      closeoutRefs: input.refs,
+                      rejectionRefs: input.accepted ? [] : input.refs,
+                    }),
+                    headers: {
+                      Authorization: `Bearer ${adminToken}`,
+                      'Content-Type': 'application/json',
+                      'Idempotency-Key': `artanis-closeout-${input.assignmentRef}`,
+                    },
+                    method: 'POST',
+                  },
+                ),
+                env,
+              ),
+            )
+            if (response === undefined) {
+              return { detail: 'route_unmatched', ok: false }
+            }
+            return {
+              detail: (await response.text()).slice(0, 200),
+              ok: response.ok,
+            }
+          },
+          enabled:
+            (env as { ARTANIS_ADMIN_TICK_ENABLED?: string })
+              .ARTANIS_ADMIN_TICK_ENABLED === 'true',
+          nowIso: epochMillisToIsoTimestamp(event.scheduledTime),
+          replay: async input =>
+            runTassadarReplayValidation({
+              assignmentRef: input.assignmentRef,
+              claimedTraceDigest: input.claimedTraceDigest,
+              pylonDeviceRef: input.pylonDeviceRef,
+              workload: input.workload,
+            } as never),
+        }),
+      ),
+      observedEffect(
+        // #5053 (epic #5051): worker -> validator pairing orchestration
+        // (Artanis-first, design §4.3 option B). INERT BY DEFAULT: enabled only
+        // when TASSADAR_TRACE_PAIRING === '1', so this changes no live tick
+        // behavior until the #5061 dry-run deliberately enables it. The candidate
+        // resolver yields no validator devices yet (the #5061 dry-run supplies the
+        // distinct-device replay evidence); device-distinctness + no-double-pair
+        // are enforced by the orchestration and the conditional store update.
+        'TassadarTracePairing.tick',
+        runTassadarTracePairingScheduled({
+          createVerificationChallenge: request => {
+            const built = buildTrainingVerificationChallengeRecord({
+              makeId: randomUuid,
+              nowIso: currentIsoTimestamp(),
+              request,
+            })
+
+            return makeD1TrainingVerificationStore(
+              openAgentsDatabase(env),
+            ).createChallenge(built.challenge, built.event)
+          },
+          enabled:
+            (env as { TASSADAR_TRACE_PAIRING?: string })
+              .TASSADAR_TRACE_PAIRING === '1',
+          nowIso: epochMillisToIsoTimestamp(event.scheduledTime),
+          // Intentionally empty (#5121). The trust anchor is a separate-device
+          // replay, so the server must NEVER fabricate a validator's replay
+          // digest — a server-assigned candidate would have to carry a digest it
+          // did not compute. Verdicts are produced by the validator PUSH path
+          // instead: a validator node auto-discovers the next unpaired
+          // contribution (GET /api/training/contributions/next-unpaired), replays
+          // the committed fixture on its own distinct device, and POSTs the
+          // digest to /replay-verdict (which pairs + builds the exact_trace_replay
+          // challenge). This scheduled tick stays a no-op pairer by design; do not
+          // wire it to a digest source.
+          resolveValidatorCandidates: async () => [],
+          store: makeD1TrainingTraceContributionStore(openAgentsDatabase(env)),
+        }),
+      ),
+      observedEffect(
+        'ArtanisResponder.compose',
+        runArtanisComposerScheduled(openAgentsDatabase(env), {
+          artanisActorRef: ARTANIS_REGISTERED_ACTOR_REF,
+          enabled:
+            (env as { ARTANIS_FORUM_RESPONDER_ENABLED?: string })
+              .ARTANIS_FORUM_RESPONDER_ENABLED === 'true',
+          forumPost: artanisComposerForumPostForEnv(env),
+          gatewayToken: (env as { CF_AIG_TOKEN?: string }).CF_AIG_TOKEN,
+          geminiApiKey:
+            (env as { GEMINI_API_KEY?: string }).GEMINI_API_KEY ?? null,
+          nowIso: epochMillisToIsoTimestamp(event.scheduledTime),
+          tip: artanisComposerTipForEnv(env),
+        }),
+      ),
+      observedEffect(
+        'TipsBuffer.reconcileForwarding',
+        Effect.promise(() =>
+          reconcileForwardingBufferPayments(openAgentsDatabase(env), {
+            fetchBufferPaymentStatus: async paymentId => {
+              const fetchBuffer = fetchMdkTipsBufferPath(env)
+              if (fetchBuffer === undefined) {
+                return 'pending'
+              }
+              try {
+                const response = await fetchBuffer(
+                  `/payments/${encodeURIComponent(paymentId)}`,
+                )
+                const body = (await response.json()) as { status?: string }
+                return body.status === 'succeeded'
+                  ? 'succeeded'
+                  : body.status === 'failed'
+                    ? 'failed'
+                    : 'pending'
+              } catch {
+                return 'pending'
+              }
+            },
+            makeId: randomUuid,
+            nowIso: epochMillisToIsoTimestamp(event.scheduledTime),
+          }),
+        ),
+      ),
+      observedEffect(
+        'TreasuryTransactions.reconcilePending',
+        Effect.promise(() =>
+          reconcilePendingTreasuryTransactions({
+            fetchTipsBuffer: fetchMdkTipsBufferPath(env),
+            fetchTreasury: fetchMdkTreasuryPath(env),
+            limit: 25,
+            transactionStore: makeD1TreasuryTransactionStore(
+              openAgentsDatabase(env),
+            ),
+          }),
+        ),
+      ),
+      observedEffect(
+        'ForumDirectTips.archiveStaleRecoveries',
+        Effect.promise(() =>
+          archiveStaleDirectTipRecoveries(
+            openAgentsDatabase(env),
+            epochMillisToIsoTimestamp(event.scheduledTime),
+          ),
+        ),
+      ),
+      observedEffect(
+        'TipsBuffer.backingInvariant',
+        Effect.promise(() =>
+          checkTipsBufferBackingInvariant(openAgentsDatabase(env), async () => {
+            const fetchBuffer = fetchMdkTipsBufferPath(env)
+            if (fetchBuffer === undefined) {
+              return null
+            }
+            try {
+              const response = await fetchBuffer('/balance')
+              const body = (await response.json()) as {
+                maxSendableSat?: number
+                balanceSat?: number
+              }
+              return Number(body.maxSendableSat ?? body.balanceSat ?? 0)
+            } catch {
+              return null
+            }
+          }),
+        ),
       ),
     ])
   },

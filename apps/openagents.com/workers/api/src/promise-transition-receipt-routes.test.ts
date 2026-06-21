@@ -69,7 +69,7 @@ describe('promise transition receipts', () => {
           'https://openagents.com/api/operator/product-promises/transitions',
           {
             body: JSON.stringify({
-              promiseId: 'pylon.no_dark_capacity_accounting.v1',
+              promiseId: 'autopilot.mission_briefing.v1',
               toState: 'green',
             }),
             headers: { 'content-type': 'application/json' },
@@ -89,7 +89,7 @@ describe('promise transition receipts', () => {
           {
             body: JSON.stringify({
               evidenceRefs: ['route:/api/public/pylon-capacity-funnel'],
-              promiseId: 'pylon.no_dark_capacity_accounting.v1',
+              promiseId: 'autopilot.mission_briefing.v1',
               toState: 'green',
             }),
             headers: { 'content-type': 'application/json' },
@@ -114,11 +114,11 @@ describe('promise transition receipts', () => {
           {
             body: JSON.stringify({
               exception: {
-                approvedByRef: 'owner:chris',
+                approvedByRef: 'owner:openagents',
                 expiresAt: '2026-06-16',
                 reasonRef: 'exception.launch_window_demo',
               },
-              promiseId: 'pylon.no_dark_capacity_accounting.v1',
+              promiseId: 'autopilot.mission_briefing.v1',
               toState: 'green',
             }),
             headers: { 'content-type': 'application/json' },
@@ -145,25 +145,46 @@ describe('promise transition receipts', () => {
       ),
     )
     const feedBody = (await publicFeed.json()) as Readonly<{
+      generatedAt: string
+      maxStalenessSeconds: number
       receipts: ReadonlyArray<PromiseTransitionReceipt>
+      registryGeneratedAt: string
+      registryVersion: string
+      staleness: Readonly<{
+        composition: string
+        maxStalenessSeconds: number
+        rebuildsOn: ReadonlyArray<string>
+      }>
     }>
 
     expect(denied.status).toBe(401)
     expect(recorded.status).toBe(201)
     expect(recordedBody.receipt).toMatchObject({
       fromState: 'yellow',
-      promiseId: 'pylon.no_dark_capacity_accounting.v1',
+      promiseId: 'autopilot.mission_briefing.v1',
       receiptId: 'promise_transition_test-receipt-1',
       result: 'failed',
       toState: 'green',
     })
     expect(exceptionBody.receipt.result).toBe('exception')
     expect(publicFeed.status).toBe(200)
+    expect(feedBody.generatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(feedBody.registryGeneratedAt).toBe(feedBody.generatedAt)
+    expect(feedBody.registryVersion).toMatch(/^\d{4}-\d{2}-\d{2}\./)
+    expect(feedBody.maxStalenessSeconds).toBe(0)
+    expect(feedBody.staleness.composition).toBe('live_at_read')
+    expect(feedBody.staleness.maxStalenessSeconds).toBe(0)
+    expect(feedBody.staleness.rebuildsOn).toContain(
+      'product_promise_registry_changed',
+    )
+    expect(feedBody.staleness.rebuildsOn).toContain(
+      'product_promise_transition_receipt_recorded',
+    )
     expect(feedBody.receipts).toHaveLength(2)
 
     const verified = lastVerifiedAtByPromise(feedBody.receipts)
 
-    expect(verified.get('pylon.no_dark_capacity_accounting.v1')).toBe(
+    expect(verified.get('autopilot.mission_briefing.v1')).toBe(
       '2026-06-09T23:05:00.000Z',
     )
   })

@@ -1,4 +1,4 @@
-import { notFound } from '@openagents/sync-worker'
+import { notFound } from '@openagentsinc/sync-worker'
 import { Effect } from 'effect'
 
 import { redirectResponse } from './http/responses'
@@ -30,23 +30,46 @@ type WorkerRouteDependencies = Readonly<{
     ctx: ExecutionContext,
     threadId: string,
   ) => RouteEffect
+  handleForumThreadPage: (
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+    topicId: string,
+  ) => RouteEffect
   optionalUuid: (value: string | undefined) => string | undefined
   routeAutopilotWorkRequest: OptionalEffectRoute
+  routeCloudCodingSessionRequest: OptionalEffectRoute
   routeAgentGoalRequest: OptionalEffectRoute
   routeAgentOwnerClaimRequest: OptionalEffectRoute
+  routeCheckoutPageRequest: OptionalEffectRoute
+  routeTreasuryPageRequest: OptionalEffectRoute
   routeAgentProposalRequest: OptionalEffectRoute
   routeAgentSearchRequest: OptionalEffectRoute
   routeAgentScopedGrantRequest: OptionalEffectRoute
   routeAgentSiteRequest: OptionalEffectRoute
   routeForumRequest: OptionalEffectRoute
   routeImageGenerationRequest: OptionalEffectRoute
+  routeModelRetrieveRequest: OptionalEffectRoute
   routeMulletRequest: OptionalEffectRoute
   routeOmniRequest: OptionalEffectRoute
   routeOnboardingRequest: OptionalEffectRoute
   routeNexusPylonVisibilityRequest: OptionalEffectRoute
+  routePublicCardCreditSpendReceiptRequest: OptionalEffectRoute
+  routePublicInferenceReceiptRequest: OptionalEffectRoute
+  routePublicNip90MarketReceiptRequest: OptionalEffectRoute
+  routePublicPartnerPayoutReceiptRequest: OptionalEffectRoute
+  routePublicSiteReferralPayoutReceiptRequest: OptionalEffectRoute
+  routePublicStripeCheckoutReceiptRequest: OptionalEffectRoute
+  routeEcommerceCampaignReceiptRequest: OptionalEffectRoute
+  routeEcommerceCampaignReceiptOperatorRequest: OptionalEffectRoute
+  routeEcommerceCampaignSelfServeRequest: OptionalEffectRoute
+  routeMarketingAgencyReceiptRequest: OptionalEffectRoute
+  routeMarketingAgencySelfServeRequest: OptionalEffectRoute
   routePylonApiRequest: OptionalEffectRoute
   routeSiteCommerceRequest: OptionalEffectRoute
   routeSiteReferralInspectionRequest: OptionalEffectRoute
+  routeSiteReferralPayoutLedgerRequest: OptionalEffectRoute
+  routeInferenceReferralRequest: OptionalEffectRoute
   routeSiteReferralRequest: OptionalEffectRoute
   routeOperatorAdjutantRequest: OptionalEffectRoute
   routeOperatorArtanisConsoleRequest: OptionalEffectRoute
@@ -62,8 +85,13 @@ type WorkerRouteDependencies = Readonly<{
     env: Env,
     ctx: ExecutionContext,
   ) => Effect.Effect<Response>
+  routeHygieneLaneSettlementRequest: OptionalEffectRoute
+  routeFirmupLaneSettlementRequest: OptionalEffectRoute
+  routeTassadarTraceContributionRequest: OptionalEffectRoute
   routeTeamChatRequest: OptionalEffectRoute
   routeThreadFileRequest: OptionalEffectRoute
+  routeTrainingRunWindowRequest: OptionalEffectRoute
+  routeTrainingVerificationRequest: OptionalEffectRoute
 }>
 
 const knownDocumentPathPatterns: ReadonlyArray<RegExp> = [
@@ -75,13 +103,22 @@ const knownDocumentPathPatterns: ReadonlyArray<RegExp> = [
   /^\/autopilot$/,
   /^\/billing$/,
   /^\/blog(?:\/[^/]+)?$/,
+  /^\/business$/,
+  /^\/components(?:\/[^/]+)?$/,
+  /^\/animations$/,
+  /^\/run$/,
+  /^\/login$/,
   /^\/demo(?:\/.*)?$/,
   /^\/dashboard$/,
   /^\/docs(?:\/[^/]+)?$/,
   /^\/files(?:\/[^/]+)?$/,
+  /^\/forge$/,
   /^\/forum(?:\/.*)?$/,
   /^\/images$/,
+  /^\/moksha$/,
+  /^\/moksha2$/,
   /^\/mullet$/,
+  /^\/pylon$/,
   /^\/onboarding$/,
   /^\/order$/,
   /^\/orders\/[^/]+$/,
@@ -90,10 +127,23 @@ const knownDocumentPathPatterns: ReadonlyArray<RegExp> = [
   /^\/share\/[^/]+$/,
   /^\/sites\/demo-checkout(?:\/[^/]+)?$/,
   /^\/stats$/,
+  /^\/stats-old$/,
+  /^\/tassadar$/,
+  /^\/tassadar\/replay\/[^/]+$/,
   /^\/teams\/[^/]+(?:\/chat|\/files(?:\/[^/]+)?|\/projects\/[^/]+\/chat)$/,
   /^\/t\/[^/]+$/,
+  /^\/training\/runs(?:\/[^/]+)?$/,
   /^\/usage$/,
 ]
+
+const safeDecodeTopicSegment = (value: string): string | undefined => {
+  try {
+    const decoded = decodeURIComponent(value)
+    return decoded.length > 0 ? decoded : undefined
+  } catch {
+    return undefined
+  }
+}
 
 const acceptsDocument = (request: Request): boolean => {
   const accept = request.headers.get('accept')?.toLowerCase() ?? ''
@@ -153,6 +203,16 @@ export const makeWorkerRouteRequest =
         return yield* exactResponse
       }
 
+      // Cloud coding-session surface (autopilot.cloud_coding_sessions.v1, red).
+      // INERT by default; the dispatcher routes both the launch base path and
+      // the /:id lifecycle read, returning undefined for any other path.
+      const cloudCodingSessionResponse =
+        dependencies.routeCloudCodingSessionRequest(request, env, ctx)
+
+      if (cloudCodingSessionResponse !== undefined) {
+        return yield* cloudCodingSessionResponse
+      }
+
       const teamChatResponse = dependencies.routeTeamChatRequest(
         request,
         env,
@@ -191,6 +251,19 @@ export const makeWorkerRouteRequest =
 
       if (imageGenerationResponse !== undefined) {
         return yield* imageGenerationResponse
+      }
+
+      // OpenAI-compatible GET /v1/models/{model} retrieve (the path-param
+      // surface the exact-route registry cannot match). INERT-gated in the
+      // handler; the list /v1/models is an exact route handled above.
+      const modelRetrieveResponse = dependencies.routeModelRetrieveRequest(
+        request,
+        env,
+        ctx,
+      )
+
+      if (modelRetrieveResponse !== undefined) {
+        return yield* modelRetrieveResponse
       }
 
       const threadFileResponse = dependencies.routeThreadFileRequest(
@@ -243,6 +316,26 @@ export const makeWorkerRouteRequest =
 
       if (agentOwnerClaimResponse !== undefined) {
         return yield* agentOwnerClaimResponse
+      }
+
+      const checkoutPageResponse = dependencies.routeCheckoutPageRequest(
+        request,
+        env,
+        ctx,
+      )
+
+      if (checkoutPageResponse !== undefined) {
+        return yield* checkoutPageResponse
+      }
+
+      const treasuryPageResponse = dependencies.routeTreasuryPageRequest(
+        request,
+        env,
+        ctx,
+      )
+
+      if (treasuryPageResponse !== undefined) {
+        return yield* treasuryPageResponse
       }
 
       const agentProposalResponse = dependencies.routeAgentProposalRequest(
@@ -309,6 +402,20 @@ export const makeWorkerRouteRequest =
         return yield* siteReferralInspectionResponse
       }
 
+      const siteReferralPayoutLedgerResponse =
+        dependencies.routeSiteReferralPayoutLedgerRequest(request, env, ctx)
+
+      if (siteReferralPayoutLedgerResponse !== undefined) {
+        return yield* siteReferralPayoutLedgerResponse
+      }
+
+      const inferenceReferralResponse =
+        dependencies.routeInferenceReferralRequest(request, env, ctx)
+
+      if (inferenceReferralResponse !== undefined) {
+        return yield* inferenceReferralResponse
+      }
+
       const pylonApiResponse = dependencies.routePylonApiRequest(
         request,
         env,
@@ -319,11 +426,127 @@ export const makeWorkerRouteRequest =
         return yield* pylonApiResponse
       }
 
+      const tassadarTraceContributionResponse =
+        dependencies.routeTassadarTraceContributionRequest(request, env, ctx)
+
+      if (tassadarTraceContributionResponse !== undefined) {
+        return yield* tassadarTraceContributionResponse
+      }
+
+      const trainingRunWindowResponse =
+        dependencies.routeTrainingRunWindowRequest(request, env, ctx)
+
+      if (trainingRunWindowResponse !== undefined) {
+        return yield* trainingRunWindowResponse
+      }
+
+      const hygieneLaneSettlementResponse =
+        dependencies.routeHygieneLaneSettlementRequest(request, env, ctx)
+
+      if (hygieneLaneSettlementResponse !== undefined) {
+        return yield* hygieneLaneSettlementResponse
+      }
+
+      const firmupLaneSettlementResponse =
+        dependencies.routeFirmupLaneSettlementRequest(request, env, ctx)
+
+      if (firmupLaneSettlementResponse !== undefined) {
+        return yield* firmupLaneSettlementResponse
+      }
+
+      const trainingVerificationResponse =
+        dependencies.routeTrainingVerificationRequest(request, env, ctx)
+
+      if (trainingVerificationResponse !== undefined) {
+        return yield* trainingVerificationResponse
+      }
+
       const nexusPylonVisibilityResponse =
         dependencies.routeNexusPylonVisibilityRequest(request, env, ctx)
 
       if (nexusPylonVisibilityResponse !== undefined) {
         return yield* nexusPylonVisibilityResponse
+      }
+
+      const publicInferenceReceiptResponse =
+        dependencies.routePublicInferenceReceiptRequest(request, env, ctx)
+
+      if (publicInferenceReceiptResponse !== undefined) {
+        return yield* publicInferenceReceiptResponse
+      }
+
+      const publicCardCreditSpendReceiptResponse =
+        dependencies.routePublicCardCreditSpendReceiptRequest(request, env, ctx)
+
+      if (publicCardCreditSpendReceiptResponse !== undefined) {
+        return yield* publicCardCreditSpendReceiptResponse
+      }
+
+      const publicStripeCheckoutReceiptResponse =
+        dependencies.routePublicStripeCheckoutReceiptRequest(request, env, ctx)
+
+      if (publicStripeCheckoutReceiptResponse !== undefined) {
+        return yield* publicStripeCheckoutReceiptResponse
+      }
+
+      const publicSiteReferralPayoutReceiptResponse =
+        dependencies.routePublicSiteReferralPayoutReceiptRequest(
+          request,
+          env,
+          ctx,
+        )
+
+      if (publicSiteReferralPayoutReceiptResponse !== undefined) {
+        return yield* publicSiteReferralPayoutReceiptResponse
+      }
+
+      const publicPartnerPayoutReceiptResponse =
+        dependencies.routePublicPartnerPayoutReceiptRequest(request, env, ctx)
+
+      if (publicPartnerPayoutReceiptResponse !== undefined) {
+        return yield* publicPartnerPayoutReceiptResponse
+      }
+
+      const publicNip90MarketReceiptResponse =
+        dependencies.routePublicNip90MarketReceiptRequest(request, env, ctx)
+
+      if (publicNip90MarketReceiptResponse !== undefined) {
+        return yield* publicNip90MarketReceiptResponse
+      }
+
+      const ecommerceCampaignReceiptResponse =
+        dependencies.routeEcommerceCampaignReceiptRequest(request, env, ctx)
+
+      if (ecommerceCampaignReceiptResponse !== undefined) {
+        return yield* ecommerceCampaignReceiptResponse
+      }
+
+      const ecommerceCampaignReceiptOperatorResponse =
+        dependencies.routeEcommerceCampaignReceiptOperatorRequest(request, env, ctx)
+
+      if (ecommerceCampaignReceiptOperatorResponse !== undefined) {
+        return yield* ecommerceCampaignReceiptOperatorResponse
+      }
+
+      const ecommerceCampaignSelfServeResponse =
+        dependencies.routeEcommerceCampaignSelfServeRequest(request, env, ctx)
+
+      if (ecommerceCampaignSelfServeResponse !== undefined) {
+        return yield* ecommerceCampaignSelfServeResponse
+      }
+
+      const marketingAgencyReceiptResponse =
+        dependencies.routeMarketingAgencyReceiptRequest(request, env, ctx)
+
+      if (marketingAgencyReceiptResponse !== undefined) {
+        return yield* marketingAgencyReceiptResponse
+      }
+
+      const marketingAgencySelfServeResponse =
+        dependencies.routeMarketingAgencySelfServeRequest(request, env, ctx)
+
+      if (marketingAgencySelfServeResponse !== undefined) {
+        return yield* marketingAgencySelfServeResponse
       }
 
       const operatorAdjutantResponse =
@@ -382,6 +605,32 @@ export const makeWorkerRouteRequest =
 
       if (mulletResponse !== undefined) {
         return yield* mulletResponse
+      }
+
+      // Forum thread document requests get per-thread Open Graph / Twitter
+      // Card metadata injected into the server-rendered shell so shared
+      // `/forum/t/{id}` links render rich previews for non-JS social crawlers.
+      // Only GET/HEAD document navigations are intercepted; every other forum
+      // request (including the `/og/forum/...svg` image and all `/api/forum`
+      // calls) flows through routeForumRequest unchanged.
+      const forumThreadPageMatch =
+        (request.method === 'GET' || request.method === 'HEAD') &&
+        acceptsDocument(request)
+          ? /^\/forum\/t\/([^/]+)$/.exec(url.pathname)
+          : null
+
+      if (forumThreadPageMatch !== null) {
+        const topicSegment = forumThreadPageMatch[1]
+        const topicId =
+          topicSegment === undefined
+            ? undefined
+            : safeDecodeTopicSegment(topicSegment)
+
+        if (topicId !== undefined) {
+          return yield* routeEffectOrResponse(
+            dependencies.handleForumThreadPage(request, env, ctx, topicId),
+          )
+        }
       }
 
       const forumResponse = dependencies.routeForumRequest(request, env, ctx)

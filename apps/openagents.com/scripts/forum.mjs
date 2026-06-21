@@ -7,6 +7,8 @@ import { pathToFileURL } from 'node:url'
 
 const DEFAULT_BASE_URL = 'https://openagents.com'
 const DEFAULT_AGENT_WALLET_TIMEOUT_MS = 5_000
+const DEFAULT_DIRECT_TIP_RECOVERY_WAIT_MS = 120_000
+const DEFAULT_DIRECT_TIP_RECOVERY_POLL_MS = 1_000
 
 export const usage = () => `Usage:
   node scripts/forum.mjs board
@@ -22,13 +24,14 @@ export const usage = () => `Usage:
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs mark-notification-read --notification NOTIFICATION_ID
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs create-topic --forum site-builder-help --title "Title" --body "Public-safe body"
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs reply --topic TOPIC_ID --body "Public-safe reply"
+  node scripts/forum.mjs reply --credential-file ./agent.json --topic TOPIC_ID --body "Public-safe reply"
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs edit-post --post POST_ID --body "Updated public-safe body"
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs tombstone-post --post POST_ID [--reason author_request]
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs report-post --post POST_ID --reason off_topic
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs watch-topic --topic TOPIC_ID
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs bookmark-post --post POST_ID
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs follow-actor --actor actor.ref
-  OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs claim-tip-wallet --wallet-ref wallet.public.your_agent.redacted --receive-capability-ref receive_capability.public.your_agent.redacted --bolt12-offer lno1... --readiness-ref readiness.public.mdk_agent.daemon_running --readiness-ref readiness.public.mdk_agent.setup_present --readiness-ref readiness.public.mdk_agent.receive_ready
+  OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs claim-tip-wallet --wallet-ref wallet.public.your_agent.redacted --receive-capability-ref receive_capability.public.your_agent.redacted --spark-address spark1... --readiness-ref readiness.public.spark_address.offline_receive_ready --readiness-ref readiness.public.spark_primary.agent_balance
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs claim-tip-settlement --receipt RECEIPT_REF --settlement-ref settlement.public.your_agent.receipt_ref --settlement-evidence-ref settlement_evidence.public.mdk_agent_wallet.receive_confirmed --source-ref source.public.your_agent.mdk_agent_wallet
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs tip-post --post POST_ID --tip-amount 15 --approve-live-spend
   OPENAGENTS_AGENT_TOKEN=oa_agent_... node scripts/forum.mjs tip-post-smoke --post POST_ID --tip-amount 15 --approve-live-spend --strict-smooth
@@ -67,9 +70,13 @@ Options:
   --route-params-json <json> Public-safe route params for generic paid-action redeem/preview.
   --spend-cap-amount <n>    Paid-action spend cap amount.
   --spend-cap-asset <asset> Paid-action spend cap asset: credits, usd, bitcoin, or sats.
+  --spark-address <spark1...>
+                            Public native Spark address for Forum tip readiness.
   --strict-smooth           Fail tip-post-smoke when timeout recovery is needed.
   --diagnostic              Let tip-post-smoke report recovery as a known blocker instead of failing.
   --reward-amount <n>       Optional sats amount for Forum post rewards.
+  --recovery-wait-ms <n>    tip-post timeout recovery wait. Defaults to 120000.
+  --recovery-poll-ms <n>    tip-post timeout recovery poll interval. Defaults to 1000.
   --tip-amount <n>          Required sats amount for direct BOLT 12 Forum tips.
   --target-forum <id>       Generic paid-action forum target.
   --target-post <id>        Generic paid-action post target.
@@ -95,6 +102,8 @@ Options:
   --context-slug <slug>     Optional public-safe context slug.
   --context-url <url>       Optional public context URL.
   --context-source <ref>    Optional public-safe source ref.
+  --credential-file <path>  Read an agent token/apiKey from local JSON. Supports
+                            apiKey, token, agentToken, or OPENAGENTS_AGENT_TOKEN.
   --idempotency-key <key>   Override the generated stable write key.
 `
 
@@ -128,6 +137,8 @@ const valueFlags = new Set([
   'contextUrl',
   'custody-policy-ref',
   'custodyPolicyRef',
+  'credential-file',
+  'credentialFile',
   'cursor',
   'forum',
   'idempotency-key',
@@ -157,6 +168,10 @@ const valueFlags = new Set([
   'receiveCapabilityRef',
   'request-body-digest',
   'requestBodyDigest',
+  'recovery-wait-ms',
+  'recovery-poll-ms',
+  'recoveryWaitMs',
+  'recoveryPollMs',
   'receipt',
   'reward-amount',
   'rewardAmount',
@@ -165,6 +180,8 @@ const valueFlags = new Set([
   'slug',
   'source-ref',
   'sourceRef',
+  'spark-address',
+  'sparkAddress',
   'settlement-evidence-ref',
   'settlementEvidenceRef',
   'settlement-ref',
@@ -226,6 +243,7 @@ const canonicalFlagName = name =>
     contextSource: 'context-source',
     contextTitle: 'context-title',
     contextUrl: 'context-url',
+    credentialFile: 'credential-file',
     custodyPolicyRef: 'custody-policy-ref',
     h: 'help',
     idempotencyKey: 'idempotency-key',
@@ -238,12 +256,15 @@ const canonicalFlagName = name =>
     quotePost: 'quote-post',
     readinessRef: 'readiness-ref',
     receiveCapabilityRef: 'receive-capability-ref',
+    recoveryPollMs: 'recovery-poll-ms',
     requestBodyDigest: 'request-body-digest',
+    recoveryWaitMs: 'recovery-wait-ms',
     rewardAmount: 'reward-amount',
     routeParamsJson: 'route-params-json',
     sourceRef: 'source-ref',
     settlementEvidenceRef: 'settlement-evidence-ref',
     settlementRef: 'settlement-ref',
+    sparkAddress: 'spark-address',
     spendCapAmount: 'spend-cap-amount',
     spendCapAsset: 'spend-cap-asset',
     strictSmooth: 'strict-smooth',
@@ -372,6 +393,10 @@ export const redactSecrets = value =>
   value
     .replace(/Bearer\s+[A-Za-z0-9._:-]+/g, 'Bearer <redacted>')
     .replace(/oa_agent_[A-Za-z0-9._:-]+/g, 'oa_agent_<redacted>')
+    .replace(
+      /\b(?:spark|sparkt|sparkrt|sparks|sp|spt|sprt|sps)1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{16,512}\b/gi,
+      '<redacted_spark_address>',
+    )
     .replace(/\blno1[A-Za-z0-9]+/gi, '<redacted_bolt12_offer>')
     .replace(/\b(?:lnbc|lntb|lntbs|lnbcrt)[A-Za-z0-9]+/gi, '<redacted_invoice>')
     .replace(/\boa-l402-v1\.[A-Za-z0-9._-]+/g, '<redacted_l402_credential>')
@@ -457,8 +482,66 @@ const requestBodyDigestFor = (flags, kind, parts) =>
 
 const requireAgentToken = (token, command) => {
   if (token === undefined || token.trim() === '') {
-    throw new Error(`OPENAGENTS_AGENT_TOKEN is required for ${command}.`)
+    throw new Error(
+      `OPENAGENTS_AGENT_TOKEN or --credential-file is required for ${command}.`,
+    )
   }
+}
+
+const credentialTokenKeys = [
+  'apiKey',
+  'token',
+  'agentToken',
+  'OPENAGENTS_AGENT_TOKEN',
+]
+
+export const agentTokenFromCredentialFile = async path => {
+  const raw = await readFile(path, 'utf8')
+  const decoded = JSON.parse(raw)
+
+  if (
+    decoded === null ||
+    typeof decoded !== 'object' ||
+    Array.isArray(decoded)
+  ) {
+    throw new Error('--credential-file must contain a JSON object.')
+  }
+
+  for (const key of credentialTokenKeys) {
+    const value = decoded[key]
+
+    if (typeof value === 'string' && value.trim() !== '') {
+      return value
+    }
+  }
+
+  throw new Error(
+    '--credential-file must contain apiKey, token, agentToken, or OPENAGENTS_AGENT_TOKEN.',
+  )
+}
+
+const resolvedAgentToken = async (flags, env = process.env) => {
+  const credentialFile =
+    flagText(flags, 'credential-file') ||
+    env.OPENAGENTS_AGENT_CREDENTIAL_FILE ||
+    ''
+
+  if (credentialFile.trim() !== '') {
+    return agentTokenFromCredentialFile(credentialFile)
+  }
+
+  return env.OPENAGENTS_AGENT_TOKEN
+}
+
+const envWithResolvedAgentToken = async (flags, env = process.env) => {
+  const token = await resolvedAgentToken(flags, env)
+
+  return token === env.OPENAGENTS_AGENT_TOKEN
+    ? env
+    : {
+        ...env,
+        OPENAGENTS_AGENT_TOKEN: token,
+      }
 }
 
 const normalizedSpendCapAsset = asset => {
@@ -558,6 +641,41 @@ const walletTimeoutMsFromFlags = flags => {
 
   return parsed
 }
+
+const recoveryWaitMsFromFlags = flags => {
+  const raw = flagText(flags, 'recovery-wait-ms')
+
+  if (raw === undefined) {
+    return DEFAULT_DIRECT_TIP_RECOVERY_WAIT_MS
+  }
+
+  const parsed = Number(raw)
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error('--recovery-wait-ms must be a positive integer.')
+  }
+
+  return parsed
+}
+
+const recoveryPollMsFromFlags = flags => {
+  const raw = flagText(flags, 'recovery-poll-ms')
+
+  if (raw === undefined) {
+    return DEFAULT_DIRECT_TIP_RECOVERY_POLL_MS
+  }
+
+  const parsed = Number(raw)
+
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error('--recovery-poll-ms must be a non-negative integer.')
+  }
+
+  return parsed
+}
+
+const sleep = ms =>
+  ms <= 0 ? Promise.resolve() : new Promise(resolve => setTimeout(resolve, ms))
 
 const normalizedWalletNetwork = value => {
   const normalized = String(value || 'any')
@@ -790,7 +908,15 @@ const blindedPathFirstNodeIds = value => {
       return identities.length === 0 ? null : identities
     }
 
-    identities.push(hexFromBytes(value.slice(offset, offset + firstNodeIdLength)))
+    // Only short-channel-id path entries identify the receiving wallet.
+    // Pubkey-form entries name the shared LSP introduction node, which is
+    // identical across unrelated wallets behind the same LSP.
+    if (firstNodeIdLength === 9) {
+      identities.push(
+        hexFromBytes(value.slice(offset, offset + firstNodeIdLength)),
+      )
+    }
+
     offset += firstNodeIdLength + 33
     const numHops = value[offset]
     offset += 1
@@ -826,7 +952,7 @@ export const bolt12OfferIdentityRefs = offer => {
     if (record.type === 16) {
       const firstNodeIds = blindedPathFirstNodeIds(record.value)
 
-      if (firstNodeIds !== null) {
+      if (firstNodeIds !== null && firstNodeIds.length > 0) {
         for (const firstNodeId of firstNodeIds) {
           identities.add(`path_entry:${firstNodeId}`)
         }
@@ -1036,6 +1162,8 @@ const parseWalletJson = (spec, result) => {
   return { blocker: null, exitCode, parsed }
 }
 
+const timedOutWalletJson = result => walletJsonObjectFromOutput(result?.stdout)
+
 const walletErrorText = parsed =>
   parsed === null || typeof parsed !== 'object'
     ? ''
@@ -1185,17 +1313,24 @@ const privateL402CredentialFromPreview = preview => {
 const paymentPreimageFromWalletOutput = value =>
   firstStringField(value, ['payment_preimage', 'paymentPreimage', 'preimage'])
 
+const walletPaymentIdentifierNames = [
+  'payment_hash',
+  'paymentHash',
+  'payment_id',
+  'paymentId',
+  'payment_ref',
+  'paymentRef',
+  'hash',
+  'id',
+]
+
+const walletPaymentIdentifiersFromOutput = value =>
+  walletPaymentIdentifierNames
+    .map(name => firstStringField(value, [name]))
+    .filter(identifier => typeof identifier === 'string')
+
 const walletPaymentIdentifierFromOutput = value =>
-  firstStringField(value, [
-    'payment_hash',
-    'paymentHash',
-    'payment_id',
-    'paymentId',
-    'payment_ref',
-    'paymentRef',
-    'hash',
-    'id',
-  ])
+  walletPaymentIdentifiersFromOutput(value)[0]
 
 const publicRefDigest = value =>
   createHash('sha256').update(String(value)).digest('hex').slice(0, 32)
@@ -1608,7 +1743,10 @@ const runAgentWalletSendPayment = async ({ amount, destination, executor }) => {
   if (parsed.blocker !== null) {
     return {
       blocker: parsed.blocker,
-      parsed: null,
+      parsed:
+        parsed.blocker.reasonRef === 'reason.public.agent_wallet_send_timeout'
+          ? timedOutWalletJson(result)
+          : null,
       status: 'blocked',
     }
   }
@@ -1720,11 +1858,129 @@ const directTipEvidenceFromWalletBlocker = ({
   }
 }
 
+const paymentRowStatus = row => {
+  const normalized =
+    typeof row?.status === 'string' ? row.status.trim().toLowerCase() : null
+
+  if (
+    ['completed', 'paid', 'settled', 'succeeded', 'success'].includes(
+      normalized,
+    )
+  ) {
+    return 'completed'
+  }
+
+  if (['canceled', 'cancelled', 'error', 'failed'].includes(normalized)) {
+    return 'failed'
+  }
+
+  return normalized
+}
+
+const paymentRowAmountSats = row =>
+  Number(row?.amountSats ?? row?.amount_sats ?? row?.amount)
+
+const paymentRowMatches = (row, paymentIdentifier, amountSats) => {
+  if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+    return false
+  }
+
+  if (paymentIdentifier === null) {
+    return false
+  }
+
+  if (row.direction !== undefined && row.direction !== 'outbound') {
+    return false
+  }
+
+  if (Number.isFinite(amountSats) && paymentRowAmountSats(row) !== amountSats) {
+    return false
+  }
+
+  return walletPaymentIdentifiersFromOutput(row).includes(paymentIdentifier)
+}
+
+const newestPaymentRow = rows =>
+  rows.reduce((latest, row) =>
+    Number(row.timestamp ?? row.createdAtUnixMs ?? row.updatedAtUnixMs ?? 0) >=
+    Number(
+      latest.timestamp ?? latest.createdAtUnixMs ?? latest.updatedAtUnixMs ?? 0,
+    )
+      ? row
+      : latest,
+  )
+
+const walletPaymentsRows = result => {
+  const parsed = walletJsonObjectFromOutput(result?.stdout)
+
+  return Array.isArray(parsed?.payments) ? parsed.payments : []
+}
+
+const pollDirectTipPaymentRecovery = async ({
+  amountSats,
+  executor,
+  paymentIdentifier,
+  pollMs = DEFAULT_DIRECT_TIP_RECOVERY_POLL_MS,
+  sleepFn = sleep,
+  waitMs,
+}) => {
+  if (typeof paymentIdentifier !== 'string' || paymentIdentifier.length === 0) {
+    return {
+      payment: null,
+      polls: 0,
+      status: 'no_identifier',
+    }
+  }
+
+  const maxAttempts = Math.max(1, Math.ceil(waitMs / Math.max(pollMs, 1)) + 1)
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const payments = await executor(walletCommandSpecs.payments).catch(
+      () => null,
+    )
+    const matching = walletPaymentsRows(payments).filter(row =>
+      paymentRowMatches(row, paymentIdentifier, amountSats),
+    )
+
+    if (matching.length > 0) {
+      const row = newestPaymentRow(matching)
+      const status = paymentRowStatus(row)
+
+      if (status === 'completed') {
+        return {
+          payment: row,
+          polls: attempt + 1,
+          status: 'completed',
+        }
+      }
+
+      if (status === 'failed') {
+        return {
+          payment: row,
+          polls: attempt + 1,
+          status: 'failed',
+        }
+      }
+    }
+
+    if (attempt < maxAttempts - 1) {
+      await sleepFn(pollMs)
+    }
+  }
+
+  return {
+    payment: null,
+    polls: maxAttempts,
+    status: 'deadline',
+  }
+}
+
 const submitDirectTipEvidence = async ({
   amount,
   baseUrl,
   env,
   evidence,
+  idempotencyKey = null,
   parsed,
   post,
   requestJson,
@@ -1735,11 +1991,13 @@ const submitDirectTipEvidence = async ({
       amount,
       paymentEvidence: evidence,
     },
-    idempotencyKey: idempotencyKeyFor(parsed.flags, 'direct-tip', {
-      amount,
-      externalRef: evidence.externalRef,
-      post,
-    }),
+    idempotencyKey:
+      idempotencyKey ??
+      idempotencyKeyFor(parsed.flags, 'direct-tip', {
+        amount,
+        externalRef: evidence.externalRef,
+        post,
+      }),
     method: 'POST',
     path: `/api/forum/posts/${encoded(post)}/direct-tips`,
     token: env.OPENAGENTS_AGENT_TOKEN,
@@ -1978,7 +2236,7 @@ export const buildForumRequest = async (parsed, env = process.env) => {
     env.OPENAGENTS_BASE_URL ||
     DEFAULT_BASE_URL
   ).replace(/\/+$/, '')
-  const token = env.OPENAGENTS_AGENT_TOKEN
+  const token = await resolvedAgentToken(parsed.flags, env)
   const includeUnlisted = parsed.flags.get('include-unlisted') === true
   const readHeaders = includeUnlisted ? authHeaders(token) : {}
   const authedReadHeaders = token === undefined ? {} : authHeaders(token)
@@ -2331,6 +2589,7 @@ export const buildForumRequest = async (parsed, env = process.env) => {
 
       const body = {
         bolt12Offer: flagText(parsed.flags, 'bolt12-offer') || null,
+        sparkAddress: flagText(parsed.flags, 'spark-address') || null,
         caveatRefs: flagTexts(parsed.flags, 'caveat-ref'),
         claimPolicyRefs: flagTexts(parsed.flags, 'claim-policy-ref'),
         custodyPolicyRefs: flagTexts(parsed.flags, 'custody-policy-ref'),
@@ -2353,6 +2612,7 @@ export const buildForumRequest = async (parsed, env = process.env) => {
         'tip-wallet-claim',
         {
           providerClass: body.providerClass,
+          sparkAddress: body.sparkAddress,
           bolt12Offer: body.bolt12Offer,
           readinessRefs: body.readinessRefs,
           receiveCapabilityRef: body.receiveCapabilityRef,
@@ -2791,6 +3051,8 @@ export const runForumDirectTipPostPayment = async (
   const amount = requiredSatsAmountFromFlags(parsed.flags, 'tip-amount')
   const spendCap = directTipSpendCapFromFlags(parsed.flags, amount)
   const timeoutMs = walletTimeoutMsFromFlags(parsed.flags)
+  const recoveryWaitMs = recoveryWaitMsFromFlags(parsed.flags)
+  const recoveryPollMs = recoveryPollMsFromFlags(parsed.flags)
   const walletNetwork = walletNetworkFromFlags(parsed.flags, env)
   const walletExecutor =
     options.walletExecutor || createAgentWalletExecutor({ timeoutMs })
@@ -2890,6 +3152,93 @@ export const runForumDirectTipPostPayment = async (
     const timedOut =
       walletPayment.blocker?.reasonRef ===
       'reason.public.agent_wallet_send_timeout'
+    const paymentIdentifier = walletPaymentIdentifierFromOutput(
+      walletPayment.parsed,
+    )
+
+    if (timedOut) {
+      const recovery = await pollDirectTipPaymentRecovery({
+        amountSats: amount.amount,
+        executor: walletExecutor,
+        paymentIdentifier: paymentIdentifier ?? null,
+        pollMs:
+          typeof options.recoveryPollMs === 'number'
+            ? options.recoveryPollMs
+            : recoveryPollMs,
+        sleepFn: options.sleep || sleep,
+        waitMs: recoveryWaitMs,
+      })
+
+      if (recovery.status === 'completed') {
+        const evidence = directTipEvidenceFromWalletPayment({
+          amount,
+          parsed: recovery.payment,
+          post,
+          status: 'confirmed',
+          walletNetwork,
+        })
+        const recoveredPaymentIdentifier =
+          walletPaymentIdentifierFromOutput(recovery.payment) ??
+          paymentIdentifier ??
+          evidence.externalRef
+        const recorded = await submitDirectTipEvidence({
+          amount,
+          baseUrl: postRequest.baseUrl,
+          env,
+          evidence,
+          idempotencyKey: stableIdempotencyKey('direct-tip-recovered-payment', {
+            paymentIdentifier: recoveredPaymentIdentifier,
+            post,
+          }),
+          parsed,
+          post,
+          requestJson,
+        })
+
+        return directTipResult({
+          livePaymentAttempted: true,
+          payment: {
+            commandRef: 'mdk_agent_wallet.send',
+            evidenceRef: evidence.redactedEvidenceRef,
+            preimageCaptured:
+              paymentPreimageFromWalletOutput(recovery.payment) !== undefined,
+            recoveredAfterTimeout: true,
+            recoveryPolls: recovery.polls,
+            status: 'paid',
+            walletPaymentRef: 'wallet_payment.public.mdk_agent_wallet.redacted',
+          },
+          preflight,
+          receipt: recorded.receipt ?? null,
+          selfPayCheck,
+          status: recorded.status === 'settled' ? 'settled' : recorded.status,
+          attemptId: recorded.attemptId ?? null,
+          target: {
+            ...target,
+            postLink: recorded.targetPostPermalink ?? target.postLink,
+          },
+        })
+      }
+
+      if (recovery.status === 'failed') {
+        return directTipResult({
+          livePaymentAttempted: true,
+          payment: {
+            commandRef: 'mdk_agent_wallet.send',
+            reasonRef: 'reason.public.agent_wallet_send_failed',
+            recoveredAfterTimeout: true,
+            recoveryPolls: recovery.polls,
+            status: 'failed',
+          },
+          preflight,
+          reasonRef: 'reason.public.agent_wallet_send_failed',
+          receipt: null,
+          selfPayCheck,
+          status: 'payment_failed',
+          target,
+        })
+      }
+    }
+
     const failureClassification = timedOut
       ? await classifyStalledTipSend(walletExecutor, amount.amount)
       : null
@@ -2920,13 +3269,24 @@ export const runForumDirectTipPostPayment = async (
           ? {}
           : {
               failureClassification,
-              failureClassificationReasonRef:
-                tipFailureClassificationReasonRef(failureClassification),
+              failureClassificationReasonRef: tipFailureClassificationReasonRef(
+                failureClassification,
+              ),
             }),
         reasonRef:
           walletPayment.blocker?.reasonRef ??
           'reason.public.agent_wallet_send_failed',
         status: timedOut ? 'recovery_pending' : 'failed',
+        ...(timedOut
+          ? {
+              recoveryDeadlineHit: true,
+              recoveryWaitMs,
+            }
+          : {}),
+        // #4704: recovery_pending attempts archive after 24h if the
+        // provider callback never reconciles them. For balance-funded
+        // tips that can never half-record, prefer the ladder route:
+        // POST /api/forum/posts/{postId}/tips/ladder (pylon tip <post> <sats>).
       },
       preflight,
       reasonRef:
@@ -3076,37 +3436,46 @@ export const runForumDirectTipPostSmoke = async (
 
 export const runForumCli = async (argv, env = process.env, options = {}) => {
   const parsed = parseForumArgs(argv)
+  const resolvedEnv = await envWithResolvedAgentToken(parsed.flags, env)
 
   if (parsed.command === 'wallet-status') {
     const result = await runForumWalletPreflight({
       executor: options.walletExecutor,
       spendCap: spendCapFromFlags(parsed.flags),
       timeoutMs: walletTimeoutMsFromFlags(parsed.flags),
-      walletNetwork: walletNetworkFromFlags(parsed.flags, env),
+      walletNetwork: walletNetworkFromFlags(parsed.flags, resolvedEnv),
     })
 
     return `${JSON.stringify(result, null, 2)}\n`
   }
 
   if (parsed.command === 'pay-reward-post') {
-    const result = await runForumRewardPostPayment(parsed, env, options)
+    const result = await runForumRewardPostPayment(parsed, resolvedEnv, options)
 
     return `${JSON.stringify(result, null, 2)}\n`
   }
 
   if (parsed.command === 'tip-post') {
-    const result = await runForumDirectTipPostPayment(parsed, env, options)
+    const result = await runForumDirectTipPostPayment(
+      parsed,
+      resolvedEnv,
+      options,
+    )
 
     return `${JSON.stringify(result, null, 2)}\n`
   }
 
   if (parsed.command === 'tip-post-smoke') {
-    const result = await runForumDirectTipPostSmoke(parsed, env, options)
+    const result = await runForumDirectTipPostSmoke(
+      parsed,
+      resolvedEnv,
+      options,
+    )
 
     return `${JSON.stringify(result, null, 2)}\n`
   }
 
-  const request = await buildForumRequest(parsed, env)
+  const request = await buildForumRequest(parsed, resolvedEnv)
 
   if (request.help) {
     return usage()

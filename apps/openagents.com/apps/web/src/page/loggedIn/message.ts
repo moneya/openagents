@@ -5,13 +5,14 @@ import {
   TokenUsageAggregateResponse,
   TokenUsageLeaderboardPreferenceResponse,
   TokenUsageLeaderboardsResponse,
-} from '@openagents/sync-schema'
+} from '@openagentsinc/sync-schema'
 import { Schema as S } from 'effect'
 import { File as FileSchema } from 'foldkit/file'
 import { m } from 'foldkit/message'
 
 import {
   BillingCheckoutResponse,
+  BillingSetupIntentResponse,
   BillingSummaryResponse,
   OnboardingRepositoriesResponse,
   OnboardingStatusResponse,
@@ -32,7 +33,17 @@ import {
   AgentRunLaunchResponse,
   ArtanisOperatorApprovalAction,
   ArtanisOperatorConsoleResponse,
+  AutopilotDecisionActionResponse,
+  AutopilotDecisionListResponse,
+  AutopilotMorningReportResponse,
+  AutopilotWorkBriefingResponse,
+  AutopilotWorkComposerField,
+  AutopilotWorkEventsResponse,
+  AutopilotWorkListResponse,
+  AutopilotWorkResponse,
+  AutopilotWorkReviewAction,
   CustomerFulfillmentArtifactsResponse,
+  CustomerOneCohortProjection,
   CustomerOrderResponse,
   CustomerOrdersResponse,
   CustomerSiteBuilderEventsResponse,
@@ -47,16 +58,43 @@ import {
   ImageGenerationImageSize,
   ImageGenerationModelId,
   ImageGenerationProvider,
+  PrefilledWorkspaceResponse,
+  ProviderAccountPoolResponse,
   SubmitCustomerSiteFeedbackResponse,
   TeamChatMessagesResponse,
   TeamChatPostResponse,
   ThreadFileDetailResponse,
-  TokenUsageStatsFilters,
   TokenUsageStatsFilterKey,
+  TokenUsageStatsFilters,
 } from './model'
 import { ThreadFileUploadResponse, ThreadFilesResponse } from './model'
 import { MulletBootstrapResponse } from './mullet/model'
+import {
+  FailedLoadWorkroomLifecycle,
+  FailedLoadWorkroomSurface,
+  FailedWorkroomLifecycleDecision,
+  RequestedLoadWorkroomLifecycle,
+  RequestedLoadWorkroomSurface,
+  SelectedWorkroomTab,
+  SubmittedWorkroomLifecycleDecision,
+  SucceededLoadWorkroomLifecycle,
+  SucceededLoadWorkroomSurface,
+  SucceededWorkroomLifecycleDecision,
+} from './page/workroom'
 import { SiteElementContext } from './site-element-context'
+
+export {
+  FailedLoadWorkroomLifecycle,
+  FailedLoadWorkroomSurface,
+  FailedWorkroomLifecycleDecision,
+  RequestedLoadWorkroomLifecycle,
+  RequestedLoadWorkroomSurface,
+  SelectedWorkroomTab,
+  SubmittedWorkroomLifecycleDecision,
+  SucceededLoadWorkroomLifecycle,
+  SucceededLoadWorkroomSurface,
+  SucceededWorkroomLifecycleDecision,
+}
 
 // MESSAGE
 
@@ -101,6 +139,21 @@ export const FailedPollProviderDeviceLogin = m(
     error: S.String,
   },
 )
+export const RequestedLoadProviderAccountPool = m(
+  'RequestedLoadProviderAccountPool',
+)
+export const SucceededLoadProviderAccountPool = m(
+  'SucceededLoadProviderAccountPool',
+  {
+    response: ProviderAccountPoolResponse,
+  },
+)
+export const FailedLoadProviderAccountPool = m(
+  'FailedLoadProviderAccountPool',
+  {
+    error: S.String,
+  },
+)
 export const ClickedBillingPackage = m('ClickedBillingPackage', {
   packageId: S.String,
 })
@@ -108,6 +161,14 @@ export const UpdatedBillingCouponCode = m('UpdatedBillingCouponCode', {
   value: S.String,
 })
 export const SubmittedBillingCoupon = m('SubmittedBillingCoupon')
+export const ClickedPrepareBillingCardSetup = m(
+  'ClickedPrepareBillingCardSetup',
+)
+export const ClickedEnableBillingAutoTopUp = m('ClickedEnableBillingAutoTopUp')
+export const ClickedDisableBillingAutoTopUp = m(
+  'ClickedDisableBillingAutoTopUp',
+)
+export const ClickedRunBillingAutoTopUp = m('ClickedRunBillingAutoTopUp')
 export const SucceededRedeemBillingCoupon = m('SucceededRedeemBillingCoupon', {
   response: BillingSummaryResponse,
 })
@@ -121,6 +182,36 @@ export const SucceededCreateBillingCheckout = m(
   },
 )
 export const FailedCreateBillingCheckout = m('FailedCreateBillingCheckout', {
+  error: S.String,
+})
+export const SucceededPrepareBillingCardSetup = m(
+  'SucceededPrepareBillingCardSetup',
+  {
+    response: BillingSetupIntentResponse,
+  },
+)
+export const FailedPrepareBillingCardSetup = m(
+  'FailedPrepareBillingCardSetup',
+  {
+    error: S.String,
+  },
+)
+export const SucceededUpdateBillingAutoTopUpPolicy = m(
+  'SucceededUpdateBillingAutoTopUpPolicy',
+  {
+    response: BillingSummaryResponse,
+  },
+)
+export const FailedUpdateBillingAutoTopUpPolicy = m(
+  'FailedUpdateBillingAutoTopUpPolicy',
+  {
+    error: S.String,
+  },
+)
+export const SucceededRunBillingAutoTopUp = m('SucceededRunBillingAutoTopUp', {
+  response: BillingSummaryResponse,
+})
+export const FailedRunBillingAutoTopUp = m('FailedRunBillingAutoTopUp', {
   error: S.String,
 })
 export const UpdatedInviteCode = m('UpdatedInviteCode', {
@@ -238,6 +329,156 @@ export const SucceededLoadCustomerOrders = m('SucceededLoadCustomerOrders', {
 export const FailedLoadCustomerOrders = m('FailedLoadCustomerOrders', {
   error: S.String,
 })
+export const RequestedLoadAutopilotWorkList = m(
+  'RequestedLoadAutopilotWorkList',
+)
+export const SucceededLoadAutopilotWorkList = m(
+  'SucceededLoadAutopilotWorkList',
+  {
+    response: AutopilotWorkListResponse,
+  },
+)
+export const FailedLoadAutopilotWorkList = m('FailedLoadAutopilotWorkList', {
+  error: S.String,
+})
+export const RequestedLoadCustomerOneCohort = m(
+  'RequestedLoadCustomerOneCohort',
+)
+export const SucceededLoadCustomerOneCohort = m(
+  'SucceededLoadCustomerOneCohort',
+  {
+    response: CustomerOneCohortProjection,
+  },
+)
+export const FailedLoadCustomerOneCohort = m('FailedLoadCustomerOneCohort', {
+  error: S.String,
+})
+export const RequestedLoadAutopilotMorningReport = m(
+  'RequestedLoadAutopilotMorningReport',
+)
+export const SucceededLoadAutopilotMorningReport = m(
+  'SucceededLoadAutopilotMorningReport',
+  {
+    response: AutopilotMorningReportResponse,
+  },
+)
+export const FailedLoadAutopilotMorningReport = m(
+  'FailedLoadAutopilotMorningReport',
+  {
+    error: S.String,
+  },
+)
+export const UpdatedAutopilotWorkComposerField = m(
+  'UpdatedAutopilotWorkComposerField',
+  {
+    field: AutopilotWorkComposerField,
+    value: S.String,
+  },
+)
+export const SubmittedAutopilotWorkComposer = m(
+  'SubmittedAutopilotWorkComposer',
+)
+export const SucceededAutopilotWorkComposer = m(
+  'SucceededAutopilotWorkComposer',
+  {
+    response: AutopilotWorkResponse,
+  },
+)
+export const FailedAutopilotWorkComposer = m('FailedAutopilotWorkComposer', {
+  error: S.String,
+})
+export const SelectedForgeAutomationTemplate = m(
+  'SelectedForgeAutomationTemplate',
+  {
+    automationId: S.String,
+  },
+)
+export const SubmittedForgeAutomationRun = m('SubmittedForgeAutomationRun', {
+  automationId: S.String,
+})
+export const RequestedLoadAutopilotWorkDetail = m(
+  'RequestedLoadAutopilotWorkDetail',
+  {
+    workOrderRef: S.String,
+  },
+)
+export const SucceededLoadAutopilotWorkDetail = m(
+  'SucceededLoadAutopilotWorkDetail',
+  {
+    response: AutopilotWorkResponse,
+  },
+)
+export const FailedLoadAutopilotWorkDetail = m(
+  'FailedLoadAutopilotWorkDetail',
+  {
+    error: S.String,
+  },
+)
+export const SucceededLoadAutopilotWorkEvents = m(
+  'SucceededLoadAutopilotWorkEvents',
+  {
+    response: AutopilotWorkEventsResponse,
+  },
+)
+export const FailedLoadAutopilotWorkEvents = m(
+  'FailedLoadAutopilotWorkEvents',
+  {
+    error: S.String,
+  },
+)
+export const SucceededLoadAutopilotWorkBriefing = m(
+  'SucceededLoadAutopilotWorkBriefing',
+  {
+    response: AutopilotWorkBriefingResponse,
+  },
+)
+export const FailedLoadAutopilotWorkBriefing = m(
+  'FailedLoadAutopilotWorkBriefing',
+  {
+    error: S.String,
+  },
+)
+export const SubmittedAutopilotWorkReview = m('SubmittedAutopilotWorkReview', {
+  action: AutopilotWorkReviewAction,
+  workOrderRef: S.String,
+})
+export const SucceededAutopilotWorkReview = m('SucceededAutopilotWorkReview', {
+  response: AutopilotWorkResponse,
+})
+export const FailedAutopilotWorkReview = m('FailedAutopilotWorkReview', {
+  error: S.String,
+})
+export const RequestedLoadAutopilotDecisions = m(
+  'RequestedLoadAutopilotDecisions',
+)
+export const SucceededLoadAutopilotDecisions = m(
+  'SucceededLoadAutopilotDecisions',
+  {
+    response: AutopilotDecisionListResponse,
+  },
+)
+export const FailedLoadAutopilotDecisions = m('FailedLoadAutopilotDecisions', {
+  error: S.String,
+})
+export const SubmittedAutopilotDecisionAction = m(
+  'SubmittedAutopilotDecisionAction',
+  {
+    action: AutopilotWorkReviewAction,
+    decisionRef: S.String,
+  },
+)
+export const SucceededAutopilotDecisionAction = m(
+  'SucceededAutopilotDecisionAction',
+  {
+    response: AutopilotDecisionActionResponse,
+  },
+)
+export const FailedAutopilotDecisionAction = m(
+  'FailedAutopilotDecisionAction',
+  {
+    error: S.String,
+  },
+)
 export const UpdatedCustomerOrderDraft = m('UpdatedCustomerOrderDraft', {
   value: S.String,
 })
@@ -446,13 +687,26 @@ export const FailedLoadTokenUsageStats = m('FailedLoadTokenUsageStats', {
   error: S.String,
   filters: TokenUsageStatsFilters,
 })
-export const UpdatedTokenUsageStatsFilter = m(
-  'UpdatedTokenUsageStatsFilter',
+export const UpdatedTokenUsageStatsFilter = m('UpdatedTokenUsageStatsFilter', {
+  field: TokenUsageStatsFilterKey,
+  value: S.String,
+})
+export const RequestedLoadPrefilledWorkspace = m(
+  'RequestedLoadPrefilledWorkspace',
   {
-    field: TokenUsageStatsFilterKey,
-    value: S.String,
+    workspaceId: S.String,
   },
 )
+export const SucceededLoadPrefilledWorkspace = m(
+  'SucceededLoadPrefilledWorkspace',
+  {
+    response: PrefilledWorkspaceResponse,
+  },
+)
+export const FailedLoadPrefilledWorkspace = m('FailedLoadPrefilledWorkspace', {
+  error: S.String,
+  workspaceId: S.String,
+})
 export const RequestedGenerateAdminSite = m('RequestedGenerateAdminSite', {
   siteId: S.String,
 })
@@ -765,6 +1019,18 @@ export const FailedFetchAutopilotRun = m('FailedFetchAutopilotRun', {
   runId: S.String,
   error: S.String,
 })
+export const RequestedNotificationPermission = m(
+  'RequestedNotificationPermission',
+)
+export const ResolvedNotificationPermission = m(
+  'ResolvedNotificationPermission',
+  {
+    granted: S.Boolean,
+    canAskAgain: S.Boolean,
+  },
+)
+export const RaisedBrowserNotifications = m('RaisedBrowserNotifications')
+export const DismissedNotifications = m('DismissedNotifications')
 export const RequestedLoadAgentGoal = m('RequestedLoadAgentGoal', {
   href: S.String,
   scopeKey: S.String,
@@ -957,13 +1223,26 @@ export const Message = S.Union([
   FailedStartProviderDeviceLogin,
   SucceededPollProviderDeviceLogin,
   FailedPollProviderDeviceLogin,
+  RequestedLoadProviderAccountPool,
+  SucceededLoadProviderAccountPool,
+  FailedLoadProviderAccountPool,
   ClickedBillingPackage,
   UpdatedBillingCouponCode,
   SubmittedBillingCoupon,
+  ClickedPrepareBillingCardSetup,
+  ClickedEnableBillingAutoTopUp,
+  ClickedDisableBillingAutoTopUp,
+  ClickedRunBillingAutoTopUp,
   SucceededRedeemBillingCoupon,
   FailedRedeemBillingCoupon,
   SucceededCreateBillingCheckout,
   FailedCreateBillingCheckout,
+  SucceededPrepareBillingCardSetup,
+  FailedPrepareBillingCardSetup,
+  SucceededUpdateBillingAutoTopUpPolicy,
+  FailedUpdateBillingAutoTopUpPolicy,
+  SucceededRunBillingAutoTopUp,
+  FailedRunBillingAutoTopUp,
   UpdatedInviteCode,
   SubmittedInviteCode,
   RequestedLoadOnboardingRepositories,
@@ -996,6 +1275,47 @@ export const Message = S.Union([
   RequestedLoadCustomerOrders,
   SucceededLoadCustomerOrders,
   FailedLoadCustomerOrders,
+  RequestedLoadAutopilotWorkList,
+  SucceededLoadAutopilotWorkList,
+  FailedLoadAutopilotWorkList,
+  RequestedLoadCustomerOneCohort,
+  SucceededLoadCustomerOneCohort,
+  FailedLoadCustomerOneCohort,
+  RequestedLoadAutopilotMorningReport,
+  SucceededLoadAutopilotMorningReport,
+  FailedLoadAutopilotMorningReport,
+  UpdatedAutopilotWorkComposerField,
+  SubmittedAutopilotWorkComposer,
+  SucceededAutopilotWorkComposer,
+  FailedAutopilotWorkComposer,
+  SelectedForgeAutomationTemplate,
+  SubmittedForgeAutomationRun,
+  RequestedLoadAutopilotWorkDetail,
+  SucceededLoadAutopilotWorkDetail,
+  FailedLoadAutopilotWorkDetail,
+  SucceededLoadAutopilotWorkEvents,
+  FailedLoadAutopilotWorkEvents,
+  SucceededLoadAutopilotWorkBriefing,
+  FailedLoadAutopilotWorkBriefing,
+  SubmittedAutopilotWorkReview,
+  SucceededAutopilotWorkReview,
+  FailedAutopilotWorkReview,
+  RequestedLoadAutopilotDecisions,
+  SucceededLoadAutopilotDecisions,
+  FailedLoadAutopilotDecisions,
+  SubmittedAutopilotDecisionAction,
+  SucceededAutopilotDecisionAction,
+  FailedAutopilotDecisionAction,
+  SelectedWorkroomTab,
+  RequestedLoadWorkroomSurface,
+  SucceededLoadWorkroomSurface,
+  FailedLoadWorkroomSurface,
+  RequestedLoadWorkroomLifecycle,
+  SucceededLoadWorkroomLifecycle,
+  FailedLoadWorkroomLifecycle,
+  SubmittedWorkroomLifecycleDecision,
+  SucceededWorkroomLifecycleDecision,
+  FailedWorkroomLifecycleDecision,
   UpdatedCustomerOrderDraft,
   SubmittedCustomerOrder,
   SucceededSubmitCustomerOrder,
@@ -1036,6 +1356,9 @@ export const Message = S.Union([
   SucceededLoadTokenUsageStats,
   FailedLoadTokenUsageStats,
   UpdatedTokenUsageStatsFilter,
+  RequestedLoadPrefilledWorkspace,
+  SucceededLoadPrefilledWorkspace,
+  FailedLoadPrefilledWorkspace,
   RequestedGenerateAdminSite,
   SucceededGenerateAdminSite,
   FailedGenerateAdminSite,
@@ -1097,6 +1420,10 @@ export const Message = S.Union([
   RequestedPollAutopilotRun,
   SucceededFetchAutopilotRun,
   FailedFetchAutopilotRun,
+  RequestedNotificationPermission,
+  ResolvedNotificationPermission,
+  RaisedBrowserNotifications,
+  DismissedNotifications,
   RequestedLoadAgentGoal,
   SucceededLoadAgentGoal,
   FailedLoadAgentGoal,

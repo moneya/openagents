@@ -2,7 +2,10 @@
 .env
 .env.*
 !.env.example
+.openagents-*-agent.json
+.openagents-agent.json
 .secrets/
+.pylon*/
 node_modules/
 .bun/
 .wrangler/
@@ -15,3 +18,7 @@ target/
 var/
 *.tsbuildinfo
 *.log
+*.tgz
+
+# Agent worktrees (on-disk, never tracked)
+.worktrees/

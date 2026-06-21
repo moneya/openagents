@@ -6,14 +6,26 @@ import {
   type ProgrammaticAgentSession,
 } from './agent-registration'
 import {
+  publicRefTriggersAgentSecretScanner,
+  publicScannerSafeRef,
+} from './public-ref-scanner-safety'
+import {
   type PylonApiAssignmentRecord,
   type PylonApiEventRecord,
+  type PylonApiProviderJobLifecycleRecord,
   type PylonApiRegistrationRecord,
   type PylonApiStore,
   PylonApiStoreError,
+  type PylonSparkPayoutTargetRecord,
+  type PylonSparkPayoutTargetStore,
+  buildPylonApiAssignmentRecord,
   buildPylonApiRegistrationRecord,
   makeD1PylonApiStore,
+  providerJobLifecycleRecordFromAssignment,
+  pylonApiPayloadHasPrivateMaterial,
   pylonClientVersionMeetsMinimum,
+  resolveSparkPayoutDestination,
+  resolveSparkPayoutTargetReadiness,
 } from './pylon-api'
 import { makePylonApiRoutes } from './pylon-api-routes'
 
@@ -46,9 +58,11 @@ type PylonRouteJson = Readonly<{
     walletSpendAllowed?: boolean
   }>
   error?: string
+  reason?: string
   events?: ReadonlyArray<unknown>
   idempotent?: boolean
   pylon?: Readonly<{
+    capabilityRefs?: ReadonlyArray<string>
     clientProtocolVersion?: string | null
     clientVersion?: string | null
     createdAtDisplay?: string
@@ -58,10 +72,32 @@ type PylonRouteJson = Readonly<{
     latestHealthRefs?: ReadonlyArray<string>
     latestLoadRefs?: ReadonlyArray<string>
     latestResourceMode?: string | null
+    providerMarketRelayRefs?: ReadonlyArray<string>
+    providerNip90LaneRefs?: ReadonlyArray<string>
+    providerNostrNpub?: string | null
+    providerNostrPubkey?: string | null
     pylonRef?: string
+    sparkPayoutTargetReady?: boolean
+    sparkPayoutTargetRef?: string | null
     walletReady?: boolean
   }>
-  pylons?: ReadonlyArray<unknown>
+  pylons?: ReadonlyArray<
+    Readonly<{
+      capabilityRefs?: ReadonlyArray<string>
+      providerMarketRelayRefs?: ReadonlyArray<string>
+      providerNip90LaneRefs?: ReadonlyArray<string>
+      providerNostrNpub?: string | null
+      providerNostrPubkey?: string | null
+      pylonRef?: string
+      sparkPayoutTargetReady?: boolean
+      sparkPayoutTargetRef?: string | null
+    }>
+  >
+  tassadarCapabilityAdmission?: Readonly<{
+    refusalRefs?: ReadonlyArray<string>
+    selfTestReceiptRefs?: ReadonlyArray<string>
+    state?: string
+  }>
 }>
 
 class MemoryPylonApiStore implements PylonApiStore {
@@ -69,6 +105,7 @@ class MemoryPylonApiStore implements PylonApiStore {
   assignmentsByIdempotency = new Map<string, PylonApiAssignmentRecord>()
   events = new Map<string, PylonApiEventRecord>()
   eventsByIdempotency = new Map<string, PylonApiEventRecord>()
+  providerJobLifecycle = new Map<string, PylonApiProviderJobLifecycleRecord>()
   registrations = new Map<string, PylonApiRegistrationRecord>()
 
   createAssignment = async (record: PylonApiAssignmentRecord) => {
@@ -82,6 +119,10 @@ class MemoryPylonApiStore implements PylonApiStore {
 
     this.assignments.set(record.assignmentRef, record)
     this.assignmentsByIdempotency.set(record.idempotencyKeyHash, record)
+    this.providerJobLifecycle.set(
+      record.assignmentRef,
+      providerJobLifecycleRecordFromAssignment(record),
+    )
 
     return { idempotent: false, record }
   }
@@ -117,6 +158,14 @@ class MemoryPylonApiStore implements PylonApiStore {
   listRegistrations = async (limit: number) =>
     Array.from(this.registrations.values()).slice(0, limit)
 
+  listProviderJobLifecycleForPylons = async (
+    pylonRefs: ReadonlyArray<string>,
+    limit: number,
+  ) =>
+    Array.from(this.providerJobLifecycle.values())
+      .filter(record => pylonRefs.includes(record.pylonRef))
+      .slice(0, limit)
+
   readEventByIdempotencyKeyHash = async (idempotencyKeyHash: string) =>
     this.eventsByIdempotency.get(idempotencyKeyHash)
 
@@ -132,6 +181,18 @@ class MemoryPylonApiStore implements PylonApiStore {
   updateAssignment = async (record: PylonApiAssignmentRecord) => {
     this.assignments.set(record.assignmentRef, record)
     this.assignmentsByIdempotency.set(record.idempotencyKeyHash, record)
+    this.providerJobLifecycle.set(
+      record.assignmentRef,
+      providerJobLifecycleRecordFromAssignment(record),
+    )
+
+    return record
+  }
+
+  upsertProviderJobLifecycle = async (
+    record: PylonApiProviderJobLifecycleRecord,
+  ) => {
+    this.providerJobLifecycle.set(record.assignmentRef, record)
 
     return record
   }
@@ -162,6 +223,33 @@ class MemoryPylonApiStore implements PylonApiStore {
 
     return next
   }
+}
+
+// #5252: in-memory private Spark payout-target store mirroring the D1 upsert
+// semantics (idempotent by pylonRef). The raw address lives only here.
+class MemorySparkPayoutTargetStore implements PylonSparkPayoutTargetStore {
+  records = new Map<string, PylonSparkPayoutTargetRecord>()
+
+  upsert = async (record: PylonSparkPayoutTargetRecord) => {
+    const existing = this.records.get(record.pylonRef)
+    const next =
+      existing === undefined
+        ? record
+        : { ...record, createdAt: existing.createdAt }
+
+    this.records.set(record.pylonRef, next)
+
+    return next
+  }
+
+  read = async (pylonRef: string) => this.records.get(pylonRef)
+
+  // #5252 owner-scoped fallback: most-recently-updated target for the owner,
+  // across ANY of that owner's pylonRefs. Bound to the owning agent only.
+  readByOwner = async (ownerAgentUserId: string) =>
+    [...this.records.values()]
+      .filter(record => record.ownerAgentUserId === ownerAgentUserId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
 }
 
 type D1InsertShape = Readonly<{
@@ -260,6 +348,81 @@ class RegistrationInsertD1 implements D1Database {
   }
 }
 
+class AssignmentBatchStatement implements D1PreparedStatement {
+  readonly bindings: ReadonlyArray<unknown> = []
+
+  constructor(readonly query: string) {}
+
+  bind(...values: ReadonlyArray<unknown>): D1PreparedStatement {
+    return Object.assign(new AssignmentBatchStatement(this.query), {
+      bindings: values,
+    })
+  }
+
+  first<T = unknown>(): Promise<T | null> {
+    if (this.query.includes('FROM pylon_api_assignments')) {
+      return Promise.resolve(null)
+    }
+
+    return Promise.reject(new Error(`Unexpected D1 first: ${this.query}`))
+  }
+
+  run<T = Record<string, unknown>>(): Promise<D1Result<T>> {
+    return Promise.reject(
+      new Error('D1 run should not be used for assignment lifecycle writes'),
+    )
+  }
+
+  all<T = unknown>(): Promise<D1Result<T>> {
+    return Promise.reject(new Error(`Unexpected D1 all: ${this.query}`))
+  }
+
+  raw<T = unknown[]>(options: {
+    columnNames: true
+  }): Promise<[string[], ...T[]]>
+  raw<T = unknown[]>(options?: { columnNames?: false }): Promise<T[]>
+  raw<T = unknown[]>(options?: {
+    columnNames?: boolean
+  }): Promise<T[] | [string[], ...T[]]> {
+    return Promise.reject(new Error(`Unexpected D1 raw: ${this.query}`))
+  }
+}
+
+class AssignmentBatchD1 implements D1Database {
+  batchQueries: string[] = []
+  failBatch = false
+
+  batch<T = unknown>(
+    statements: D1PreparedStatement[],
+  ): Promise<Array<D1Result<T>>> {
+    this.batchQueries = statements.map(
+      statement => (statement as AssignmentBatchStatement).query,
+    )
+
+    if (this.failBatch) {
+      return Promise.reject(new Error('simulated mid-batch failure'))
+    }
+
+    return Promise.resolve(statements.map(() => d1Result<T>()))
+  }
+
+  dump(): Promise<ArrayBuffer> {
+    return Promise.reject(new Error('D1 dump should not be used'))
+  }
+
+  exec(): Promise<D1ExecResult> {
+    return Promise.reject(new Error('D1 exec should not be used'))
+  }
+
+  prepare(query: string): D1PreparedStatement {
+    return new AssignmentBatchStatement(query)
+  }
+
+  withSession(): D1DatabaseSession {
+    throw new Error('D1 session should not be used')
+  }
+}
+
 const sessionFor = (userId: string): ProgrammaticAgentSession => ({
   credential: {
     id: `credential-${userId}`,
@@ -289,6 +452,7 @@ const agentStoreFor = (userId: string): AgentRegistrationStore => ({
       user: sessionFor(userId).user,
     }),
   touchAgentCredential: () => Promise.resolve(),
+  updateAgentDisplayName: () => Promise.resolve(0),
 })
 
 const route = async (
@@ -356,6 +520,10 @@ const registerPylon = async (
   input: Readonly<{
     capabilityRefs?: ReadonlyArray<string>
     idempotencyKey?: string
+    providerMarketRelayRefs?: ReadonlyArray<string>
+    providerNip90LaneRefs?: ReadonlyArray<string>
+    providerNostrNpub?: string
+    providerNostrPubkey?: string
     pylonRef?: string
     tokenUserId?: string
   }> = {},
@@ -366,6 +534,18 @@ const registerPylon = async (
       clientProtocolVersion: '0.2.5',
       clientVersion: 'openagents.pylon@0.2.5',
       displayName: 'Edge Pylon',
+      ...(input.providerMarketRelayRefs === undefined
+        ? {}
+        : { providerMarketRelayRefs: input.providerMarketRelayRefs }),
+      ...(input.providerNip90LaneRefs === undefined
+        ? {}
+        : { providerNip90LaneRefs: input.providerNip90LaneRefs }),
+      ...(input.providerNostrNpub === undefined
+        ? {}
+        : { providerNostrNpub: input.providerNostrNpub }),
+      ...(input.providerNostrPubkey === undefined
+        ? {}
+        : { providerNostrPubkey: input.providerNostrPubkey }),
       pylonRef: input.pylonRef ?? 'pylon.test.one',
       resourceMode: 'background_20',
       walletRef: 'wallet.public.edge',
@@ -499,10 +679,58 @@ describe('Pylon API routes', () => {
     await store.upsertRegistration(record)
 
     expect(db.registrationInsertShape).toEqual({
-      bindCount: 22,
-      columnCount: 23,
-      valueCount: 23,
+      bindCount: 26,
+      columnCount: 27,
+      valueCount: 27,
     })
+  })
+
+  test('D1 assignment creation batches assignment and provider lifecycle writes atomically', async () => {
+    const db = new AssignmentBatchD1()
+    const store = makeD1PylonApiStore(db)
+    const record = buildPylonApiAssignmentRecord({
+      idempotencyKeyHash: 'hash.assignment.lifecycle',
+      makeId: () => 'assignment-lifecycle',
+      nowIso: '2026-06-10T09:30:00.000Z',
+      ownerAgentUserId: 'agent-one',
+      request: {
+        acceptanceCriteriaRefs: ['acceptance.public.echo_result'],
+        campaignPaused: false,
+        campaignPolicyRefs: ['policy.public.probe_gepa.no_spend_dispatch'],
+        closeoutPathRefs: ['closeout.public.operator_review_required'],
+        forumAutoPublishAllowed: false,
+        idempotencyRefs: ['idempotency.public.pylon_assignment.request_key'],
+        jobKind: 'healthcheck_echo',
+        noDuplicateAssignmentRefs: [
+          'dedupe.public.pylon_assignment.active_lease',
+        ],
+        noForumAutoPublishRefs: ['policy.public.no_forum_auto_publish'],
+        operatorPauseRefs: ['pause.public.artanis.pylon_dispatch'],
+        pylonRef: 'pylon.test.one',
+        requiredCapabilityRefs: ['capability.public.inference'],
+        resultExpectationRefs: ['result.public.echo_summary'],
+        rollbackRefs: ['rollback.public.artanis.cancel_pylon_dispatch'],
+        selectionPolicyRefs: ['selection.public.pylon.capability_match'],
+        spendCapRefs: [],
+        taskRefs: ['task.public.echo_hello_world'],
+      },
+    })
+
+    await store.createAssignment(record)
+
+    expect(db.batchQueries).toHaveLength(2)
+    expect(db.batchQueries[0]).toContain('INSERT INTO pylon_api_assignments')
+    expect(db.batchQueries[1]).toContain(
+      'INSERT INTO pylon_provider_job_lifecycle',
+    )
+
+    const failingDb = new AssignmentBatchD1()
+    failingDb.failBatch = true
+
+    await expect(
+      makeD1PylonApiStore(failingDb).createAssignment(record),
+    ).rejects.toThrow('simulated mid-batch failure')
+    expect(failingDb.batchQueries).toHaveLength(2)
   })
 
   test('registers a Pylon and exposes public-safe reads', async () => {
@@ -522,6 +750,245 @@ describe('Pylon API routes', () => {
     expect((await responseJson<PylonRouteJson>(detail)).events).toHaveLength(1)
   })
 
+  test('refuses an unreceipted Tassadar executor capability claim at registration (W4.1)', async () => {
+    const store = new MemoryPylonApiStore()
+    const created = await registerPylon(store, {
+      capabilityRefs: [
+        'capability.public.inference',
+        'capability.tassadar_poc.numeric_model_executor',
+      ],
+    })
+    const createdJson = await responseJson<PylonRouteJson>(created)
+
+    expect(created.status).toBe(201)
+    expect(createdJson.tassadarCapabilityAdmission?.state).toBe('refused')
+    expect(createdJson.tassadarCapabilityAdmission?.refusalRefs).toEqual([
+      'refusal.public.pylon_capability.tassadar_executor_unreceipted',
+    ])
+    expect(createdJson.pylon?.capabilityRefs).toEqual([
+      'capability.public.inference',
+    ])
+
+    const stored = store.registrations.get('pylon.test.one')
+    expect(stored?.capabilityRefs).toEqual(['capability.public.inference'])
+  })
+
+  test('admits and advertises a Tassadar executor capability carried with its self-test receipt (W4.1)', async () => {
+    const store = new MemoryPylonApiStore()
+    const receiptRef =
+      'receipt.tassadar_executor.self_test.v1.f2995c4e3c959b42'
+    const created = await registerPylon(store, {
+      capabilityRefs: [
+        'capability.tassadar_poc.numeric_model_executor',
+        receiptRef,
+      ],
+    })
+    const createdJson = await responseJson<PylonRouteJson>(created)
+
+    expect(created.status).toBe(201)
+    expect(createdJson.tassadarCapabilityAdmission?.state).toBe('admitted')
+    expect(
+      createdJson.tassadarCapabilityAdmission?.selfTestReceiptRefs,
+    ).toEqual([receiptRef])
+    expect(createdJson.pylon?.capabilityRefs).toContain(
+      'capability.tassadar_poc.numeric_model_executor',
+    )
+    expect(createdJson.pylon?.capabilityRefs).toContain(receiptRef)
+  })
+
+  test('blocks executor dispatch against a legacy registration whose capability has no self-test receipt (W4.1)', async () => {
+    const store = new MemoryPylonApiStore()
+    const receiptRef =
+      'receipt.tassadar_executor.self_test.v1.f2995c4e3c959b42'
+    await registerPylon(store, {
+      capabilityRefs: [
+        'capability.tassadar_poc.numeric_model_executor',
+        receiptRef,
+      ],
+    })
+    await markOnline(store)
+    await markWalletReady(store)
+
+    const receipted = await createAssignment(store, {
+      assignmentRef: 'assignment.public.tassadar_receipted',
+      idempotencyKey: 'assignment-tassadar-receipted',
+      requiredCapabilityRefs: [
+        'capability.tassadar_poc.numeric_model_executor',
+      ],
+    })
+    expect(receipted.status).toBe(201)
+
+    // Simulate a pre-W4.1 registration row: capability claim stored
+    // without its self-test receipt ref.
+    const stored = store.registrations.get('pylon.test.one')
+    store.registrations.set('pylon.test.one', {
+      ...stored!,
+      capabilityRefs: ['capability.tassadar_poc.numeric_model_executor'],
+    })
+
+    const unreceipted = await createAssignment(store, {
+      assignmentRef: 'assignment.public.tassadar_unreceipted',
+      idempotencyKey: 'assignment-tassadar-unreceipted',
+      requiredCapabilityRefs: [
+        'capability.tassadar_poc.numeric_model_executor',
+      ],
+    })
+    const unreceiptedJson = await responseJson<PylonRouteJson>(unreceipted)
+
+    expect(unreceipted.status).toBe(409)
+    expect(unreceiptedJson.dispatchGate?.blockerRefs).toContain(
+      'blocker.public.pylon_dispatch.tassadar_capability_unreceipted',
+    )
+  })
+
+  test('renders scanner-shaped Pylon public refs as short dotted aliases', async () => {
+    const store = new MemoryPylonApiStore()
+    const scannerShapedCapabilityRef =
+      'edge-pylon-capability-8b378373002501f3e896dcd3'
+    const expectedCapabilityRef = publicScannerSafeRef(
+      'capability.public.pylon',
+      scannerShapedCapabilityRef,
+    )
+    const created = await registerPylon(store, {
+      capabilityRefs: [scannerShapedCapabilityRef, 'capability.public.gpu'],
+    })
+    const createdJson = await responseJson<PylonRouteJson>(created)
+    const listJson = await responseJson<PylonRouteJson>(
+      await route(store, '/api/pylons'),
+    )
+    const detailJson = await responseJson<PylonRouteJson>(
+      await route(store, '/api/pylons/pylon.test.one'),
+    )
+
+    expect(createdJson.pylon?.capabilityRefs).toEqual([
+      'capability.public.gpu',
+      expectedCapabilityRef,
+    ])
+    expect(listJson.pylons?.[0]?.capabilityRefs).toEqual([
+      'capability.public.gpu',
+      expectedCapabilityRef,
+    ])
+    expect(detailJson.pylon?.capabilityRefs).toEqual([
+      'capability.public.gpu',
+      expectedCapabilityRef,
+    ])
+    expect(JSON.stringify({ createdJson, listJson, detailJson })).not.toContain(
+      scannerShapedCapabilityRef,
+    )
+  })
+
+  test('publishes provider Nostr pubkey, relay refs, and NIP-90 lane refs for provider Pylons (#4864)', async () => {
+    const store = new MemoryPylonApiStore()
+    const providerNostrPubkey =
+      'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2'
+    const providerNostrNpub =
+      'npub1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce'
+    const providerMarketRelayRefs = [
+      'wss://relay.openagents.com',
+      'wss://relay.damus.io',
+    ]
+    const providerNip90LaneRefs = [
+      'lane.public.nip90.5050.text_generation',
+      'lane.public.nip90.5934.labor_code_task',
+    ]
+
+    // The hex pubkey is exactly the shape the raw-id scanner aliases, so
+    // this test pins the deliberate identity-field allowlist: the value
+    // must survive projection verbatim or stranger buyers cannot map
+    // relay bids (event.pubkey) to registered capacity.
+    expect(publicRefTriggersAgentSecretScanner(providerNostrPubkey)).toBe(true)
+
+    const created = await registerPylon(store, {
+      providerMarketRelayRefs,
+      providerNip90LaneRefs,
+      providerNostrNpub,
+      providerNostrPubkey,
+    })
+    const createdJson = await responseJson<PylonRouteJson>(created)
+    const listJson = await responseJson<PylonRouteJson>(
+      await route(store, '/api/pylons'),
+    )
+    const detailJson = await responseJson<PylonRouteJson>(
+      await route(store, '/api/pylons/pylon.test.one'),
+    )
+
+    expect(created.status).toBe(201)
+    expect(createdJson.pylon?.providerNostrPubkey).toBe(providerNostrPubkey)
+    expect(createdJson.pylon?.providerNostrNpub).toBe(providerNostrNpub)
+    expect(createdJson.pylon?.providerMarketRelayRefs).toEqual(
+      providerMarketRelayRefs,
+    )
+    expect(createdJson.pylon?.providerNip90LaneRefs).toEqual(
+      providerNip90LaneRefs,
+    )
+    expect(listJson.pylons?.[0]?.providerNostrPubkey).toBe(providerNostrPubkey)
+    expect(listJson.pylons?.[0]?.providerNostrNpub).toBe(providerNostrNpub)
+    expect(listJson.pylons?.[0]?.providerMarketRelayRefs).toEqual(
+      providerMarketRelayRefs,
+    )
+    expect(listJson.pylons?.[0]?.providerNip90LaneRefs).toEqual(
+      providerNip90LaneRefs,
+    )
+    expect(detailJson.pylon?.providerNostrPubkey).toBe(providerNostrPubkey)
+  })
+
+  test('leaves provider discovery fields absent for non-provider or pre-upgrade registrations (#4864)', async () => {
+    const store = new MemoryPylonApiStore()
+    await registerPylon(store)
+    const listJson = await responseJson<PylonRouteJson>(
+      await route(store, '/api/pylons'),
+    )
+
+    expect(listJson.pylons?.[0]?.providerNostrPubkey).toBeNull()
+    expect(listJson.pylons?.[0]?.providerNostrNpub).toBeNull()
+    expect(listJson.pylons?.[0]?.providerMarketRelayRefs).toEqual([])
+    expect(listJson.pylons?.[0]?.providerNip90LaneRefs).toEqual([])
+  })
+
+  test('upgrades provider discovery fields from a heartbeat without re-registration (#4864)', async () => {
+    const store = new MemoryPylonApiStore()
+    await registerPylon(store)
+    const providerNostrPubkey =
+      'f0e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1'
+    const heartbeat = await route(store, '/api/pylons/pylon.test.one/heartbeat', {
+      body: {
+        capacityRefs: ['capacity.public.gpu_available'],
+        healthRefs: ['health.public.ok'],
+        loadRefs: ['load.public.low'],
+        providerMarketRelayRefs: ['wss://relay.openagents.com'],
+        providerNip90LaneRefs: ['lane.public.nip90.5050.text_generation'],
+        providerNostrPubkey,
+        status: 'online',
+      },
+      idempotencyKey: 'heartbeat-provider-discovery-upgrade',
+      method: 'POST',
+      tokenUserId: 'agent-one',
+    })
+    const heartbeatJson = await responseJson<PylonRouteJson>(heartbeat)
+    const listJson = await responseJson<PylonRouteJson>(
+      await route(store, '/api/pylons'),
+    )
+
+    expect(heartbeat.status).toBe(201)
+    expect(heartbeatJson.pylon?.providerNostrPubkey).toBe(providerNostrPubkey)
+    expect(listJson.pylons?.[0]?.providerNostrPubkey).toBe(providerNostrPubkey)
+    expect(listJson.pylons?.[0]?.providerMarketRelayRefs).toEqual([
+      'wss://relay.openagents.com',
+    ])
+    expect(listJson.pylons?.[0]?.providerNip90LaneRefs).toEqual([
+      'lane.public.nip90.5050.text_generation',
+    ])
+  })
+
+  test('rejects malformed provider discovery identity fields (#4864)', async () => {
+    const store = new MemoryPylonApiStore()
+    const rejected = await registerPylon(store, {
+      providerNostrPubkey: 'not-a-pubkey',
+    })
+
+    expect(rejected.status).toBe(400)
+  })
+
   test('parses Pylon client versions with a v0.2.5 minimum helper', () => {
     expect(pylonClientVersionMeetsMinimum('0.2.5', '0.2.5')).toBe(true)
     expect(pylonClientVersionMeetsMinimum('pylon-v0.2.6', '0.2.5')).toBe(true)
@@ -532,6 +999,34 @@ describe('Pylon API routes', () => {
     expect(pylonClientVersionMeetsMinimum('release train ready', '0.2.5')).toBe(
       false,
     )
+  })
+
+  test('heartbeat with walletReady=true flips registration walletReady without a separate wallet-readiness event (#5151)', async () => {
+    const store = new MemoryPylonApiStore()
+    await registerPylon(store)
+
+    const heartbeat = await route(store, '/api/pylons/pylon.test.one/heartbeat', {
+      body: {
+        capacityRefs: ['capacity.public.gpu_available'],
+        clientProtocolVersion: '0.2.6',
+        clientVersion: 'pylon-v0.2.6',
+        healthRefs: ['health.public.ok'],
+        loadRefs: ['load.public.low'],
+        resourceMode: 'balanced',
+        status: 'online',
+        walletReady: true,
+      },
+      idempotencyKey: 'key-heartbeat-walletready',
+      method: 'POST',
+      tokenUserId: 'agent-one',
+    })
+    expect(heartbeat.status).toBe(201)
+
+    const detail = await responseJson<PylonRouteJson>(
+      await route(store, '/api/pylons/pylon.test.one'),
+    )
+    // Before #5151 this stayed false until a separate wallet-readiness event.
+    expect(detail.pylon?.walletReady).toBe(true)
   })
 
   test('records heartbeat, wallet readiness, assignment, artifact, payment, and settlement events', async () => {
@@ -696,6 +1191,71 @@ describe('Pylon API routes', () => {
     expect((await responseJson<PylonRouteJson>(replay)).idempotent).toBe(true)
   })
 
+  test('returns the documented token-only presence contract for a self-signed Nostr heartbeat (#5058)', async () => {
+    const store = new MemoryPylonApiStore()
+    await registerPylon(store)
+
+    const request = new Request(
+      'https://openagents.com/api/pylons/pylon.test.one/heartbeat',
+      {
+        body: JSON.stringify({
+          healthRefs: ['health.public.ok'],
+          status: 'online',
+        }),
+        headers: {
+          authorization:
+            'Nostr eyJpZCI6ImFiYyIsImtpbmQiOjI3MjM1LCJzaWciOiJkZWFkYmVlZiJ9',
+          'content-type': 'application/json',
+          'Idempotency-Key': 'heartbeat-nostr-self-signed',
+        },
+        method: 'POST',
+      },
+    )
+    const routes = makePylonApiRoutes({
+      agentStore: () => agentStoreFor('agent-one'),
+      makeId: () => 'test-nostr',
+      makeStore: () => store,
+      nowIso: () => '2026-06-07T00:10:00.000Z',
+      requireAdminApiToken: () => Promise.resolve(false),
+    })
+    const response = routes.routePylonApiRequest(request, {
+      OPENAGENTS_DB: {} as D1Database,
+    })
+
+    if (response === undefined) {
+      throw new Error('No route matched heartbeat')
+    }
+
+    const resolved = await Effect.runPromise(response)
+    const body = await responseJson<PylonRouteJson>(resolved)
+
+    expect(resolved.status).toBe(401)
+    expect(resolved.headers.get('www-authenticate')).toBe('Bearer')
+    expect(body.error).toBe('pylon_api_presence_requires_agent_token')
+    expect(body.reason).toContain('Bearer')
+
+    const detail = await route(store, '/api/pylons/pylon.test.one', {})
+    expect(
+      (await responseJson<PylonRouteJson>(detail)).pylon?.latestHeartbeatStatus,
+    ).not.toBe('online')
+  })
+
+  test('returns a bare unauthorized for a heartbeat with no authorization', async () => {
+    const store = new MemoryPylonApiStore()
+    await registerPylon(store)
+
+    const response = await route(store, '/api/pylons/pylon.test.one/heartbeat', {
+      body: { healthRefs: ['health.public.ok'], status: 'online' },
+      idempotencyKey: 'heartbeat-no-auth',
+      method: 'POST',
+    })
+    const body = await responseJson<PylonRouteJson>(response)
+
+    expect(response.status).toBe(401)
+    expect(response.headers.get('www-authenticate')).toBeNull()
+    expect(body.error).toBe('unauthorized')
+  })
+
   test('records payout-target admission lifecycle statuses as public-safe events', async () => {
     const store = new MemoryPylonApiStore()
     await registerPylon(store)
@@ -740,6 +1300,616 @@ describe('Pylon API routes', () => {
     expect(
       JSON.stringify(events.map(event => event.publicProjectionJson)),
     ).not.toMatch(/lnbc|payment_hash|preimage|balance\.mdk_agent_wallet\.\d/i)
+  })
+
+  // #5252: raw Spark address registration as a payout target. The raw spark1…
+  // is stored privately keyed to pylonRef; the public projection carries only
+  // the redacted payout.spark.<digest> ref.
+  const sparkDigestRef = async (rawSparkAddress: string) => {
+    const buffer = await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(rawSparkAddress.trim()),
+    )
+    const hex = Array.from(new Uint8Array(buffer))
+      .map(byte => byte.toString(16).padStart(2, '0'))
+      .join('')
+
+    return `payout.spark.${hex.slice(0, 24)}`
+  }
+
+  const sparkRoute = async (
+    store: MemoryPylonApiStore,
+    sparkStore: MemorySparkPayoutTargetStore | undefined,
+    path: string,
+    options: Readonly<{
+      body?: unknown
+      idempotencyKey?: string
+      method?: string
+      nowIso?: string
+      tokenUserId?: string
+    }> = {},
+  ) => {
+    let counter = 0
+    const init: RequestInit = {
+      headers: {
+        ...(options.body === undefined
+          ? {}
+          : { 'content-type': 'application/json' }),
+        ...(options.idempotencyKey === undefined
+          ? {}
+          : { 'Idempotency-Key': options.idempotencyKey }),
+        ...(options.tokenUserId === undefined
+          ? {}
+          : { authorization: `Bearer oa_agent_${options.tokenUserId}` }),
+      },
+      method: options.method ?? 'POST',
+    }
+
+    if (options.body !== undefined) {
+      init.body = JSON.stringify(options.body)
+    }
+
+    const request = new Request(`https://openagents.com${path}`, init)
+    const routes = makePylonApiRoutes({
+      agentStore: () => agentStoreFor(options.tokenUserId ?? 'agent-one'),
+      makeId: () => `test-${++counter}`,
+      makeStore: () => store,
+      ...(sparkStore === undefined
+        ? {}
+        : { makeSparkPayoutTargetStore: () => sparkStore }),
+      nowIso: () => options.nowIso ?? '2026-06-07T00:10:00.000Z',
+      requireAdminApiToken: () => Promise.resolve(false),
+    })
+    const response = routes.routePylonApiRequest(request, {
+      OPENAGENTS_DB: {} as D1Database,
+    })
+
+    if (response === undefined) {
+      throw new Error(`No route matched ${path}`)
+    }
+
+    return Effect.runPromise(response)
+  }
+
+  test('registers a raw Spark address privately and projects only the redacted digest (#5252)', async () => {
+    const store = new MemoryPylonApiStore()
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await registerPylon(store)
+
+    const rawSparkAddress =
+      'spark1pqqqqq0000000000000000000000000000agentpayout'
+    const payoutTargetRef = await sparkDigestRef(rawSparkAddress)
+
+    const response = await sparkRoute(
+      store,
+      sparkStore,
+      '/api/pylons/pylon.test.one/spark-payout-target',
+      {
+        body: {
+          payoutTargetRef,
+          policyRefs: ['policy.public.pylon.redacted_payout_target_only'],
+          rawSparkAddress,
+          status: 'registered',
+        },
+        idempotencyKey: 'spark-register-one',
+        tokenUserId: 'agent-one',
+      },
+    )
+    const body = await responseJson<PylonRouteJson>(response)
+
+    expect(response.status).toBe(201)
+
+    // The raw address lives ONLY in the private store, keyed to the pylonRef.
+    const stored = await sparkStore.read('pylon.test.one')
+    expect(stored?.rawSparkAddress).toBe(rawSparkAddress)
+    expect(stored?.ownerAgentUserId).toBe('agent-one')
+    expect(stored?.payoutTargetRef).toBe(payoutTargetRef)
+
+    // The public event carries only the redacted digest, never the raw address.
+    const events = Array.from(store.eventsByIdempotency.values())
+    const eventJson = JSON.stringify(events)
+    expect(eventJson).not.toContain('spark1')
+    expect(eventJson).toContain(payoutTargetRef)
+
+    // The HTTP response projection must not leak the raw spark1… anywhere.
+    expect(JSON.stringify(body)).not.toContain('spark1')
+  })
+
+  test('idempotent re-register of the same Spark address is a no-op update (#5252)', async () => {
+    const store = new MemoryPylonApiStore()
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await registerPylon(store)
+
+    const rawSparkAddress =
+      'spark1pqqqqq0000000000000000000000000000agentpayout'
+    const payoutTargetRef = await sparkDigestRef(rawSparkAddress)
+    const body = {
+      payoutTargetRef,
+      policyRefs: ['policy.public.pylon.redacted_payout_target_only'],
+      rawSparkAddress,
+      status: 'registered',
+    }
+
+    const first = await sparkRoute(
+      store,
+      sparkStore,
+      '/api/pylons/pylon.test.one/spark-payout-target',
+      { body, idempotencyKey: 'spark-register-idem', tokenUserId: 'agent-one' },
+    )
+    const second = await sparkRoute(
+      store,
+      sparkStore,
+      '/api/pylons/pylon.test.one/spark-payout-target',
+      { body, idempotencyKey: 'spark-register-idem', tokenUserId: 'agent-one' },
+    )
+
+    expect(first.status).toBe(201)
+    expect(second.status).toBe(200)
+    expect((await responseJson<PylonRouteJson>(second)).idempotent).toBe(true)
+    expect(sparkStore.records.size).toBe(1)
+  })
+
+  test('rejects a Spark payout-target ref that does not match the raw address digest (#5252)', async () => {
+    const store = new MemoryPylonApiStore()
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await registerPylon(store)
+
+    const response = await sparkRoute(
+      store,
+      sparkStore,
+      '/api/pylons/pylon.test.one/spark-payout-target',
+      {
+        body: {
+          payoutTargetRef: 'payout.spark.deadbeefdeadbeefdeadbeef',
+          rawSparkAddress:
+            'spark1pqqqqq0000000000000000000000000000agentpayout',
+          status: 'registered',
+        },
+        idempotencyKey: 'spark-register-mismatch',
+        tokenUserId: 'agent-one',
+      },
+    )
+    const body = await responseJson<PylonRouteJson>(response)
+
+    expect(response.status).toBe(400)
+    expect(body.error).toBe('pylon_api_validation_error')
+    expect(await sparkStore.read('pylon.test.one')).toBeUndefined()
+  })
+
+  test('an agent cannot register a Spark target on a Pylon it does not own (#5252)', async () => {
+    const store = new MemoryPylonApiStore()
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await registerPylon(store, { tokenUserId: 'agent-one' })
+
+    const rawSparkAddress =
+      'spark1pqqqqq0000000000000000000000000000agentpayout'
+    const response = await sparkRoute(
+      store,
+      sparkStore,
+      '/api/pylons/pylon.test.one/spark-payout-target',
+      {
+        body: {
+          payoutTargetRef: await sparkDigestRef(rawSparkAddress),
+          rawSparkAddress,
+          status: 'registered',
+        },
+        idempotencyKey: 'spark-register-foreign',
+        tokenUserId: 'agent-two',
+      },
+    )
+    const body = await responseJson<PylonRouteJson>(response)
+
+    expect(response.status).toBe(403)
+    expect(body.error).toBe('pylon_api_forbidden')
+    expect(await sparkStore.read('pylon.test.one')).toBeUndefined()
+  })
+
+  test('fails closed (501) when the private Spark store is not wired (#5252)', async () => {
+    const store = new MemoryPylonApiStore()
+    await registerPylon(store)
+
+    const rawSparkAddress =
+      'spark1pqqqqq0000000000000000000000000000agentpayout'
+    const response = await sparkRoute(
+      store,
+      undefined,
+      '/api/pylons/pylon.test.one/spark-payout-target',
+      {
+        body: {
+          payoutTargetRef: await sparkDigestRef(rawSparkAddress),
+          rawSparkAddress,
+          status: 'registered',
+        },
+        idempotencyKey: 'spark-register-unwired',
+        tokenUserId: 'agent-one',
+      },
+    )
+
+    expect(response.status).toBe(501)
+    expect((await responseJson<PylonRouteJson>(response)).error).toBe(
+      'pylon_api_spark_payout_target_unavailable',
+    )
+  })
+
+  test('settlement resolver returns the registered raw Spark address for a recipient that has one (#5252)', async () => {
+    const store = new MemoryPylonApiStore()
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await registerPylon(store)
+
+    const rawSparkAddress =
+      'spark1pqqqqq0000000000000000000000000000recipient'
+    await sparkRoute(
+      store,
+      sparkStore,
+      '/api/pylons/pylon.test.one/spark-payout-target',
+      {
+        body: {
+          payoutTargetRef: await sparkDigestRef(rawSparkAddress),
+          rawSparkAddress,
+          status: 'registered',
+        },
+        idempotencyKey: 'spark-register-resolve',
+        tokenUserId: 'agent-one',
+      },
+    )
+
+    // register -> private store -> resolve: the resolver returns the raw address
+    // that the settlement payout authority will send natively over Spark.
+    const resolved = await resolveSparkPayoutDestination(
+      sparkStore,
+      'pylon.test.one',
+    )
+    expect(resolved).toBe(rawSparkAddress)
+  })
+
+  test('settlement resolver fails closed (undefined) when the recipient has no Spark target (#5252)', async () => {
+    const sparkStore = new MemorySparkPayoutTargetStore()
+
+    expect(
+      await resolveSparkPayoutDestination(sparkStore, 'pylon.test.none'),
+    ).toBeUndefined()
+  })
+
+  test('settlement resolver fails closed (undefined) when the store read throws (#5252)', async () => {
+    const throwingStore: PylonSparkPayoutTargetStore = {
+      read: () => Promise.reject(new Error('store unavailable')),
+      readByOwner: () => Promise.reject(new Error('store unavailable')),
+      upsert: record => Promise.resolve(record),
+    }
+
+    expect(
+      await resolveSparkPayoutDestination(throwingStore, 'pylon.test.one'),
+    ).toBeUndefined()
+  })
+
+  // #5252 owner-scoped canonical fallback. INVARIANTS for
+  // resolveSparkPayoutDestination: a contributor whose registered Pylon shows
+  // `sparkPayoutTargetReady: true` MUST resolve a destination even when the
+  // training-window lease was claimed under a DIFFERENT pylonRef owned by the
+  // SAME agent (e.g. a device-ref). The fallback is bound to the owning agent
+  // and fails closed everywhere else (no resolver, no owner, no target, throw).
+  test('settlement resolver resolves an owner-registered target by a DIFFERENT lease pylonRef of the same agent (#5252)', async () => {
+    // Real shape from the bug: target registered under pylon.81f0... but the
+    // lease that did the work was claimed under a device-ref.
+    const registeredPylonRef = 'pylon.81f0facfe7971870f685'
+    const leaseDeviceRef = 'pylon_45b58c56783cbedf2d113a0c'
+    const rawSparkAddress =
+      'spark1pqqqqq0000000000000000000000000000ownerfallback'
+
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await sparkStore.upsert({
+      pylonRef: registeredPylonRef,
+      ownerAgentUserId: 'agent_trigger',
+      payoutTargetRef: 'payout.spark.deadbeef',
+      rawSparkAddress,
+      createdAt: '2026-06-16T00:00:00.000Z',
+      updatedAt: '2026-06-16T00:00:00.000Z',
+    })
+
+    // The lease's device-ref has NO direct target; owner-resolver maps it to
+    // the same owning agent that registered the target above.
+    const resolveOwner = (pylonRef: string) =>
+      Promise.resolve(
+        pylonRef === leaseDeviceRef ? 'agent_trigger' : undefined,
+      )
+
+    const resolved = await resolveSparkPayoutDestination(
+      sparkStore,
+      leaseDeviceRef,
+      resolveOwner,
+    )
+    expect(resolved).toBe(rawSparkAddress)
+  })
+
+  test('settlement resolver still fails closed (undefined) with NO owner-resolver and no direct target (#5252)', async () => {
+    const sparkStore = new MemorySparkPayoutTargetStore()
+
+    expect(
+      await resolveSparkPayoutDestination(sparkStore, 'pylon_45b58c56783cbedf2d113a0c'),
+    ).toBeUndefined()
+  })
+
+  test('settlement resolver fails closed when the resolved owner has NO target anywhere (#5252)', async () => {
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    const resolveOwner = () => Promise.resolve<string | undefined>('agent_trigger')
+
+    expect(
+      await resolveSparkPayoutDestination(
+        sparkStore,
+        'pylon_45b58c56783cbedf2d113a0c',
+        resolveOwner,
+      ),
+    ).toBeUndefined()
+  })
+
+  test('settlement resolver fails closed when the owner-resolver returns undefined (unknown pylonRef) (#5252)', async () => {
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await sparkStore.upsert({
+      pylonRef: 'pylon.81f0facfe7971870f685',
+      ownerAgentUserId: 'agent_trigger',
+      payoutTargetRef: 'payout.spark.deadbeef',
+      rawSparkAddress: 'spark1pqqqqq0000000000000000000000000000unknownowner',
+      createdAt: '2026-06-16T00:00:00.000Z',
+      updatedAt: '2026-06-16T00:00:00.000Z',
+    })
+    const resolveOwner = () => Promise.resolve<string | undefined>(undefined)
+
+    expect(
+      await resolveSparkPayoutDestination(
+        sparkStore,
+        'pylon_unknown_device_ref',
+        resolveOwner,
+      ),
+    ).toBeUndefined()
+  })
+
+  test('settlement resolver: a direct exact-ref match still wins without using the owner fallback (#5252)', async () => {
+    const rawSparkAddress =
+      'spark1pqqqqq0000000000000000000000000000directwins'
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await sparkStore.upsert({
+      pylonRef: 'pylon.test.one',
+      ownerAgentUserId: 'agent_trigger',
+      payoutTargetRef: 'payout.spark.cafebabe',
+      rawSparkAddress,
+      createdAt: '2026-06-16T00:00:00.000Z',
+      updatedAt: '2026-06-16T00:00:00.000Z',
+    })
+
+    // Owner-resolver would throw if consulted; the direct match must short-circuit.
+    const resolveOwner = () =>
+      Promise.reject<string | undefined>(
+        new Error('owner-resolver must not be consulted on a direct hit'),
+      )
+
+    expect(
+      await resolveSparkPayoutDestination(
+        sparkStore,
+        'pylon.test.one',
+        resolveOwner,
+      ),
+    ).toBe(rawSparkAddress)
+  })
+
+  test('settlement resolver never crosses agent ownership: a different owner with no target stays undefined (#5252)', async () => {
+    // agent_a owns a target; the lease resolves to agent_b who has none.
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await sparkStore.upsert({
+      pylonRef: 'pylon.agent_a',
+      ownerAgentUserId: 'agent_a',
+      payoutTargetRef: 'payout.spark.aaaa',
+      rawSparkAddress: 'spark1pqqqqq0000000000000000000000000000agentaonly',
+      createdAt: '2026-06-16T00:00:00.000Z',
+      updatedAt: '2026-06-16T00:00:00.000Z',
+    })
+    const resolveOwner = () => Promise.resolve<string | undefined>('agent_b')
+
+    expect(
+      await resolveSparkPayoutDestination(
+        sparkStore,
+        'pylon_device_of_agent_b',
+        resolveOwner,
+      ),
+    ).toBeUndefined()
+  })
+
+  test('the Pylon payload scanner rejects a raw spark1 address but allows the digest ref (#5252)', () => {
+    // Defense in depth: a raw spark1… can never sit in a public Pylon payload,
+    // while the redacted payout.spark.<digest> ref is allowed.
+    expect(
+      pylonApiPayloadHasPrivateMaterial({
+        rawSparkAddress: 'spark1pqqqqq0000000000000000000000000000leak',
+      }),
+    ).toBe(true)
+    expect(
+      pylonApiPayloadHasPrivateMaterial({
+        payoutTargetRef: 'payout.spark.deadbeefdeadbeefdeadbeef',
+      }),
+    ).toBe(false)
+  })
+
+  test('agent/pylon projection exposes sparkPayoutTargetReady:false with a null ref when no target is registered (#5306)', async () => {
+    const store = new MemoryPylonApiStore()
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await registerPylon(store)
+
+    const detail = await responseJson<PylonRouteJson>(
+      await sparkRoute(store, sparkStore, '/api/pylons/pylon.test.one', {
+        method: 'GET',
+      }),
+    )
+
+    expect(detail.pylon?.sparkPayoutTargetReady).toBe(false)
+    expect(detail.pylon?.sparkPayoutTargetRef).toBeNull()
+
+    const list = await responseJson<PylonRouteJson>(
+      await sparkRoute(store, sparkStore, '/api/pylons', { method: 'GET' }),
+    )
+    expect(list.pylons?.[0]?.sparkPayoutTargetReady).toBe(false)
+    expect(list.pylons?.[0]?.sparkPayoutTargetRef).toBeNull()
+  })
+
+  test('agent/pylon projection flips sparkPayoutTargetReady:true with the redacted digest ref once a node registers a target — self-heals with no manual step (#5306)', async () => {
+    const store = new MemoryPylonApiStore()
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await registerPylon(store)
+
+    // Before the node registers, readiness is a visible, self-healing gap.
+    const before = await responseJson<PylonRouteJson>(
+      await sparkRoute(store, sparkStore, '/api/pylons/pylon.test.one', {
+        method: 'GET',
+      }),
+    )
+    expect(before.pylon?.sparkPayoutTargetReady).toBe(false)
+
+    // The node (#5305) auto-registers its OWN raw Spark address.
+    const rawSparkAddress =
+      'spark1pqqqqq0000000000000000000000000000readyflip'
+    const payoutTargetRef = await sparkDigestRef(rawSparkAddress)
+    await sparkRoute(
+      store,
+      sparkStore,
+      '/api/pylons/pylon.test.one/spark-payout-target',
+      {
+        body: {
+          payoutTargetRef,
+          policyRefs: ['policy.public.pylon.redacted_payout_target_only'],
+          rawSparkAddress,
+          status: 'registered',
+        },
+        idempotencyKey: 'spark-register-readyflip',
+        tokenUserId: 'agent-one',
+      },
+    )
+
+    // Backstop: the next read recomputes readiness from the live store and the
+    // flag flips to ready, carrying only the redacted digest ref.
+    const after = await responseJson<PylonRouteJson>(
+      await sparkRoute(store, sparkStore, '/api/pylons/pylon.test.one', {
+        method: 'GET',
+      }),
+    )
+    expect(after.pylon?.sparkPayoutTargetReady).toBe(true)
+    expect(after.pylon?.sparkPayoutTargetRef).toBe(payoutTargetRef)
+
+    // The list projection reflects the same readiness, and never the raw address.
+    const list = await responseJson<PylonRouteJson>(
+      await sparkRoute(store, sparkStore, '/api/pylons', { method: 'GET' }),
+    )
+    expect(list.pylons?.[0]?.sparkPayoutTargetReady).toBe(true)
+    expect(list.pylons?.[0]?.sparkPayoutTargetRef).toBe(payoutTargetRef)
+    expect(JSON.stringify(list)).not.toContain('spark1')
+  })
+
+  test('the spark-payout-target register response projects sparkPayoutTargetReady:true without leaking the raw address (#5306)', async () => {
+    const store = new MemoryPylonApiStore()
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    await registerPylon(store)
+
+    const rawSparkAddress =
+      'spark1pqqqqq0000000000000000000000000000registerresp'
+    const payoutTargetRef = await sparkDigestRef(rawSparkAddress)
+    const body = await responseJson<PylonRouteJson>(
+      await sparkRoute(
+        store,
+        sparkStore,
+        '/api/pylons/pylon.test.one/spark-payout-target',
+        {
+          body: {
+            payoutTargetRef,
+            policyRefs: ['policy.public.pylon.redacted_payout_target_only'],
+            rawSparkAddress,
+            status: 'registered',
+          },
+          idempotencyKey: 'spark-register-resp-ready',
+          tokenUserId: 'agent-one',
+        },
+      ),
+    )
+
+    expect(body.pylon?.sparkPayoutTargetReady).toBe(true)
+    expect(body.pylon?.sparkPayoutTargetRef).toBe(payoutTargetRef)
+    expect(JSON.stringify(body)).not.toContain('spark1')
+  })
+
+  test('readiness fails closed to false when the spark store dependency is not wired (#5306)', async () => {
+    const store = new MemoryPylonApiStore()
+    await registerPylon(store)
+
+    // No spark store wired: readiness must be a visible gap, not an error.
+    const detail = await responseJson<PylonRouteJson>(
+      await sparkRoute(store, undefined, '/api/pylons/pylon.test.one', {
+        method: 'GET',
+      }),
+    )
+    expect(detail.pylon?.sparkPayoutTargetReady).toBe(false)
+    expect(detail.pylon?.sparkPayoutTargetRef).toBeNull()
+  })
+
+  test('readiness resolver fails closed (not ready) when the store read throws (#5306)', async () => {
+    const throwingStore: PylonSparkPayoutTargetStore = {
+      read: () => Promise.reject(new Error('store unavailable')),
+      readByOwner: () => Promise.reject(new Error('store unavailable')),
+      upsert: record => Promise.resolve(record),
+    }
+
+    expect(
+      await resolveSparkPayoutTargetReadiness(throwingStore, 'pylon.test.one'),
+    ).toEqual({ ready: false, ref: null })
+  })
+
+  test('readiness resolver fails closed (not ready) when a stored row has a malformed digest ref or empty raw address (#5306)', async () => {
+    const sparkStore = new MemorySparkPayoutTargetStore()
+
+    // Malformed (non payout.spark.* shaped) ref must never project as ready.
+    await sparkStore.upsert({
+      pylonRef: 'pylon.malformed',
+      ownerAgentUserId: 'agent-one',
+      payoutTargetRef: 'not-a-spark-digest',
+      rawSparkAddress: 'spark1pqqqqq0000000000000000000000000000malformed',
+      createdAt: '2026-06-07T00:00:00.000Z',
+      updatedAt: '2026-06-07T00:00:00.000Z',
+    })
+    expect(
+      await resolveSparkPayoutTargetReadiness(sparkStore, 'pylon.malformed'),
+    ).toEqual({ ready: false, ref: null })
+
+    // A row with an empty raw address (no node-registered target) is not ready.
+    await sparkStore.upsert({
+      pylonRef: 'pylon.emptyraw',
+      ownerAgentUserId: 'agent-one',
+      payoutTargetRef: 'payout.spark.deadbeefdeadbeefdeadbeef',
+      rawSparkAddress: '   ',
+      createdAt: '2026-06-07T00:00:00.000Z',
+      updatedAt: '2026-06-07T00:00:00.000Z',
+    })
+    expect(
+      await resolveSparkPayoutTargetReadiness(sparkStore, 'pylon.emptyraw'),
+    ).toEqual({ ready: false, ref: null })
+  })
+
+  test('readiness resolver returns ready with the redacted digest ref for a properly registered target (#5306)', async () => {
+    const sparkStore = new MemorySparkPayoutTargetStore()
+    const rawSparkAddress =
+      'spark1pqqqqq0000000000000000000000000000resolverok'
+    const payoutTargetRef = await sparkDigestRef(rawSparkAddress)
+    await sparkStore.upsert({
+      pylonRef: 'pylon.ready',
+      ownerAgentUserId: 'agent-one',
+      payoutTargetRef,
+      rawSparkAddress,
+      createdAt: '2026-06-07T00:00:00.000Z',
+      updatedAt: '2026-06-07T00:00:00.000Z',
+    })
+
+    const readiness = await resolveSparkPayoutTargetReadiness(
+      sparkStore,
+      'pylon.ready',
+    )
+    expect(readiness.ready).toBe(true)
+    expect(readiness.ref).toBe(payoutTargetRef)
+    // The redacted ref is a digest, never the raw spark1… address.
+    expect(readiness.ref).not.toContain('spark1')
   })
 
   test('blocks controlled assignment dispatch to missing or offline Pylons', async () => {

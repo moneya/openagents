@@ -150,16 +150,40 @@ export const routeRequiresAuthBootstrap = (route: AppRoute): boolean =>
   route._tag !== 'ForumReceipt' &&
   route._tag !== 'SiteCheckoutDemo' &&
   route._tag !== 'SiteCheckoutDemoReturn' &&
+  route._tag !== 'ClientsPreview' &&
+  route._tag !== 'Components' &&
+  route._tag !== 'ComponentsFamily' &&
+  route._tag !== 'Business' &&
+  route._tag !== 'Animations' &&
+  route._tag !== 'Activity' &&
+  route._tag !== 'DemoLegal' &&
+  route._tag !== 'Run' &&
+  route._tag !== 'Tassadar' &&
+  route._tag !== 'TassadarReplay' &&
+  route._tag !== 'Login' &&
   route._tag !== 'Blog' &&
   route._tag !== 'BlogPost' &&
   route._tag !== 'PublicAgent' &&
+  route._tag !== 'PublicTrainingRuns' &&
+  route._tag !== 'PublicTrainingRun' &&
+  route._tag !== 'PublicStatsArchive' &&
   route._tag !== 'Share' &&
+  route._tag !== 'Moksha' &&
+  route._tag !== 'Moksha2' &&
+  route._tag !== 'Pylon' &&
+  route._tag !== 'Download' &&
   route._tag !== 'Demo' &&
   route._tag !== 'DemoOrder' &&
   route._tag !== 'DemoThread' &&
   route._tag !== 'DemoTeamProjectChat' &&
   route._tag !== 'DemoTeamFiles' &&
   route._tag !== 'DemoTeamFile' &&
+  route._tag !== 'Demo2' &&
+  route._tag !== 'Demo2Order' &&
+  route._tag !== 'Demo2Thread' &&
+  route._tag !== 'Demo2TeamProjectChat' &&
+  route._tag !== 'Demo2TeamFiles' &&
+  route._tag !== 'Demo2TeamFile' &&
   route._tag !== 'NotFound' &&
   route._tag !== 'Home'
     ? true
@@ -167,19 +191,41 @@ export const routeRequiresAuthBootstrap = (route: AppRoute): boolean =>
 
 export const browserRouteProductIntents = {
   Admin: 'admin.overview',
+  AutopilotWork: 'autopilot.work.index',
+  AutopilotWorkDetail: 'autopilot.work.detail',
   Billing: 'billing.credits',
+  Business: 'public.business.landing',
+  Animations: 'internal.animations.playground',
+  Activity: 'public.activity.timeline',
+  Login: 'public.login',
   Blog: 'public.blog.index',
   BlogPost: 'public.blog.post',
   Chat: 'workroom.chat.personal',
+  ClientsPreview: 'public.clients-preview',
+  Components: 'internal.components.gallery',
+  ComponentsFamily: 'internal.components.gallery',
   Dashboard: 'disabled.dashboard',
-  Demo: 'demo.workroom.project',
+  Decisions: 'autopilot.decisions.index',
+  Forge: 'forge.factory.index',
+  Demo: 'demo.training.fullscreen',
+  DemoLegal: 'public.demo.legal.landing',
   DemoOrder: 'demo.customer.order',
   DemoTeamFile: 'demo.files.team.detail',
   DemoTeamFiles: 'demo.files.team.index',
   DemoTeamProjectChat: 'demo.workroom.project',
   DemoThread: 'demo.workroom.thread',
+  Demo2: 'demo2.workroom.project',
+  Demo2Order: 'demo2.customer.order',
+  Demo2TeamFile: 'demo2.files.team.detail',
+  Demo2TeamFiles: 'demo2.files.team.index',
+  Demo2TeamProjectChat: 'demo2.workroom.project',
+  Demo2Thread: 'demo2.workroom.thread',
   Images: 'image.generation',
   Mullet: 'mullet.runner',
+  Moksha: 'public.moksha',
+  Moksha2: 'public.moksha2',
+  Pylon: 'public.pylon',
+  Download: 'public.download',
   Docs: 'public.docs.index',
   DocsPage: 'public.docs.page',
   Forum: 'public.forum.index',
@@ -195,6 +241,12 @@ export const browserRouteProductIntents = {
   PersonalFile: 'files.personal.detail',
   ProductPromises: 'public.product-promises',
   PublicAgent: 'public.agent.profile',
+  PublicStatsArchive: 'public.stats.archive',
+  PublicTrainingRun: 'public.training.run',
+  PublicTrainingRuns: 'public.training.runs',
+  Run: 'public.tassadar.run',
+  Tassadar: 'public.tassadar.run',
+  TassadarReplay: 'public.tassadar.replay',
   Share: 'share.projection',
   SiteCheckoutDemo: 'public.sites.demo-checkout',
   SiteCheckoutDemoReturn: 'public.sites.demo-checkout-return',
@@ -207,6 +259,9 @@ export const browserRouteProductIntents = {
   TeamProjectChat: 'workroom.chat.project',
   Thread: 'workroom.thread',
   Usage: 'billing.usage',
+  Workspace: 'workspace.prefilled.detail',
+  Workroom: 'workroom.delivery.overview',
+  WorkroomTab: 'workroom.delivery.tab',
 } as const satisfies Record<AppRoute['_tag'], string>
 
 export type BrowserRouteName = keyof typeof browserRouteProductIntents
@@ -218,6 +273,9 @@ export const browserCommandProductIntents = {
   ClearSession: 'auth.session.clear',
   CopyShareLink: 'share.link.copy',
   CreateBillingCheckout: 'billing.checkout.create',
+  PrepareBillingCardSetup: 'billing.card.setup.prepare',
+  RunBillingAutoTopUp: 'billing.auto_top_up.run',
+  UpdateBillingAutoTopUpPolicy: 'billing.auto_top_up.policy.update',
   DeployAdminSiteVersion: 'admin.sites.version.deploy',
   DownloadThreadFile: 'files.thread.download',
   FetchAutopilotRun: 'autopilot.run.fetch',
@@ -230,6 +288,12 @@ export const browserCommandProductIntents = {
   LoadAdminOverview: 'admin.overview.load',
   LoadAdminAdjutantReview: 'admin.adjutant.review.load',
   LoadAgentGoal: 'autopilot.goal.load',
+  LoadAutopilotDecisions: 'autopilot.decisions.load',
+  LoadAutopilotMorningReport: 'autopilot.morning-report.load',
+  LoadAutopilotWorkBriefing: 'autopilot.work.briefing.load',
+  LoadAutopilotWorkDetail: 'autopilot.work.detail.load',
+  LoadAutopilotWorkEvents: 'autopilot.work.events.load',
+  LoadAutopilotWorkList: 'autopilot.work.list.load',
   LoadArtanisOperatorConsole: 'operator.artanis.console.load',
   LoadArtanisOperatorGoal: 'operator.artanis.goal.load',
   LoadMulletBootstrap: 'mullet.bootstrap.load',
@@ -241,26 +305,35 @@ export const browserCommandProductIntents = {
   LoadCustomerSiteBuilderFiles: 'customer.order.site-builder.files.load',
   LoadCustomerSiteBuilderSession: 'customer.order.site-builder.session.load',
   LoadCustomerSiteFeedback: 'customer.order.site-feedback.load',
+  LoadCustomerOneCohort: 'forge.customer-one.cohort.load',
   LoadCustomerFulfillmentArtifacts: 'customer.order.fulfillment-artifacts.load',
   LoadCustomerSiteRevisions: 'customer.order.site-revisions.load',
   LoadExternal: 'navigation.external.load',
   LoadOnboardingRepositories: 'onboarding.repositories.load',
+  LoadProviderAccountPool: 'providers.account-pool.load',
+  LoadPrefilledWorkspace: 'workspace.prefilled.load',
   LoadPublicAdjutantActivity: 'public.adjutant.activity.load',
   LoadPublicAgentGoal: 'public.agent.goal.load',
   LoadPublicArtanisReport: 'public.artanis.report.load',
   LoadPublicForumLaunchStatus: 'public.forum.launch-status.load',
   LoadPublicForumTipLeaderboards: 'public.forum.tip-leaderboards.load',
   LoadPublicProductPromises: 'public.product-promises.load',
+  LoadPublicPromiseTransitions: 'public.product-promises.load-transitions',
   LoadPublicPylonStats: 'public.pylon.stats.load',
+  LoadPublicTrainingRuns: 'public.training.runs.load',
+  LoadSettledFeedSnapshot: 'public.settled-feed.snapshot.load',
   LoadShareProjection: 'share.projection.load',
   LoadSyncSnapshot: 'sync.workspace.snapshot.load',
   LoadTeamChatMessages: 'workroom.chat.team.messages.load',
   LoadThreadFileDetail: 'files.thread.detail.load',
   LoadThreadFiles: 'files.thread.index.load',
+  LoadWorkroomLifecycle: 'workroom.delivery.lifecycle.load',
+  LoadWorkroomSurface: 'workroom.delivery.surface.load',
   LogError: 'telemetry.error.log',
   NavigateInternal: 'navigation.internal.navigate',
   PollProviderDeviceLogin: 'providers.chatgpt-device-login.poll',
   PostTeamChatMessage: 'workroom.chat.team.message.post',
+  RaiseBrowserNotifications: 'notifications.browser.raise',
   RedeemBillingCoupon: 'billing.coupon.redeem',
   RedirectToChat: 'navigation.redirect.chat',
   RedirectToDefaultLoggedInRoute: 'navigation.redirect.default-logged-in',
@@ -268,6 +341,7 @@ export const browserCommandProductIntents = {
   RedirectToInvite: 'navigation.redirect.invite',
   RedirectToOnboarding: 'navigation.redirect.onboarding',
   RedirectToOrder: 'navigation.redirect.order',
+  RequestNotificationPermission: 'notifications.permission.request',
   ReviewAdminAdjutantResearchBrief: 'admin.adjutant.research-brief.review',
   ReviewAdminAdjutantSourceCard: 'admin.adjutant.source-card.review',
   RunAdminAdjutantEnrichment: 'admin.adjutant.enrichment.run',
@@ -281,9 +355,14 @@ export const browserCommandProductIntents = {
   SkipOnboardingRepository: 'onboarding.repository.skip',
   StartProviderDeviceLogin: 'providers.chatgpt-device-login.start',
   OpenCustomerSiteBuilderSession: 'customer.order.site-builder.session.open',
+  SubmitAutopilotDecisionAction: 'autopilot.decisions.act',
+  SubmitAutopilotWorkComposer: 'autopilot.work.composer.submit',
+  SubmitAutopilotWorkReview: 'autopilot.work.review.submit',
   SubmitOnboardingGoal: 'onboarding.goal.submit',
   SubmitCustomerOrder: 'customer.order.submit',
   SubmitCustomerSiteFeedback: 'customer.order.site-feedback.submit',
+  SubmitWorkroomLifecycleDecision:
+    'workroom.delivery.lifecycle.decision.submit',
   UpdateOnboardingRepository: 'onboarding.repository.update',
   UpdateThreadFileDownload: 'files.thread.download-policy.update',
   UpdateAgentGoalAction: 'autopilot.goal.action',

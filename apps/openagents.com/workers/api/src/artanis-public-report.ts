@@ -1,4 +1,4 @@
-import { containsProviderSecretMaterial } from '@openagents/provider-account-schema'
+import { containsProviderSecretMaterial } from '@openagentsinc/provider-account-schema'
 import { Schema as S } from 'effect'
 
 import {
@@ -34,6 +34,11 @@ import {
   projectArtanisHealthSnapshot,
 } from './artanis-health'
 import {
+  ARTANIS_LOOP_READ_ONLY_AUTHORITY,
+  ArtanisLoopLedgerRecord,
+  ArtanisLoopRecord,
+  type ArtanisLoopState,
+  type ArtanisLoopTickRecord,
   exampleArtanisLoopLedger,
   projectArtanisLoopLedger,
 } from './artanis-loop'
@@ -75,10 +80,18 @@ import {
 } from './probe-gepa-outcome-metrics'
 import { PublicClaimState } from './public-claim-state'
 import {
+  PublicProjectionStalenessContract,
+  liveAtReadStaleness,
+  projectionDataAgeSeconds,
+  projectionStalenessExceeded,
+  rebuiltOnTransitionStaleness,
+} from './public-projection-staleness'
+import {
   PublicPylonAcceptedWorkSettlementGate,
   PublicPylonEarningLaunchGate,
   PublicPylonStats,
 } from './public-pylon-stats'
+import { publicRefTriggersAgentSecretScanner } from './public-ref-scanner-safety'
 import {
   PylonV02OmegaReleaseGateProjection,
   currentPylonV02OmegaReleaseGateRecord,
@@ -131,11 +144,27 @@ export class ArtanisPublicReportLoopSummary extends S.Class<ArtanisPublicReportL
   blockerRefs: S.Array(S.String),
   caveatRefs: S.Array(S.String),
   forumPublicationIntentRefs: S.Array(S.String),
+  /**
+   * Age in whole seconds of the newest persisted loop tick at
+   * generation time; null when no persisted tick backs this summary
+   * (the typed-example fallback, which `source` then labels).
+   */
+  latestTickAgeSeconds: S.NullOr(S.Number),
   latestTickRef: S.NullOr(S.String),
   latestTickState: S.NullOr(ArtanisPublicReportLoopState),
   loopRef: S.String,
   nextTickDisplay: S.NullOr(S.String),
+  /** True when the newest persisted tick's own next-tick promise has passed. */
+  nextTickOverdue: S.Boolean,
+  /**
+   * True when this summary cannot meet its declared staleness contract
+   * — the projection says so instead of asserting stale state as
+   * current (epic #4751).
+   */
+  projectionStale: S.Boolean,
   receiptRefs: S.Array(S.String),
+  source: S.Literals(['persisted_loop_ticks', 'typed_example_fallback']),
+  staleness: PublicProjectionStalenessContract,
   state: ArtanisPublicReportLoopState,
   tickCount: S.Number,
 }) {}
@@ -267,6 +296,11 @@ export class ArtanisPublicReport extends S.Class<ArtanisPublicReport>(
   forumLinks: S.Array(ArtanisPublicReportForumLink),
   forumRewardSmoke: ArtanisForumRewardSmokeProjection,
   forumRewardVisibility: ArtanisForumRewardVisibilityProjection,
+  /**
+   * Numeric because this payload's safety scan bans raw ISO timestamps
+   * in string fields; epoch milliseconds carry the same fact safely.
+   */
+  generatedAtUnixMs: S.Number,
   healthSummary: ArtanisPublicReportHealthSummary,
   modelLabSummary: ArtanisPublicReportModelLabSummary,
   nexusPublicRefs: S.Array(S.String),
@@ -286,6 +320,7 @@ export class ArtanisPublicReport extends S.Class<ArtanisPublicReport>(
   receiptRefs: S.Array(S.String),
   reportRef: S.String,
   runtimeState: S.String,
+  staleness: PublicProjectionStalenessContract,
   standaloneClaims: S.Array(ArtanisPublicReportClaimSummary),
   updatedAtDisplay: S.String,
 }) {}
@@ -336,6 +371,7 @@ export const artanisPublicReportHasPrivateMaterial = (
   publicReportStrings(report).some(
     value =>
       containsProviderSecretMaterial(value) ||
+      publicRefTriggersAgentSecretScanner(value) ||
       unsafePublicReportPattern.test(value) ||
       rawTimestampPattern.test(value),
   )
@@ -419,7 +455,9 @@ const currentArtanisHealthSnapshot = (input: {
       caveatRefs: ['caveat.public.approval_needed_before_dispatch'],
       count: productionReady ? 0 : 1,
       kind: 'pending_approvals',
-      label: productionReady ? 'No pending launch approvals' : 'Approval pending',
+      label: productionReady
+        ? 'No pending launch approvals'
+        : 'Approval pending',
       observedAtIso: nowIso,
       operatorDetailRefs: ['health.operator.artanis.pending_approval_detail'],
       publicRecoveryActionRefs: productionReady
@@ -591,7 +629,9 @@ const currentArtanisHealthSnapshot = (input: {
       : ['recovery.operator.artanis.inspect_current_evidence'],
     overallState: healthy ? 'healthy' : 'stale',
     overclaimBlocked: !healthy,
-    overclaimBlockerRefs: healthy ? [] : ['overclaim.public.artanis.health_stale'],
+    overclaimBlockerRefs: healthy
+      ? []
+      : ['overclaim.public.artanis.health_stale'],
     pendingApprovalRefs: productionReady
       ? []
       : ['approval.public.artanis.pylon_dispatch_pending'],
@@ -692,6 +732,163 @@ const receiptRefsFromRefs = (
 ): ReadonlyArray<string> =>
   uniqueRefs(refs.filter(ref => ref.startsWith('receipt.')))
 
+export const publicNexusPylonReceiptRouteRefsFromRefs = (
+  refs: ReadonlyArray<string>,
+): ReadonlyArray<string> =>
+  uniqueRefs(
+    refs
+      .filter(
+        ref =>
+          ref.startsWith('assignment.artanis_admin.') ||
+          ref.startsWith('receipt.nexus_pylon.artanis_admin_closeout.'),
+      )
+      .map(ref => `route:/api/public/nexus-pylon/receipts/${ref}`),
+  )
+
+const persistedLoopTerminalStates = new Set<ArtanisLoopState>([
+  'blocked',
+  'failed',
+  'paused',
+])
+
+const persistedLoopStateForLatestTick = (
+  tick: ArtanisLoopTickRecord,
+): ArtanisLoopState => tick.state === 'completed' ? 'running' : tick.state
+
+const sortLoopTicks = (
+  ticks: ReadonlyArray<ArtanisLoopTickRecord>,
+): ReadonlyArray<ArtanisLoopTickRecord> =>
+  [...ticks].sort((left, right) => {
+    const updated = left.updatedAtIso.localeCompare(right.updatedAtIso)
+
+    return updated === 0 ? left.tickRef.localeCompare(right.tickRef) : updated
+  })
+
+/**
+ * Declared staleness contracts for this surface (epic #4751). The
+ * report itself composes live at read from persisted tick rows plus a
+ * live pylon-stats snapshot; the loop summary inside it projects a
+ * stored tick ledger that rebuilds on tick closeout (#4745) and must
+ * flag itself stale instead of asserting an old tick as current.
+ */
+export const ARTANIS_PUBLIC_REPORT_STALENESS = liveAtReadStaleness([
+  'artanis_loop_tick_closeout',
+  'public_pylon_stats_source_write',
+])
+
+export const ARTANIS_LOOP_TICK_PROJECTION_MAX_STALENESS_SECONDS = 86_400
+
+export const ARTANIS_LOOP_TICK_PROJECTION_STALENESS =
+  rebuiltOnTransitionStaleness(
+    ARTANIS_LOOP_TICK_PROJECTION_MAX_STALENESS_SECONDS,
+    ['artanis_loop_tick_closeout'],
+  )
+
+export const ARTANIS_LOOP_PROJECTION_STALE_CAVEAT_REF =
+  'caveat.public.artanis.loop_tick_projection_exceeds_declared_staleness'
+
+export const ARTANIS_LOOP_PROJECTION_EXAMPLE_FALLBACK_CAVEAT_REF =
+  'caveat.public.artanis.loop_projection_example_fallback_not_live_state'
+
+type ArtanisLoopProjectionFreshness = Readonly<{
+  latestTickAgeSeconds: number | null
+  nextTickOverdue: boolean
+  projectionStale: boolean
+  source: 'persisted_loop_ticks' | 'typed_example_fallback'
+}>
+
+const artanisLoopProjectionFreshness = (
+  loopTicks: ReadonlyArray<ArtanisLoopTickRecord> | undefined,
+  nowIso: string,
+): ArtanisLoopProjectionFreshness => {
+  const sortedTicks = sortLoopTicks(loopTicks ?? [])
+  const latestTick = sortedTicks[sortedTicks.length - 1]
+
+  if (latestTick === undefined) {
+    return {
+      latestTickAgeSeconds: null,
+      nextTickOverdue: false,
+      // Example-composed loop state is never current loop truth; the
+      // summary must say so rather than present it as a live tick.
+      projectionStale: true,
+      source: 'typed_example_fallback',
+    }
+  }
+
+  const latestTickAgeSeconds = projectionDataAgeSeconds(
+    latestTick.updatedAtIso,
+    nowIso,
+  )
+  const nextTickAtMs =
+    latestTick.nextTickAtIso === null
+      ? Number.NaN
+      : Date.parse(latestTick.nextTickAtIso)
+  const nextTickOverdue =
+    !Number.isNaN(nextTickAtMs) && Date.parse(nowIso) > nextTickAtMs
+
+  return {
+    latestTickAgeSeconds,
+    nextTickOverdue,
+    projectionStale:
+      projectionStalenessExceeded(
+        ARTANIS_LOOP_TICK_PROJECTION_STALENESS,
+        latestTickAgeSeconds,
+      ) || nextTickOverdue,
+    source: 'persisted_loop_ticks',
+  }
+}
+
+const artanisLoopLedgerForReport = (
+  loopTicks: ReadonlyArray<ArtanisLoopTickRecord> | undefined,
+): ArtanisLoopLedgerRecord => {
+  const sortedTicks = sortLoopTicks(loopTicks ?? [])
+
+  if (sortedTicks.length === 0) {
+    return exampleArtanisLoopLedger()
+  }
+
+  const latestTick = sortedTicks[sortedTicks.length - 1]!
+  const ticksByLoopRef = sortedTicks.reduce(
+    (groups, tick) => {
+      groups.set(tick.loopRef, [...(groups.get(tick.loopRef) ?? []), tick])
+
+      return groups
+    },
+    new Map<string, ReadonlyArray<ArtanisLoopTickRecord>>(),
+  )
+  const loops = [...ticksByLoopRef.entries()].map(([loopRef, ticks]) => {
+    const first = ticks[0]!
+    const newest = ticks[ticks.length - 1]!
+    const state = persistedLoopStateForLatestTick(newest)
+
+    return new ArtanisLoopRecord({
+      active:
+        newest.tickRef === latestTick.tickRef &&
+        !persistedLoopTerminalStates.has(state),
+      agentId: 'agent_artanis',
+      blockerRefs: uniqueRefs(ticks.flatMap(tick => tick.blockerRefs)),
+      caveatRefs: uniqueRefs(ticks.flatMap(tick => tick.caveatRefs)),
+      createdAtIso: first.createdAtIso,
+      goalRefs: uniqueRefs(ticks.map(tick => tick.goalRef)),
+      loopRef,
+      scopeRef: 'scope.public.artanis.persistence.tick',
+      state,
+      ticks,
+      updatedAtIso: newest.updatedAtIso,
+    })
+  })
+
+  return new ArtanisLoopLedgerRecord({
+    agentId: 'agent_artanis',
+    authority: ARTANIS_LOOP_READ_ONLY_AUTHORITY,
+    caveatRefs: uniqueRefs(sortedTicks.flatMap(tick => tick.caveatRefs)),
+    createdAtIso: sortedTicks[0]!.createdAtIso,
+    ledgerRef: 'ledger.public.artanis.persistence.report',
+    loops,
+    updatedAtIso: latestTick.updatedAtIso,
+  })
+}
+
 const probeGepaOutcomeSnapshot = (
   overrides: Partial<ProbeGepaCodingOutcomeMetricSnapshot> = {},
 ): ProbeGepaCodingOutcomeMetricSnapshot =>
@@ -763,6 +960,7 @@ const exampleProbeGepaOutcomeMetricsProjection =
 
 export const artanisPublicReportSnapshot = (input: {
   forumPublicationQueue?: ArtanisForumPublicationQueueRecord | undefined
+  loopTicks?: ReadonlyArray<ArtanisLoopTickRecord> | undefined
   nowIso?: string | undefined
   pylonStats: PublicPylonStats
 }): ArtanisPublicReport => {
@@ -773,7 +971,7 @@ export const artanisPublicReportSnapshot = (input: {
     nowIso,
   )
   const loop = projectArtanisLoopLedger(
-    exampleArtanisLoopLedger(),
+    artanisLoopLedgerForReport(input.loopTicks),
     'public',
     nowIso,
   )
@@ -868,6 +1066,15 @@ export const artanisPublicReportSnapshot = (input: {
   const activeLoop =
     loop.loops.find(candidate => candidate.active) ?? loop.loops[0]
   const latestTick = activeLoop?.ticks[activeLoop.ticks.length - 1] ?? null
+  const loopFreshness = artanisLoopProjectionFreshness(input.loopTicks, nowIso)
+  const loopFreshnessCaveatRefs = [
+    ...(loopFreshness.source === 'typed_example_fallback'
+      ? [ARTANIS_LOOP_PROJECTION_EXAMPLE_FALLBACK_CAVEAT_REF]
+      : []),
+    ...(loopFreshness.projectionStale
+      ? [ARTANIS_LOOP_PROJECTION_STALE_CAVEAT_REF]
+      : []),
+  ]
   const r10Claims = campaign.entries.map(entry => ({
     area: entry.area,
     blockedByRefs: entry.blockedByRefs,
@@ -1048,6 +1255,10 @@ export const artanisPublicReportSnapshot = (input: {
       ...input.pylonStats.nexusAcceptedWorkPayoutReceiptRefs.map(
         receiptRef => `route:/api/public/nexus-pylon/receipts/${receiptRef}`,
       ),
+      ...publicNexusPylonReceiptRouteRefsFromRefs([
+        ...(latestTick?.receiptRefs ?? []),
+        ...(latestTick?.closeoutReceiptRefs ?? []),
+      ]),
     ]),
     omegaPublicRefs: uniqueRefs([
       'omega.public.pylon_api.registrations',
@@ -1095,16 +1306,22 @@ export const artanisPublicReportSnapshot = (input: {
       caveatRefs: uniqueRefs([
         ...(activeLoop?.caveatRefs ?? []),
         ...(latestTick?.caveatRefs ?? []),
+        ...loopFreshnessCaveatRefs,
       ]),
       forumPublicationIntentRefs: latestTick?.forumPublicationIntentRefs ?? [],
+      latestTickAgeSeconds: loopFreshness.latestTickAgeSeconds,
       latestTickRef: latestTick?.tickRef ?? null,
       latestTickState: latestTick?.state ?? null,
       loopRef: activeLoop?.loopRef ?? 'loop.public.artanis.none',
       nextTickDisplay: latestTick?.nextTickDisplay ?? null,
+      nextTickOverdue: loopFreshness.nextTickOverdue,
+      projectionStale: loopFreshness.projectionStale,
       receiptRefs: uniqueRefs([
         ...(latestTick?.receiptRefs ?? []),
         ...(latestTick?.closeoutReceiptRefs ?? []),
       ]),
+      source: loopFreshness.source,
+      staleness: ARTANIS_LOOP_TICK_PROJECTION_STALENESS,
       state: activeLoop?.state ?? 'blocked',
       tickCount: activeLoop?.tickCount ?? 0,
     },
@@ -1114,6 +1331,7 @@ export const artanisPublicReportSnapshot = (input: {
     forumLinks,
     forumRewardSmoke,
     forumRewardVisibility,
+    generatedAtUnixMs: Date.parse(nowIso),
     healthSummary: {
       attentionLabels: uniqueRefs(healthAttentionLabels),
       blockerRefs: uniqueRefs([
@@ -1168,6 +1386,7 @@ export const artanisPublicReportSnapshot = (input: {
     publicBlockerRefs,
     publicCaveatRefs: uniqueRefs([
       ...runtime.caveatRefs,
+      ...loopFreshnessCaveatRefs,
       ...loop.caveatRefs,
       ...health.caveatRefs,
       ...health.signals.flatMap(signal => signal.caveatRefs),
@@ -1229,6 +1448,7 @@ export const artanisPublicReportSnapshot = (input: {
     ]),
     reportRef: 'report.public.artanis.status_aggregator',
     runtimeState: runtime.state,
+    staleness: ARTANIS_PUBLIC_REPORT_STALENESS,
     standaloneClaims,
     updatedAtDisplay: runtime.updatedAtDisplay,
   }

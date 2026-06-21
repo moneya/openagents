@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workspace_root="$(cd "$repo_root/../.." && pwd)"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -15,9 +16,42 @@ if [[ -z "$tarball" || ! -f "$repo_root/$tarball" ]]; then
   exit 1
 fi
 
+cd "$workspace_root/packages/nip90"
+nip90_pack_output="$(bun pm pack)"
+nip90_tarball="$(printf '%s\n' "$nip90_pack_output" | awk '/openagentsinc-nip90-.*\.tgz$/ {print $1}' | tail -1)"
+
+if [[ -z "$nip90_tarball" || ! -f "$workspace_root/packages/nip90/$nip90_tarball" ]]; then
+  printf 'failed to locate packed @openagentsinc/nip90 tarball\n' >&2
+  printf '%s\n' "$nip90_pack_output" >&2
+  exit 1
+fi
+
+cd "$workspace_root/packages/tassadar-executor"
+tassadar_pack_output="$(bun pm pack)"
+tassadar_tarball="$(printf '%s\n' "$tassadar_pack_output" | awk '/openagentsinc-tassadar-executor-.*\.tgz$/ {print $1}' | tail -1)"
+
+if [[ -z "$tassadar_tarball" || ! -f "$workspace_root/packages/tassadar-executor/$tassadar_tarball" ]]; then
+  printf 'failed to locate packed @openagentsinc/tassadar-executor tarball\n' >&2
+  printf '%s\n' "$tassadar_pack_output" >&2
+  exit 1
+fi
+
 cd "$tmp_dir"
-bun init -y >/dev/null
-bun add "$repo_root/$tarball" >/dev/null
+cat > package.json <<EOF
+{
+  "name": "pylon-install-smoke",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@openagentsinc/pylon": "file:$repo_root/$tarball"
+  },
+  "overrides": {
+    "@openagentsinc/nip90": "file:$workspace_root/packages/nip90/$nip90_tarball",
+    "@openagentsinc/tassadar-executor": "file:$workspace_root/packages/tassadar-executor/$tassadar_tarball"
+  }
+}
+EOF
+bun --dns-result-order=ipv4first install >/dev/null
 PYLON_HOME="$tmp_dir/pylon-home" bunx pylon bootstrap --json > bootstrap.json
 bun -e 'const summary = await Bun.file("bootstrap.json").json(); if (summary.packageName !== "@openagentsinc/pylon" || summary.bin !== "pylon" || !summary.platform.supported) process.exit(1);'
 

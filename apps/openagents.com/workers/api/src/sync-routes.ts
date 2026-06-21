@@ -1,4 +1,4 @@
-import { decodeSyncCommand } from '@openagents/sync-schema'
+import { decodeSyncCommand } from '@openagentsinc/sync-schema'
 import {
   SyncOutboxStore,
   SyncOutboxError as SyncOutboxStoreError,
@@ -11,9 +11,10 @@ import {
   publicAgentRunScope,
   publicAgentScope,
   publicGoalScope,
+  publicSettledFeedScope,
   threadScope as syncThreadScope,
   teamScope,
-} from '@openagents/sync-worker'
+} from '@openagentsinc/sync-worker'
 import { Effect, Match as M, Schema as S } from 'effect'
 
 import { routeAccessResponse } from './http/route-access-response'
@@ -31,6 +32,7 @@ type SyncScopeKind =
   | 'public-agent'
   | 'public-agent-run'
   | 'public-goal'
+  | 'public-settled-feed'
   | 'team'
   | 'thread'
   | 'workspace'
@@ -142,6 +144,10 @@ const syncScopeForPath = (
     return publicAgentRunScope(id)
   }
 
+  if (kind === 'public-settled-feed') {
+    return publicSettledFeedScope(id)
+  }
+
   return undefined
 }
 
@@ -152,7 +158,8 @@ const optionalSyncScopeKind = (value: string): SyncScopeKind | undefined =>
   value === 'agent-run' ||
   value === 'public-agent' ||
   value === 'public-goal' ||
-  value === 'public-agent-run'
+  value === 'public-agent-run' ||
+  value === 'public-settled-feed'
     ? value
     : undefined
 
@@ -294,7 +301,8 @@ const handleMutation = (request: Request, scope: string, actorId: string) =>
 const isPublicSyncPath = (syncPath: ParsedSyncPath): boolean =>
   syncPath.kind === 'public-agent' ||
   syncPath.kind === 'public-goal' ||
-  syncPath.kind === 'public-agent-run'
+  syncPath.kind === 'public-agent-run' ||
+  syncPath.kind === 'public-settled-feed'
 
 const handlePublicSyncRequest = (
   request: Request,

@@ -78,21 +78,23 @@ const publicLaunchDashboardRows: ReadonlyArray<PromiseRowDefinition> = [
       'Do not claim a universal new Rust Pylon release works on every computer.',
   },
   {
-    baseStatus: 'red',
+    baseStatus: 'yellow',
     blockerRefs: [
-      'blocker.launch_dashboard.model_training.remote_multi_device_missing',
+      'blocker.launch_dashboard.model_training.network_scale_rungs_not_run',
     ],
     evidenceRefs: [
-      'docs/2026-06-08-qwen-remote-pylon-finetune-gate.md',
-      'docs/2026-06-08-probe-gepa-stage0-no-spend-campaign-gate.md',
+      'transition:promise_transition_7e5325b3-c06b-484b-9724-1e4fb41421c0',
+      'route:/api/training/runs/run.cs336.a1.real_gradient.demo',
+      'apps/openagents.com/docs/2026-06-11-cs336-a1-multi-device-real-gradient-evidence.md',
+      'docs/training/2026-06-10-psion-full-pipeline-buildout-plan.md',
     ],
     promiseId: 'first_real_model_training_run',
     promiseText: 'Pylon starts the first real model-training run.',
     safeCopy:
-      'Local and loopback training rehearsals exist, but no public remote multi-device model-training run is live.',
+      'A bounded public remote two-device real-gradient training run (CS336 A1 scale) is live with verified gradient closeouts and settled Lightning payouts; network-scale model-ladder rungs have not run.',
     staleSensitive: true,
     unsafeCopy:
-      'Do not claim the first public remote Pylon model-training run is live.',
+      'Do not claim network-scale or unbounded Pylon model training is live; the live evidence is one bounded two-device A1-scale run.',
   },
   {
     baseStatus: 'red',
@@ -101,14 +103,13 @@ const publicLaunchDashboardRows: ReadonlyArray<PromiseRowDefinition> = [
     ],
     evidenceRefs: [
       'docs/2026-06-08-data-trace-marketplace-gate.md',
-      'docs/2026-06-08-signature-marketplace-revenue-gate.md',
-      'docs/2026-06-08-provider-capacity-marketplace-gate.md',
+      'docs/2026-06-10-five-bitcoin-revenue-streams-promise-audit.md',
     ],
     promiseId: 'five_bitcoin_revenue_streams',
     promiseText:
-      'Pylon stacks compute, data, Forum tips, referrals, and subscription/token-capacity arbitrage in one install.',
+      'Pylon stacks compute, data, Forum tips, referrals, and agent labor markets in one install.',
     safeCopy:
-      'Forum tipping and several future revenue gates exist, but one-install multi-stream Bitcoin earning is not live.',
+      'Forum tipping is live and the NIP-90 market rails exist in repo history, but one-install multi-stream Bitcoin earning is not live in the current app.',
     staleSensitive: true,
     unsafeCopy:
       'Do not claim one Pylon install creates five live Bitcoin revenue streams.',
@@ -116,20 +117,19 @@ const publicLaunchDashboardRows: ReadonlyArray<PromiseRowDefinition> = [
   {
     baseStatus: 'red',
     blockerRefs: [
-      'blocker.launch_dashboard.compute_revenue.remote_gepa_qwen_marketplace_missing',
+      'blocker.launch_dashboard.compute_revenue.remote_gepa_marketplace_missing',
     ],
     evidenceRefs: [
       'docs/2026-06-08-probe-gepa-paid-mode-campaign-ladder.md',
-      'docs/2026-06-08-qwen-remote-pylon-finetune-gate.md',
     ],
     promiseId: 'compute_revenue_modes',
     promiseText:
-      'Compute revenue includes local model inference, GEPA optimization slices, and Qwen 3.6 fine-tuning on people’s devices.',
+      'Compute revenue comes from GEPA optimization slices and Tassadar executor-trace work on people’s devices.',
     safeCopy:
-      'GEPA and Qwen gates exist, but public sellable local inference, paid full-network GEPA, and remote Qwen fine-tuning are not green.',
+      'GEPA gates and live no-spend Tassadar executor-trace dispatch exist, but paid full-network GEPA is not green. Local-inference and Qwen products are out of scope by owner decision (2026-06-10).',
     staleSensitive: true,
     unsafeCopy:
-      'Do not claim live local-inference revenue, full-network GEPA revenue, or remote Qwen fine-tune revenue.',
+      'Do not claim full-network GEPA revenue, and do not describe local-inference or Qwen fine-tune products as existing or planned.',
   },
   {
     baseStatus: 'red',
@@ -163,22 +163,24 @@ const publicLaunchDashboardRows: ReadonlyArray<PromiseRowDefinition> = [
       'Do not claim every Forum post or creator has spendable settled sats.',
   },
   {
-    baseStatus: 'red',
+    baseStatus: 'yellow',
     blockerRefs: [
-      'blocker.launch_dashboard.no_wallet_knowledge.receive_send_readiness_incomplete',
+      'blocker.launch_dashboard.no_wallet_knowledge.self_serve_without_operator_staging_missing',
     ],
     evidenceRefs: [
       'docs/live/AGENTS.md#pylon-registration-status-and-receipts',
       'docs/2026-06-08-pylon-agentic-revenue-gap-audit.md#money-dev-kit',
+      'docs/2026-06-11-pylon-live-install-to-bitcoin-smoke-evidence.md',
+      'route:/api/public/nexus-pylon/receipts/{receiptRef}',
     ],
     promiseId: 'no_wallet_knowledge_bitcoin',
     promiseText:
       'Anyone can install Pylon without Bitcoin wallet knowledge, without loading bitcoin, and start turning a computer into bitcoin.',
     safeCopy:
-      'Pylon can report public wallet-readiness refs, but send readiness and broad earning still require explicit wallet and receipt evidence.',
+      'A live operator-approved small-sats install-to-bitcoin smoke passed end to end on a real machine on 2026-06-11 with a public settled receipt; the run was operator-staged and self-serve no-wallet-knowledge earning is not yet live.',
     staleSensitive: true,
     unsafeCopy:
-      'Do not claim no-wallet-knowledge installs immediately earn spendable Bitcoin.',
+      'Do not claim no-wallet-knowledge installs immediately earn spendable Bitcoin without operator staging.',
   },
   {
     baseStatus: 'yellow',
@@ -325,17 +327,19 @@ const publicLaunchDashboardRows: ReadonlyArray<PromiseRowDefinition> = [
   {
     baseStatus: 'red',
     blockerRefs: [
-      'blocker.launch_dashboard.subscription_capacity.self_serve_clearing_missing',
+      'blocker.launch_dashboard.compliant_usage_labor.paid_labor_jobs_missing',
     ],
-    evidenceRefs: ['docs/2026-06-08-provider-capacity-marketplace-gate.md'],
+    evidenceRefs: [
+      'docs/2026-06-10-five-bitcoin-revenue-streams-promise-audit.md',
+    ],
     promiseId: 'chatgpt_claude_codex_capacity',
     promiseText:
       'ChatGPT subscription accounts can be connected through OpenAgents; Claude may come later; Codex/OpenCode auth can be reused or dedicated.',
     safeCopy:
-      'Provider-account connection work exists, but self-serve capacity metering, ToS policy, pricing, assignment, and settlement are missing.',
+      'Provider-account connection and device-login flows exist and contributors keep full custody of their own accounts; paid labor jobs that put that compliant usage to work for Bitcoin are not live. OpenAgents does not meter, resell, or proxy provider access.',
     staleSensitive: false,
     unsafeCopy:
-      'Do not claim ChatGPT, Claude, Codex, or OpenCode subscription capacity is monetized.',
+      'Do not claim connected provider accounts earn Bitcoin today, and do not describe OpenAgents as reselling, renting, or proxying ChatGPT, Claude, Codex, or OpenCode subscription capacity.',
   },
   {
     baseStatus: 'yellow',
@@ -366,17 +370,19 @@ const publicLaunchDashboardRows: ReadonlyArray<PromiseRowDefinition> = [
   {
     baseStatus: 'red',
     blockerRefs: [
-      'blocker.launch_dashboard.prepaid_provider_capacity.provider_policy_missing',
+      'blocker.launch_dashboard.compliant_usage_labor.paid_labor_jobs_missing',
     ],
-    evidenceRefs: ['docs/2026-06-08-provider-capacity-marketplace-gate.md'],
+    evidenceRefs: [
+      'docs/2026-06-10-five-bitcoin-revenue-streams-promise-audit.md',
+    ],
     promiseId: 'prepaid_provider_capacity_monetization',
     promiseText:
       'Prepaid provider API budgets should be possible to monetize through Pylon/OpenAgents once provider policy, metering, assignment, and settlement are proven.',
     safeCopy:
-      'Generic prepaid provider capacity monetization is planned or unsupported until provider schema, policy, metering, pricing, assignment, and settlement refs exist.',
+      'Prepaid API budgets are contributor-owned capacity for the agent labor market: contributors do useful work with their own keys and sell the results. No resale path exists or is planned, and paid labor jobs are not live.',
     staleSensitive: false,
     unsafeCopy:
-      'Do not claim prepaid provider API capacity monetization is live.',
+      'Do not claim prepaid API budgets earn Bitcoin today, and do not describe OpenAgents as buying, reselling, or brokering provider API access.',
   },
 ]
 
