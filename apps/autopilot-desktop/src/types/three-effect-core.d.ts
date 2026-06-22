@@ -3,6 +3,12 @@ import type * as Three from "three"
 
 export type TrainingRunVector = readonly [number, number, number]
 
+export type InferenceGatewayLane =
+  | "vertex"
+  | "fireworks"
+  | "openrouter"
+  | "passthrough"
+
 export type TrainingRunNodeRole =
   | "lifecycle"
   | "run"
@@ -66,11 +72,174 @@ export type TrainingRunPromiseSignalDefinition = Readonly<{
 
 export type TrainingRunEntityDefinition = Readonly<{
   detail?: string
+  gatewayLane?: InferenceGatewayLane
   id: string
   label?: string
   position?: TrainingRunVector
   status: string
+  visualKind?: "default" | "gateway_portal"
 }>
+
+export type VerseIconKind =
+  | "agent"
+  | "chat"
+  | "focus"
+  | "inspect"
+  | "proof"
+  | "pylon"
+  | "receipt"
+  | "run"
+  | "settlement"
+  | "training"
+  | "zap"
+
+export type VerseIconPrimitive =
+  | "bolt"
+  | "brackets"
+  | "bubble"
+  | "chevron"
+  | "core"
+  | "diamond"
+  | "eye"
+  | "hex"
+  | "node"
+  | "orbit"
+  | "ring"
+  | "spark"
+  | "stack"
+  | "trace"
+  | "triangle"
+
+export type VerseIconRecipe = Readonly<{
+  background: "grid" | "halo" | "radial" | "scanline" | "void"
+  fallback: boolean
+  id: string
+  kind: VerseIconKind | "unknown"
+  palette:
+    | "agent"
+    | "chat"
+    | "focus"
+    | "gold"
+    | "pylon"
+    | "proof"
+    | "run"
+    | "settlement"
+    | "training"
+    | "zap"
+  primitives: ReadonlyArray<VerseIconPrimitive>
+  seed: number
+}>
+
+export declare const verseIconRecipeForId: (id: string) => VerseIconRecipe
+
+export type ThirdPersonAutoSettleBehindInput = Readonly<{
+  currentYaw: number
+  deltaSeconds: number
+  manualCamera: boolean
+  moving: boolean
+  targetYaw: number
+  maxYawSpeed?: number
+}>
+
+export type CameraOcclusionEasingInput = Readonly<{
+  currentDistance: number
+  desiredDistance: number
+  deltaSeconds: number
+  hitDistance?: number
+  breathingRoom?: number
+  easeInSpeed?: number
+  easeOutSpeed?: number
+  fovCompensation?: number
+  minDistance?: number
+}>
+
+export type PointerClickPickGesture = Readonly<{
+  buttonDown: number
+  buttonUp: number
+  downAtMs: number
+  downX: number
+  downY: number
+  pointerLocked: boolean
+  releasedOnCanvas: boolean
+  upAtMs: number
+  upX: number
+  upY: number
+  maxDragPx?: number
+  maxDurationMs?: number
+}>
+
+export declare const shortestAngleDelta: (from: number, to: number) => number
+export declare const thirdPersonAutoSettleBehindYaw: (
+  input: ThirdPersonAutoSettleBehindInput,
+) => number
+export declare const cameraOcclusionEasedDistance: (
+  input: CameraOcclusionEasingInput,
+) => number
+export declare const pointerClickPickFromGesture: (
+  input: PointerClickPickGesture,
+) => boolean
+
+export type VerseNameplateKind = "agent" | "pylon" | "run"
+
+export type VerseNameplateDefinition = Readonly<{
+  id: string
+  kind: VerseNameplateKind
+  label: string
+  position: TrainingRunVector
+  status?: string
+  anchorOffset?: TrainingRunVector
+}>
+
+export type VerseNameplateHudExclusion = Readonly<{
+  x: number
+  y: number
+  width: number
+  height: number
+}>
+
+export type VerseNameplateStatusBar = Readonly<{
+  value: number
+  tone: "blocked" | "offline" | "online" | "pending" | "working"
+}>
+
+export type VerseNameplateProjection = Readonly<{
+  id: string
+  kind: VerseNameplateKind
+  label: string
+  status?: string
+  statusBar: VerseNameplateStatusBar
+  screen: Readonly<{ x: number; y: number }>
+  worldPosition: TrainingRunVector
+  visible: boolean
+  degraded: "behind_camera" | "hud_overlap" | "offscreen" | null
+}>
+
+export type VerseNameplateProjectionInput = Readonly<{
+  camera: Three.Camera
+  items: ReadonlyArray<VerseNameplateDefinition>
+  size: Readonly<{ width: number; height: number }>
+  hudExclusionRects?: ReadonlyArray<VerseNameplateHudExclusion>
+  paddingPx?: number
+}>
+
+export type VerseNameplatePoolReconcileResult = Readonly<{
+  created: ReadonlyArray<string>
+  removed: ReadonlyArray<string>
+  reused: ReadonlyArray<string>
+  activeIds: ReadonlyArray<string>
+}>
+
+export type VerseNameplatePool = Readonly<{
+  reconcile: (
+    projections: ReadonlyArray<Pick<VerseNameplateProjection, "id">>,
+  ) => VerseNameplatePoolReconcileResult
+  activeIds: () => ReadonlyArray<string>
+}>
+
+export declare const projectVerseNameplates: (
+  input: VerseNameplateProjectionInput,
+) => ReadonlyArray<VerseNameplateProjection>
+export declare const createVerseNameplatePool: () => VerseNameplatePool
 
 export type TrainingRunMotionKind =
   | "presence"
@@ -94,7 +263,11 @@ export type TrainingRunMotionEvidence = Readonly<{
 }>
 
 export type TrainingRunBeamDefinition = Readonly<
-  TrainingRunMotionEvidence & { fromId: string; toId: string }
+  TrainingRunMotionEvidence & {
+    fromId: string
+    style?: "crackling_arc" | "flow"
+    toId: string
+  }
 >
 
 export type TrainingRunBurstDefinition = Readonly<
@@ -159,6 +332,78 @@ export type TrainingRunLocalPoseUpdate = Readonly<{
   yaw: number
 }>
 
+export type WasdAction =
+  | "backward"
+  | "fall"
+  | "forward"
+  | "left"
+  | "right"
+  | "rise"
+  | "sprint"
+
+export type WasdKeyboardBindingMap = Readonly<
+  Partial<Record<WasdAction, readonly string[]>>
+>
+
+export type TrainingRunKeyboardTargetingAction = "next" | "previous"
+
+export type TrainingRunKeyboardTargetingBinding = Readonly<{
+  altKey?: boolean
+  code?: string
+  ctrlKey?: boolean
+  key?: string
+  metaKey?: boolean
+  shiftKey?: boolean
+}>
+
+export type TrainingRunKeyboardTargeting = Readonly<{
+  bindings?: Readonly<
+    Partial<
+      Record<
+        TrainingRunKeyboardTargetingAction,
+        readonly TrainingRunKeyboardTargetingBinding[]
+      >
+    >
+  >
+  enabled?: boolean
+  maxTargets?: number
+}>
+
+export type WasdMouseLookControllerOptions = Readonly<{
+  acceleration?: number
+  bounds?: unknown
+  damping?: number
+  debug?: boolean | ((snapshot: unknown) => void)
+  enabled?: boolean
+  eyeHeight?: number
+  groundHeightAt?: (x: number, z: number) => number
+  initialPosition?: TrainingRunVector
+  inputTarget?: HTMLElement | Window
+  keyboardBindings?: WasdKeyboardBindingMap
+  lockSelector?: string
+  movementSpeed?: number
+  onLockChange?: (locked: boolean) => void
+  pitchMax?: number
+  pitchMin?: number
+  pointerSensitivity?: number
+  sprintMultiplier?: number
+}>
+
+export type ThreePlayerControllerOptions = Readonly<{
+  camera?: Readonly<Record<string, unknown>>
+  character?: Readonly<Record<string, unknown>>
+  dragSensitivity?: number
+  enabled?: boolean
+  gravity?: number
+  groundHeightAt?: (x: number, z: number) => number
+  initialPosition?: TrainingRunVector
+  inputTarget?: HTMLElement | Window
+  jumpHeight?: number
+  keyboardBindings?: WasdKeyboardBindingMap
+  onActionChange?: (action: string) => void
+  onCameraControl?: (event: Readonly<Record<string, unknown>>) => void
+}>
+
 export type TrainingRunVisualizationOptions = Readonly<{
   backgroundColor?: number
   beams?: readonly TrainingRunBeamDefinition[]
@@ -167,7 +412,7 @@ export type TrainingRunVisualizationOptions = Readonly<{
   controller?: "none" | "third_person_character" | "wasd_mouselook"
   contributors?: readonly unknown[]
   entities?: readonly TrainingRunEntityDefinition[]
-  keyboardTargeting?: Readonly<{ enabled?: boolean; maxTargets?: number }>
+  keyboardTargeting?: TrainingRunKeyboardTargeting
   lossCurve?: readonly unknown[]
   maxAllowedStaleSteps?: number
   motionPolicy?: Readonly<{
@@ -196,8 +441,8 @@ export type TrainingRunVisualizationOptions = Readonly<{
     statusChart?: "visible" | "hidden"
   }>
   stageNodeGlyph?: "orb" | "compact_gate"
-  thirdPersonController?: unknown
-  walkController?: unknown
+  thirdPersonController?: ThreePlayerControllerOptions
+  walkController?: WasdMouseLookControllerOptions
   worldItems?: readonly TrainingRunWorldItemDefinition[]
   worldLabelDensity?: "full" | "compact" | "pylons"
 }>

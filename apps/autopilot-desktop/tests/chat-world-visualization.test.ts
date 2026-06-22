@@ -1,4 +1,19 @@
 import { describe, expect, test } from "bun:test"
+import * as Three from "three"
+import {
+  createVerseNameplatePool,
+  projectVerseNameplates,
+} from "@openagentsinc/three-effect/core"
+import {
+  applyDeltaToReadModel,
+  makeEmptyClientWorld,
+  projectWorldMinimapReadout,
+} from "@openagentsinc/world-client"
+import {
+  WORLD_DELTA_SCHEMA_VERSION,
+  decodeWorldDelta,
+  decodeWorldRow,
+} from "@openagentsinc/world-contract"
 
 import type {
   ChatWorldPylonScene,
@@ -10,14 +25,19 @@ import {
   PAYMENT_PARTICLE_GOLD,
   pylonGrowthTier,
 } from "../src/shared/chat-world-scene"
+import { projectChatWorldClientWorld } from "../src/shared/chat-world-cloudflare"
 import {
+  CHAT_WORLD_GATEWAY_NODE_PREFIX,
+  CHAT_WORLD_INFERENCE_NODE_PREFIX,
   CHAT_WORLD_STATION_NODE_PREFIX,
+  chatWorldInferenceLayer,
   chatWorldMultiplayerLayer,
   chatWorldPaymentEndpointIndex,
   chatWorldPaymentLayer,
   chatWorldVisibleTargetCandidates,
   liveChatWorldNetworkScene,
   resolveChatWorldPaymentEndpoint,
+  withChatWorldInferenceLayer,
   withChatWorldMultiplayerLayer,
   withChatWorldPaymentLayer,
 } from "../src/shared/chat-world-visualization"
@@ -112,9 +132,11 @@ const worldProjection = (
 ): ChatWorldMultiplayerProjection => ({
   connected: true,
   database: "openagents-world",
-  worldUrl: "https://spacetime.openagents.com",
+  worldUrl: "https://openagents-world.openagents.workers.dev",
   regionRef: "region.run.public",
   projectedAtMs: 10_000,
+  gateways: [],
+  inferenceEvents: [],
   stations: [{
     pylonRef: "pylon.alpha",
     label: "Alpha Pylon",
@@ -139,7 +161,197 @@ const worldProjection = (
     attentionRefs: [],
   }],
   proximityChatCount: 0,
+  localAvatarRef: null,
   ...overrides,
+})
+
+const gatewayStation = (
+  overrides: Partial<ChatWorldMultiplayerProjection["gateways"][number]> = {},
+): ChatWorldMultiplayerProjection["gateways"][number] => ({
+  gatewayRef: "gateway.vertex.main",
+  label: "Vertex Gateway",
+  providerLabel: "Vertex",
+  lane: "vertex",
+  status: "working",
+  x: 3.5,
+  y: 0.75,
+  z: -1.25,
+  ...overrides,
+})
+
+const inferenceEvent = (
+  overrides: Partial<ChatWorldMultiplayerProjection["inferenceEvents"][number]> = {},
+): ChatWorldMultiplayerProjection["inferenceEvents"][number] => ({
+  eventRef: "event.khala.1",
+  requestRef: "request.khala.1",
+  receiptRef: "https://openagents.com/api/public/inference/receipts/oa_receipt_1",
+  model: "gemini-2.5-pro",
+  route: "vertex",
+  gatewayRef: "gateway.vertex.main",
+  workerRefs: ["pylon.alpha", "gateway.vertex.main"],
+  verification: "exact_trace_replay",
+  costMsat: 42,
+  settled: true,
+  sourceRefs: [
+    "https://openagents.com/api/public/inference/receipts/oa_receipt_1",
+  ],
+  generatedAt: "2026-06-22T00:00:00.000Z",
+  ...overrides,
+})
+
+const publicSafety = {
+  publicProjectionAllowed: true,
+  sourceRefs: ["source.public.fixture"],
+  blockerRefs: [],
+  caveatRefs: [],
+}
+
+const readModelFromRows = (rows: ReadonlyArray<unknown>) =>
+  applyDeltaToReadModel(
+    makeEmptyClientWorld("region.run.public.street", "2026-06-22T00:00:00.000Z"),
+    decodeWorldDelta({
+      schemaVersion: WORLD_DELTA_SCHEMA_VERSION,
+      deltaRef: "delta.chat-world-visualization.minimap",
+      kind: "update",
+      regionRef: "region.run.public.street",
+      cursor: "cursor.chat-world-visualization.minimap",
+      generatedAt: "2026-06-22T00:00:00.000Z",
+      rows: rows.map(row => decodeWorldRow(row)),
+    }),
+  )
+
+describe("WorldReadModel minimap projection", () => {
+  test("minimap and 3D scene share pylon/avatar source positions", () => {
+    const readModel = readModelFromRows([
+      {
+        kind: "world_region",
+        regionRef: "region.run.public.street",
+        label: "Public Street",
+        bounds: { min: { x: -50, y: -4, z: -50 }, max: { x: 50, y: 20, z: 50 } },
+        origin: { x: 0, y: 0, z: 0 },
+        proximityRadius: 12,
+        staleAvatarTtlMs: 30_000,
+        updatedAt: "2026-06-22T00:00:00.000Z",
+        safety: publicSafety,
+      },
+      {
+        kind: "pylon_station",
+        pylonRef: "pylon.alpha",
+        regionRef: "region.run.public.street",
+        label: "Alpha Pylon",
+        position: { x: 10, y: 0, z: -12 },
+        status: "online",
+        updatedAt: "2026-06-22T00:00:00.000Z",
+        safety: publicSafety,
+      },
+      {
+        kind: "agent_avatar",
+        avatarRef: "avatar.bravo",
+        characterId: "bravo",
+        regionRef: "region.run.public.street",
+        label: "Bravo",
+        avatarKind: "guest",
+        updatedAt: "2026-06-22T00:00:00.000Z",
+        safety: publicSafety,
+      },
+      {
+        kind: "avatar_position",
+        avatarRef: "avatar.bravo",
+        regionRef: "region.run.public.street",
+        position: { x: -6, y: 0, z: 14 },
+        rotationY: 0,
+        animation: "walk",
+        observedAt: "2026-06-22T00:00:00.000Z",
+        safety: publicSafety,
+      },
+    ])
+    const minimap = projectWorldMinimapReadout({ readModel, sizePx: 200 })
+    const scene = projectChatWorldClientWorld({
+      flagEnabled: true,
+      runRef: "run.public",
+      readModel,
+      nowMs: Date.parse("2026-06-22T00:00:01.000Z"),
+    })
+
+    expect(minimap.markers.find(marker => marker.ref === "pylon.alpha")?.worldPosition)
+      .toEqual({ x: scene.world?.stations[0]?.x, y: scene.world?.stations[0]?.y, z: scene.world?.stations[0]?.z })
+    expect(minimap.markers.find(marker => marker.ref === "avatar.bravo")?.worldPosition)
+      .toEqual({ x: scene.world?.agents[0]?.x, y: scene.world?.agents[0]?.y, z: scene.world?.agents[0]?.z })
+    expect(minimap.markers.find(marker => marker.ref === "pylon.alpha")?.minimap)
+      .toEqual({ x: 120, y: 76 })
+  })
+})
+
+describe("shared Verse nameplate projection", () => {
+  test("projects pylon, agent, and run labels with status bars and pooling", () => {
+    const camera = new Three.PerspectiveCamera(50, 1, 0.1, 100)
+    camera.position.set(0, 0, 5)
+    camera.lookAt(0, 0, 0)
+    camera.updateProjectionMatrix()
+    camera.updateMatrixWorld()
+
+    const projections = projectVerseNameplates({
+      camera,
+      size: { width: 240, height: 240 },
+      hudExclusionRects: [{ x: 100, y: 80, width: 40, height: 80 }],
+      items: [
+        {
+          id: "pylon.alpha",
+          kind: "pylon",
+          label: "Alpha Pylon",
+          position: [0, 0, 0],
+          status: "working",
+          anchorOffset: [0, 2, 0],
+        },
+        {
+          id: "avatar.bravo",
+          kind: "agent",
+          label: "Bravo",
+          position: [0, 0, 0],
+          status: "online",
+        },
+        {
+          id: "run.tassadar.executor.20260615",
+          kind: "run",
+          label: "Tassadar Executor",
+          position: [1.4, 0, 0],
+          status: "tracing",
+        },
+      ],
+    })
+    const pool = createVerseNameplatePool()
+
+    expect(projections.map(projection => projection.kind)).toEqual([
+      "pylon",
+      "agent",
+      "run",
+    ])
+    expect(projections.find(projection => projection.kind === "pylon"))
+      .toMatchObject({
+        visible: true,
+        statusBar: { value: 0.78, tone: "working" },
+      })
+    expect(projections.find(projection => projection.kind === "agent"))
+      .toMatchObject({
+        visible: false,
+        degraded: "hud_overlap",
+        statusBar: { value: 1, tone: "online" },
+      })
+    expect(projections.find(projection => projection.kind === "run"))
+      .toMatchObject({
+        visible: true,
+        statusBar: { value: 0.78, tone: "working" },
+      })
+    expect(pool.reconcile(projections).created).toEqual([
+      "pylon.alpha",
+      "avatar.bravo",
+      "run.tassadar.executor.20260615",
+    ])
+    expect(pool.reconcile(projections.slice(1)).reused).toEqual([
+      "avatar.bravo",
+      "run.tassadar.executor.20260615",
+    ])
+  })
 })
 
 describe("chatWorldPaymentLayer (evidence-bound motion)", () => {
@@ -182,14 +394,23 @@ describe("chatWorldPaymentLayer (evidence-bound motion)", () => {
     expect(layer.entities).toHaveLength(0)
   })
 
-  test("indexes public world endpoints by station, actor, and avatar refs", () => {
-    const endpoints = chatWorldPaymentEndpointIndex(worldProjection())
+  test("indexes public world endpoints by station, gateway, actor, and avatar refs", () => {
+    const endpoints = chatWorldPaymentEndpointIndex(
+      worldProjection({ gateways: [gatewayStation()] }),
+    )
     expect(
       resolveChatWorldPaymentEndpoint("pylon:alpha", [9, 9, 9], endpoints),
     ).toMatchObject({
       label: "Alpha Pylon",
       position: [1.25, 0.5, -2],
       source: "station",
+    })
+    expect(
+      resolveChatWorldPaymentEndpoint("gateway.vertex.main", [9, 9, 9], endpoints),
+    ).toMatchObject({
+      label: "Vertex Gateway",
+      position: [3.5, 0.75, -1.25],
+      source: "gateway",
     })
     expect(
       resolveChatWorldPaymentEndpoint("agent.bravo", [9, 9, 9], endpoints),
@@ -217,9 +438,11 @@ describe("chatWorldPaymentLayer (evidence-bound motion)", () => {
     expect(fromEntity.position).toEqual([1.25, 0.5, -2])
     expect(fromEntity.label).toBe("Alpha Pylon")
     expect(fromEntity.detail).toContain("station")
+    expect(fromEntity.iconRecipe?.kind).toBe("pylon")
     expect(toEntity.position).toEqual([-3, 1, 2.75])
     expect(toEntity.label).toBe("Tassadar")
     expect(toEntity.detail).toContain("avatar")
+    expect(toEntity.iconRecipe?.kind).toBe("zap")
   })
 
   test("labels unresolved endpoints as fallback instead of claiming a world location", () => {
@@ -235,6 +458,93 @@ describe("chatWorldPaymentLayer (evidence-bound motion)", () => {
     expect(toEntity.detail).toContain("unresolved pylon:missing")
     expect(toEntity.detail).toContain("fallback")
     expect(toEntity.detail).toContain("receipt:nip90:abc")
+  })
+})
+
+describe("chatWorldInferenceLayer (gateway-backed Khala receipts)", () => {
+  test("renders gateway stations as portal entities", () => {
+    const layer = chatWorldInferenceLayer(
+      worldProjection({ gateways: [gatewayStation()] }),
+    )
+    const gateway = layer.entities.find(
+      entity => entity.id === `${CHAT_WORLD_GATEWAY_NODE_PREFIX}gateway.vertex.main`,
+    )
+
+    expect(gateway).toMatchObject({
+      label: "Vertex Gateway",
+      status: "active",
+      position: [3.5, 0.75, -1.25],
+      visualKind: "gateway_portal",
+      gatewayLane: "vertex",
+    })
+    expect(layer.beams).toEqual([])
+    expect(layer.bursts).toEqual([])
+  })
+
+  test("receipt-backed inference events create crackling arcs and settlement bursts", () => {
+    const world = worldProjection({
+      gateways: [gatewayStation()],
+      inferenceEvents: [inferenceEvent()],
+    })
+    const layer = chatWorldInferenceLayer(world)
+    const beam = layer.beams[0]!
+    const burst = layer.bursts[0]!
+    const target = layer.entities.find(
+      entity => entity.id === `${CHAT_WORLD_INFERENCE_NODE_PREFIX}event.khala.1:to`,
+    )
+
+    expect(beam).toMatchObject({
+      fromId: `${CHAT_WORLD_INFERENCE_NODE_PREFIX}event.khala.1:from`,
+      toId: `${CHAT_WORLD_INFERENCE_NODE_PREFIX}event.khala.1:to`,
+      style: "crackling_arc",
+      motionKind: "khala_gateway_inference",
+      sourceRefs: [
+        "https://openagents.com/api/public/inference/receipts/oa_receipt_1",
+      ],
+      simulated: false,
+    })
+    expect(burst).toMatchObject({
+      atId: `${CHAT_WORLD_INFERENCE_NODE_PREFIX}event.khala.1:to`,
+      motionKind: "khala_gateway_inference",
+    })
+    expect(target).toMatchObject({
+      label: "Vertex Gateway",
+      position: [3.5, 0.75, -1.25],
+      status: "verified",
+      visualKind: "gateway_portal",
+      gatewayLane: "vertex",
+    })
+  })
+
+  test("refuses inference motion without public evidence refs", () => {
+    const layer = chatWorldInferenceLayer(
+      worldProjection({
+        inferenceEvents: [inferenceEvent({ sourceRefs: [" ", ""] })],
+      }),
+    )
+
+    expect(layer.entities).toEqual([])
+    expect(layer.beams).toEqual([])
+    expect(layer.bursts).toEqual([])
+  })
+})
+
+describe("shared Verse procedural icons", () => {
+  test("pylon world entities carry shared three-effect icon recipes", () => {
+    const layer = chatWorldMultiplayerLayer(worldProjection())
+    const station = layer.entities.find(
+      entity => entity.id === `${CHAT_WORLD_STATION_NODE_PREFIX}pylon.alpha`,
+    )!
+    expect(station.iconRecipe?.kind).toBe("pylon")
+    expect(station.iconRecipe?.fallback).toBe(false)
+  })
+
+  test("credited payment endpoints use settlement taxonomy", () => {
+    const layer = chatWorldPaymentLayer([
+      particle({ realBitcoinMoved: false, color: PAYMENT_PARTICLE_DIM }),
+    ])
+    const target = layer.entities.find(entity => entity.id === "pay:evt-1:to")!
+    expect(target.iconRecipe?.kind).toBe("settlement")
   })
 })
 
@@ -260,7 +570,7 @@ describe("chatWorldMultiplayerLayer", () => {
     })
   })
 
-  test("filters the local desktop avatar and stale-despawns old remotes", () => {
+  test("filters the local desktop avatar, keeps idle remotes solid (no fade), despawns very old ones", () => {
     const layer = chatWorldMultiplayerLayer(
       worldProjection({
         projectedAtMs: 20_000,
@@ -318,10 +628,12 @@ describe("chatWorldMultiplayerLayer", () => {
       { localAvatarRef: "avatar.desktop.local" },
     )
 
+    // The stale FADE is disabled (present avatars render solid, stale: false), but
+    // the 12s despawn backstop still drops avatar.gone (age 13s) from the layer.
     expect(layer.remoteAvatars.map(avatar => avatar.id)).toEqual(["avatar.stale"])
     expect(layer.remoteAvatars[0]).toMatchObject({
       animation: "run",
-      stale: true,
+      stale: false,
     })
   })
 
@@ -541,6 +853,26 @@ describe("withChatWorldPaymentLayer", () => {
     // hard backstop: the renderer must require evidence before animating motion
     expect(out.motionPolicy?.evidence).toBe("required")
     // the base pylon graph nodes survive the overlay
+    expect(out.nodes).toBe(base.nodes)
+  })
+
+  test("inference overlay composes portals/arcs and forces evidence=required", () => {
+    const out = withChatWorldInferenceLayer(
+      base,
+      worldProjection({
+        gateways: [gatewayStation()],
+        inferenceEvents: [inferenceEvent()],
+      }),
+    )
+
+    expect(out.beams).toHaveLength(1)
+    expect(out.bursts).toHaveLength(1)
+    expect(
+      (out.entities ?? []).some(
+        entity => entity.id === `${CHAT_WORLD_GATEWAY_NODE_PREFIX}gateway.vertex.main`,
+      ),
+    ).toBe(true)
+    expect(out.motionPolicy?.evidence).toBe("required")
     expect(out.nodes).toBe(base.nodes)
   })
 

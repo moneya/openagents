@@ -1,12 +1,54 @@
 export const OPENAGENTS_WORLD_DATABASE = "openagents-world"
-export const OPENAGENTS_WORLD_URL = "https://spacetime.openagents.com"
+export const OPENAGENTS_WORLD_URL = "https://openagents-world.openagents.workers.dev"
 export const DEFAULT_TASSADAR_WORLD_RUN_REF = "run.tassadar.executor.20260615"
 export const PUBLIC_ACTIVITY_TIMELINE_WORLD_RUN_REF = "run.public_activity_timeline"
 // BF-3 (#5906): the forum->Verse bridge (#5905) writes world_events under this
 // run ref; subscribe so forum_* events reach the desktop for pylon message icons.
 // Mirrors FORUM_ACTIVITY_WORLD_RUN_REF in chat-world-forum-activity.ts.
 export const PUBLIC_FORUM_ACTIVITY_WORLD_RUN_REF = "run.public_forum_activity"
+// Legacy placeholder for the local desktop avatar self-filter. Retained only as
+// the fallback when the live Cloudflare world identity is not yet known (pre-connect)
+// so the projection still has a non-empty local ref. Once onConnect yields the
+// real identity, the self-filter uses the per-character key built by
+// `chatWorldDesktopAvatarRef` instead. See
+// docs/game/2026-06-21-mmo-characters-per-account-verse-presence.md.
 export const CHAT_WORLD_DESKTOP_AVATAR_REF = "avatar.desktop.local"
+
+/** Default character id when OA_CHARACTER is unset (one stable character per install). */
+export const DEFAULT_OA_CHARACTER_ID = "main"
+
+const MAX_CHARACTER_ID_CHARS = 64
+
+/**
+ * Normalize a character id the same way the world module's `sanitize_character_id`
+ * does, so the client-computed self-filter key matches the avatar_ref the module
+ * actually writes. Keep this in lockstep with the Rust helper.
+ */
+export const sanitizeChatWorldCharacterId = (
+  characterId: string | null | undefined,
+): string => {
+  const cleaned = (characterId ?? "")
+    .trim()
+    .split("")
+    .filter((ch) => /[A-Za-z0-9._-]/.test(ch))
+    .join("")
+    .slice(0, MAX_CHARACTER_ID_CHARS)
+  return cleaned.length > 0 ? cleaned : DEFAULT_OA_CHARACTER_ID
+}
+
+/**
+ * Build the MMO avatar key for an account identity + chosen character. Mirrors
+ * the world module's `avatar_ref_for_sender`:
+ *   avatar.identity.<identity>.char.<sanitized character id>
+ * Embedding the identity makes ownership automatic (a client only writes under
+ * its own identity) while letting ONE account field MANY simultaneous visible
+ * characters.
+ */
+export const chatWorldDesktopAvatarRef = (
+  identity: string,
+  characterId: string,
+): string =>
+  `avatar.identity.${identity.trim()}.char.${sanitizeChatWorldCharacterId(characterId)}`
 
 export type ChatWorldStationRow = Readonly<{
   pylonRef: string
@@ -90,6 +132,32 @@ export type ChatWorldMultiplayerStation = Readonly<{
   z: number
 }>
 
+export type ChatWorldGatewayStation = Readonly<{
+  gatewayRef: string
+  label: string
+  providerLabel: string
+  lane: "vertex" | "fireworks" | "openrouter" | "passthrough"
+  status: "unknown" | "online" | "working" | "offline" | "blocked"
+  x: number
+  y: number
+  z: number
+}>
+
+export type ChatWorldInferenceEvent = Readonly<{
+  eventRef: string
+  requestRef: string
+  receiptRef: string
+  model: string
+  route: string
+  gatewayRef: string | null
+  workerRefs: ReadonlyArray<string>
+  verification: "none" | "seeded" | "test_passed" | "exact_trace_replay" | "failed" | "unknown"
+  costMsat: number | null
+  settled: boolean
+  sourceRefs: ReadonlyArray<string>
+  generatedAt: string
+}>
+
 export type ChatWorldMultiplayerProjection = Readonly<{
   connected: boolean
   database: string
@@ -97,8 +165,14 @@ export type ChatWorldMultiplayerProjection = Readonly<{
   regionRef: string
   projectedAtMs: number
   agents: ReadonlyArray<ChatWorldMultiplayerAgent>
+  gateways: ReadonlyArray<ChatWorldGatewayStation>
+  inferenceEvents: ReadonlyArray<ChatWorldInferenceEvent>
   stations: ReadonlyArray<ChatWorldMultiplayerStation>
   proximityChatCount: number
+  // The local instance's OWN character avatar key, used by the scene to
+  // self-filter (hide only this character, render all others — including other
+  // characters of the same account). Null until the live identity is known.
+  localAvatarRef: string | null
 }>
 
 export type ChatWorldPresenceFeedMode = "single-region" | "split-near-far"
@@ -134,7 +208,7 @@ const sqlNumber = (value: number): string =>
   Number(value.toFixed(3)).toString()
 
 export const chatWorldRegionRefForRun = (runRef: string): string =>
-  `region.${runRef}.main`
+  `region.${runRef}.street`
 
 export const estimateChatWorldPresenceFeedLoad = (input: {
   readonly avatarCount: number
@@ -279,8 +353,10 @@ export const projectChatWorldMultiplayer = (input: {
   readonly nowMs: number
   readonly worldUrl?: string
   readonly database?: string
+  readonly localAvatarRef?: string | null
 }): ChatWorldMultiplayerProjection => {
   const regionRef = chatWorldRegionRefForRun(input.runRef)
+  const localAvatarRef = input.localAvatarRef ?? null
   const rows = input.rows
   if (input.flagEnabled !== true || rows === null) {
     return {
@@ -290,8 +366,11 @@ export const projectChatWorldMultiplayer = (input: {
       regionRef,
       projectedAtMs: input.nowMs,
       agents: [],
+      gateways: [],
+      inferenceEvents: [],
       stations: [],
       proximityChatCount: 0,
+      localAvatarRef,
     }
   }
 
@@ -380,10 +459,13 @@ export const projectChatWorldMultiplayer = (input: {
     regionRef,
     projectedAtMs: input.nowMs,
     agents,
+    gateways: [],
+    inferenceEvents: [],
     stations,
     proximityChatCount: agents.reduce(
       (count, agent) => count + agent.chatMessages.length,
       0,
     ),
+    localAvatarRef,
   }
 }

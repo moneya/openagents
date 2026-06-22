@@ -67,6 +67,26 @@ export const ChangedVerseWorldItemProximity = m(
 export const ChangedVerseLocalPose = m("ChangedVerseLocalPose", {
   pose: VerseLocalPose,
 })
+export const ChangedInputProfile = m("ChangedInputProfile", {
+  profile: S.Unknown,
+})
+export const StartedInputBindingCapture = m("StartedInputBindingCapture", {
+  actionId: S.String,
+  slot: S.Number,
+})
+export const CancelledInputBindingCapture = m("CancelledInputBindingCapture")
+export const CapturedInputBinding = m("CapturedInputBinding", {
+  actionId: S.String,
+  slot: S.Number,
+  binding: S.Unknown,
+})
+export const ResetInputBinding = m("ResetInputBinding", {
+  actionId: S.String,
+})
+export const ResetInputBindingCategory = m("ResetInputBindingCategory", {
+  category: S.String,
+})
+export const ResetAllInputBindings = m("ResetAllInputBindings")
 export const SettledVerseLocalPosePublish = m("SettledVerseLocalPosePublish", {
   ok: S.Boolean,
   reason: S.String,
@@ -105,6 +125,7 @@ export const RanPaletteCommand = m("RanPaletteCommand", {
 // nav keys never fire mid-typing (#5465 scoping rule).
 export const PressedKey = m("PressedKey", {
   key: S.String,
+  code: S.optional(S.String),
   meta: S.Boolean,
   ctrl: S.Boolean,
   shift: S.Boolean,
@@ -145,6 +166,7 @@ export const ToggleVerse = m("ToggleVerse")
 export const ChangedVerseMode = m("ChangedVerseMode", {
   mode: S.Literals(["explore", "code"]),
 })
+export const ClickedHotbarNewCoderSession = m("ClickedHotbarNewCoderSession")
 
 // Chat: expand/collapse a single chat message's "program details" disclosure
 // (the scoped-step / Tassadar scaffolding). Collapsed by default so the chat
@@ -534,6 +556,10 @@ export const ClickedComposerSpawn = m("ClickedComposerSpawn")
 export const ClickedComposerReply = m("ClickedComposerReply")
 // Start a brand-new composer thread (clear the active session + turn history).
 export const ClickedComposerNewThread = m("ClickedComposerNewThread")
+// VCODE-13 (#5930): cycle the same composer task to another provider account
+// using the deterministic route projection. This is a pure route override; the
+// next Start/Send click performs the actual session.spawn.
+export const ClickedOverrideComposerAccountRoute = m("ClickedOverrideComposerAccountRoute")
 // Composer turn settled (shared by first-turn + reply-turn spawns).
 export const SucceededComposerTurn = m("SucceededComposerTurn", {
   sessionRef: S.String,
@@ -620,6 +646,7 @@ export const ChangedGatewayInferenceFallback = m(
 // closes the PersistPreferences command so side effects stay in Commands, not
 // the pure reducer. Failures are swallowed in the command (local convenience).
 export const SettledPersistPreferences = m("SettledPersistPreferences")
+export const SettledPersistInputProfile = m("SettledPersistInputProfile")
 
 // ── Zero-base shell (owner directive, 2026-06-19) ───────────────────────────
 // The minimal default surface's messages. `ChangedShellInput` tracks the bottom
@@ -689,6 +716,13 @@ export const Message = S.Union([
   ChangedVersePresenceZone,
   ChangedVerseWorldItemProximity,
   ChangedVerseLocalPose,
+  ChangedInputProfile,
+  StartedInputBindingCapture,
+  CancelledInputBindingCapture,
+  CapturedInputBinding,
+  ResetInputBinding,
+  ResetInputBindingCategory,
+  ResetAllInputBindings,
   SettledVerseLocalPosePublish,
   GotNotifications,
   GotNodeLaunchStatus,
@@ -713,6 +747,7 @@ export const Message = S.Union([
   SelectedDiffFile,
   ToggleVerse,
   ChangedVerseMode,
+  ClickedHotbarNewCoderSession,
   ToggledChatMessageDetails,
   ClickedCoordinatorToggle,
   SettledCoordinatorToggle,
@@ -827,6 +862,7 @@ export const Message = S.Union([
   ClickedComposerSpawn,
   ClickedComposerReply,
   ClickedComposerNewThread,
+  ClickedOverrideComposerAccountRoute,
   SucceededComposerTurn,
   FailedComposerTurn,
   ChangedChatInput,
@@ -853,6 +889,7 @@ export const Message = S.Union([
   ToggledNotificationPanel,
   ChangedGatewayInferenceFallback,
   SettledPersistPreferences,
+  SettledPersistInputProfile,
   ChangedShellInput,
   CycledShellTarget,
   SelectedShellTarget,

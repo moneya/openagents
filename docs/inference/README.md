@@ -71,6 +71,35 @@ ledger, RL-2 escrow→Bitcoin payout, RL-3 asset-boundary/no-resale guards).
    is mapped to **Bitcoin/Lightning + our exact-execution/replay verification + dereferenceable
    receipts**.
 
+8. **[`khala.md`](./khala.md)** — **Khala** spec & roadmap: the
+   orchestrating-model brand on top of this gateway (one OpenAI-compatible
+   endpoint that behaves like one model, an agent network underneath). API
+   surface, the coordinator ladder (heuristic → TRINITY → Conductor → full),
+   verification classes + receipts, metering/pricing/settlement, distribution,
+   and a phased roadmap keyed to the gateway EPIC. Ties to `docs/sakana/`
+   (coordinator) and `docs/research/tmax/` (verification/stability lessons).
+
+9. **[`khala-in-the-world.md`](./khala-in-the-world.md)** — Verse visualization
+   of inference serving: every request to the Khala endpoint rendered as
+   crackling energy fanned to assigned Pylons (in-world, verified, paid), a
+   gateway portal for external/OpenRouter work (offworld, margin-only), and
+   coding-agent avatars — on the new Effect-centric multiplayer engine
+   (`apps/openagents-world` + `packages/world-{contract,client}` +
+   `@openagentsinc/three-effect`), under the evidence-bound motion contract.
+
+10. **[`khala-buildout-roadmap.md`](./khala-buildout-roadmap.md)** — the single
+    sequenced buildout (M0–M8) that converges Khala serving, verification +
+    economics, Pylon/Psionic supply, the Verse visualization, and Autopilot
+    consumption onto a north-star goal: running our **own** version of the
+    Fugu-Ultra-vs-frontier head-to-head ("build a single-file three.js crossy-road
+    game"), but verified, Bitcoin-settled, watchable in the Verse, and with the
+    built game playable inside our three-effect world.
+
+11. **[`khala-head-to-head-demo.md`](./khala-head-to-head-demo.md)** — the Agent
+    Demo M8 evidence-pack runbook for issue #6016: the public-safe manifest
+    contract, metric reducer, fixture evidence pack, publication skeleton, and
+    closure audit for the head-to-head demo.
+
 ## The shape, in one line
 
 Aggregate cheap, reliable inference supply (our Vertex quota + our Pylon fabric + passthrough)

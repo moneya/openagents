@@ -14,6 +14,7 @@ import {
   FIRST_REAL_SETTLEMENT_REPLAY_SLUG,
   LAUNCH_RECOGNITION_REPLAY_SLUG,
 } from "@openagentsinc/proof-replay"
+import { openAgentsDefaultInputProfile } from "@openagentsinc/input-bindings"
 
 import type { NotificationCenterView } from "@openagentsinc/autopilot-control-protocol"
 // #5472: functional Settings preferences — the literal schemas live in the
@@ -28,6 +29,7 @@ import {
   decideInference,
   type InferenceRoutingDecision,
 } from "../shared/inference-routing.js"
+import type { CodeModeSyncSnapshot } from "./code-mode-sync.js"
 // HUD H3 (#5501): the managed pane-layer state. Stored on the Model as
 // `S.Unknown` and re-narrowed by `modelPaneLayer` (same opaque-sub-state idiom as
 // `node`/`notifications`). This keeps the import TYPE-ONLY here, so model.ts and
@@ -95,6 +97,7 @@ export const PaneId = S.Literals([
   "decisions",
   "diff-artifacts",
   "terminal-log",
+  "diagnostics",
   // VCODE-03 (#5920): dedicated managed account pane for Verse code mode.
   // It reuses the existing dev.accounts CRUD card without forcing a full
   // navigation away from the Verse scene.
@@ -166,6 +169,12 @@ export const VerseLocalPose = S.Struct({
   capturedAtMs: S.Number,
 })
 export type VerseLocalPose = typeof VerseLocalPose.Type
+
+export const InputBindingCapture = S.Struct({
+  actionId: S.String,
+  slot: S.Number,
+})
+export type InputBindingCapture = typeof InputBindingCapture.Type
 
 // Transient status for the Spawn form (validation/submit feedback). Kept in the
 // Model so the view stays a pure function of state (no hidden DOM).
@@ -392,7 +401,7 @@ export const Model = ts("AutopilotDesktop", {
   //   - chatWorldParticles: the bounded set of active payment-particle
   //     descriptors (opaque PaymentParticle[]; read via modelChatWorldParticles),
   //     each evidence-bound to a real sourceRef.
-  //   - chatWorldMultiplayer: latest public SpacetimeDB world projection
+  //   - chatWorldMultiplayer: latest public Cloudflare world world projection
   //     (stations, avatars, proximity chat) or null while disconnected.
   chatWorldScene: S.NullOr(S.Unknown),
   chatWorldParticles: S.Array(S.Unknown),
@@ -401,11 +410,15 @@ export const Model = ts("AutopilotDesktop", {
   // the inspector chip. Null when nothing is selected. Click → SelectedChatWorldNode.
   chatWorldInspectedRef: S.NullOr(S.String),
   // Verse world item currently in walk-up range. The view derives overlay copy
-  // from server-owned public projections instead of SpacetimeDB authority.
+  // from server-owned public projections instead of Cloudflare world authority.
   nearVerseWorldItemId: S.NullOr(S.String),
   // Pose restored only when a material scene projection refresh is accepted.
   // Plain controller pose events must not write render state or remount Three.
   verseSceneRestorePose: S.NullOr(VerseLocalPose),
+  // Active input binding profile. Stored opaque so Settings/persistence can land
+  // later without making the model schema depend on every binding schema detail.
+  inputProfile: S.Unknown,
+  inputBindingCapture: S.NullOr(InputBindingCapture),
 
   // #5428: public activity timeline projection for Network/Training. The Bun
   // host fetches and schema-validates the Worker envelope; the webview renders
@@ -605,6 +618,12 @@ export const Model = ts("AutopilotDesktop", {
   // ManagedAccountsResponse projection (opaque, read via the typed accessor);
   // the rest are the add-account form fields + transient status.
   managedAccounts: S.NullOr(S.Unknown),
+  // VCODE-12 (#5929): one de-duped code-mode sync snapshot over managed
+  // accounts, live account readiness, node sessions, event tails, artifacts,
+  // approvals, and quota/readiness projections. Opaque like `node`, read via
+  // `modelCodeModeSync` so pane updates share one model tick and never remount
+  // the retained Verse scene.
+  codeModeSync: S.NullOr(S.Unknown),
   managedAccountsPending: S.Boolean,
   managedAccountsStatus: ComposerStatus,
   addAccountRef: S.String,
@@ -765,6 +784,11 @@ export const modelManagedAccounts = (
   model: Model,
 ): ManagedAccountsResponse | null =>
   model.managedAccounts as ManagedAccountsResponse | null
+
+export const modelCodeModeSync = (
+  model: Model,
+): CodeModeSyncSnapshot | null =>
+  model.codeModeSync as CodeModeSyncSnapshot | null
 
 export const modelPylonStats = (model: Model): PylonStatsSnapshot | null =>
   model.pylonStats as PylonStatsSnapshot | null
@@ -1069,6 +1093,8 @@ export const initialModel: Model = Model.make({
   chatWorldInspectedRef: null,
   nearVerseWorldItemId: null,
   verseSceneRestorePose: null,
+  inputProfile: openAgentsDefaultInputProfile,
+  inputBindingCapture: null,
   publicActivityTimeline: null,
   publicActivityTimelineStatus: { text: "not loaded", tone: "idle" },
   publicActivityTimelinePending: false,
@@ -1155,6 +1181,7 @@ export const initialModel: Model = Model.make({
   chatPending: false,
   chatSessionRef: null,
   managedAccounts: null,
+  codeModeSync: null,
   managedAccountsPending: false,
   managedAccountsStatus: { text: "", tone: "idle" },
   addAccountRef: "",

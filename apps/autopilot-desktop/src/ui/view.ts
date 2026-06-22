@@ -25,6 +25,15 @@ import {
 import type { ProofReplayBundle } from "@openagentsinc/proof-replay"
 import { trainingRunView } from "@openagentsinc/three-effect/foldkit"
 import {
+  detectOpenAgentsInputConflicts,
+  openAgentsInputActionSpecs,
+  openAgentsInputBindingLabel,
+  parseOpenAgentsInputProfileOrDefault,
+  type OpenAgentsInputActionSpec,
+  type OpenAgentsInputConflict,
+  type OpenAgentsInputProfile,
+} from "@openagentsinc/input-bindings"
+import {
   defaultTrainingRunNodes,
   trainingRunVisualizationOptionsWithLocalPose,
   trainingRunVisualizationOptionsFromSnapshot,
@@ -36,14 +45,28 @@ import {
   type TrainingRunVisualizationOptions,
   type TrainingRunWorldItemSelection,
 } from "@openagentsinc/three-effect/core"
+import {
+  verseInputBindingProjection,
+  type VerseInputBindingProjection,
+} from "./verse-input-bindings.js"
+import { capturedKeyboardBindingFromKey } from "./input-profile-preferences.js"
 import { Option } from "effect"
 import type { Attribute, Document, Html } from "foldkit/html"
 import { html } from "foldkit/html"
+import { stylexAttrsWithClass } from "@openagentsinc/ui/stylex-foldkit"
 // #5467: the Autonomous loop view's own pane module (Supervise group).
 import { autonomousLoopPane } from "./autonomous-loop-pane.js"
+import {
+  desktopPaneStyles,
+  desktopRootStyles,
+  desktopShellStyles,
+} from "./desktop-stylex.js"
 // HUD H7 (#5504): the live status/meters HUD overlay (three-effect H2 kit).
 import { statusHudView } from "./hud-status-element.js"
-import { recordVerseSceneDiagnostic } from "./verse-scene-diagnostics.js"
+import {
+  recordVerseSceneDiagnostic,
+  verseSceneDiagnostics,
+} from "./verse-scene-diagnostics.js"
 import { hudStatusProjection } from "../shared/hud-status-projection.js"
 import {
   OPENAGENTS_PUBLIC_ORIGIN,
@@ -67,6 +90,7 @@ import type {
 // chat background scene. Pure projections live in shared/chat-world-*.ts.
 import {
   liveChatWorldNetworkScene,
+  withChatWorldInferenceLayer,
   withChatWorldMultiplayerLayer,
   withChatWorldPaymentLayer,
 } from "../shared/chat-world-visualization.js"
@@ -103,12 +127,17 @@ import {
   type TerminalLogRow,
 } from "./terminal-log-projection.js"
 import {
+  projectHostDiagnosticsPanel,
+  type HostDiagnosticRow,
+} from "./host-diagnostics-projection.js"
+import {
   PYLON_BASE_NODE_PREFIX,
   projectPylonBase,
   withPylonBaseLayer,
   type PylonBaseProjection,
 } from "../shared/pylon-base-scene.js"
 import { chatWorldBuildFlags, chatWorldHudFlag } from "../shared/chat-world-flags.js"
+import { iconSvg, type IconName } from "../shared/openagents-icon-catalog.js"
 import {
   CHAT_WORLD_DESKTOP_AVATAR_REF,
   DEFAULT_TASSADAR_WORLD_RUN_REF,
@@ -169,6 +198,8 @@ import {
   ChangedDefaultLane,
   ToggledNotificationPanel,
   ChangedGatewayInferenceFallback,
+  CapturedInputBinding,
+  CancelledInputBindingCapture,
   ChangedChatInput,
   ChangedAddAccountHome,
   ChangedAddAccountPriority,
@@ -192,6 +223,9 @@ import {
   ChangedVerseLocalPose,
   ChangedVersePresenceZone,
   ChangedVerseWorldItemProximity,
+  ResetAllInputBindings,
+  ResetInputBinding,
+  ResetInputBindingCategory,
   SelectedChatWorldNode,
   SelectedComposerAccount,
   ClickedCancelSession,
@@ -200,6 +234,7 @@ import {
   ChangedSwarmBatchConcurrency,
   ClickedSwarmBatchLaunch,
   ClickedComposerNewThread,
+  ClickedOverrideComposerAccountRoute,
   ClickedComposerReply,
   ClickedComposerSpawn,
   ClickedChatSubmit,
@@ -248,14 +283,15 @@ import {
   ToggledEvent,
   ToggledDiffFile,
   ToggledDiffViewMode,
-  ToggleVerse,
   ChangedVerseMode,
+  ClickedHotbarNewCoderSession,
   ToggledArtifactBrowser,
   ToggledChatMessageDetails,
   ChangedShellInput,
   CycledShellTarget,
   SelectedShellTarget,
   SubmittedShell,
+  StartedInputBindingCapture,
   ClosedPanes,
   // HUD H3 (#5501): managed pane-layer verbs.
   ClosedManagedPane,
@@ -364,6 +400,7 @@ import {
   modelChatWorldParticles,
   modelChatWorldMultiplayer,
   modelChatWorldScene,
+  modelCodeModeSync,
   modelManagedAccounts,
   modelPaneLayer,
   modelPromiseSurfacingReadiness,
@@ -377,6 +414,13 @@ import {
   modelTrainingReconcile,
   modelTrainingRuns,
 } from "./model.js"
+import type { CodeModeSyncAccountRow } from "./code-mode-sync.js"
+import {
+  nextCodeModeAccountOverride,
+  projectCodeModeAccountRoute,
+  type CodeModeAccountRoute,
+  type CodeModeSpawnAdapter,
+} from "./code-mode-account-routing.js"
 import {
   projectSessionPane,
   sessionAccountShortLabel,
@@ -641,80 +685,89 @@ const commandPalette = (model: Model): Html => {
   )
 }
 
-// ── HUD H1: the numbered hotbar (#5499) ──────────────────────────────────────
-// A StarCraft-style bottom-center command bar (the recurring OpenAgents HUD
-// pattern — Commander's `Hotbar.tsx`, the WGPUI K-slot bar; see
-// docs/launch/2026-06-19-previous-hud-systems-audit.md §3/§7). It is the FOURTH
-// consumer of the one nav registry: slots come straight from `HOTBAR_SLOTS`
-// (derived from `NAV_GROUPS` in nav.ts), NOT a parallel list. Each slot
-// dispatches an EXISTING message only for the ⌘K command-palette slot. The
-// numbered group cells are intentionally blank/inert placeholders per the
-// owner directive (2026-06-19): no click action, no icon, no label, no pane open.
-//
-// Rendered inside the zero-base shell input row on the bottom-left, and as a
-// floating bottom-left compact strip on the full UI. Group slots are decorative
-// blanks; ⌘K remains clickable.
-const hotbarSlotView = (model: Model, slot: HotbarSlot): Html => {
-  if (slot.kind === "palette") {
-    const title = `${slot.label} (${slot.chord})`
-    return h.button(
-      [
-        cls("hotbar-slot hotbar-slot-button hotbar-slot-palette"),
-        h.Type("button"),
-        h.Title(title),
-        h.AriaLabel(title),
-        h.OnClick(OpenedCommandPalette()),
-      ],
-      [
-        h.span([cls("hotbar-slot-chord"), h.AriaHidden(true)], [slot.chord]),
-        h.span([cls("hotbar-slot-tooltip")], [title]),
-      ],
-    )
-  }
-  // #5730 The Verse: an active toggle slot. Lit (on) when the runtime toggle is
-  // enabled; clicking (or ⌘⇧V) flips it. The world view itself only renders when
-  // the CHAT_WORLD_SCENE build flag is also on, but the toggle is always shown so
-  // the user-facing control is discoverable.
-  if (slot.kind === "verse") {
-    const on = model.verseEnabled
-    const title = `${slot.label}: ${on ? "on" : "off"} (${slot.chord})`
-    return h.button(
-      [
-        cls(
-          `hotbar-slot hotbar-slot-button hotbar-slot-verse${
-            on ? " hotbar-slot-verse-on" : ""
-          }`,
-        ),
-        h.Type("button"),
-        h.Title(title),
-        h.AriaLabel(title),
-        h.AriaPressed(on ? "true" : "false"),
-        h.OnClick(ToggleVerse()),
-      ],
-      [
-        h.span([cls("hotbar-slot-label"), h.AriaHidden(true)], [""]),
-        h.span([cls("hotbar-slot-tooltip")], [title]),
-      ],
-    )
-  }
-  return h.div(
-    [cls("hotbar-slot hotbar-slot-empty"), h.AriaHidden(true)],
+// ── HUD H1: the numbered Verse hotbar (#5499/#5946 follow-up) ────────────────
+// The hotbar is now the visible consumer of the shared MMO-style action-bar
+// keybindings. Slots are sourced from HOTBAR_SLOTS / the input profile, so the
+// labels and physical keys stay in sync with custom keybinding settings.
+const iconMaskValue = (name: IconName): string =>
+  `url("data:image/svg+xml,${encodeURIComponent(iconSvg(name))}")`
+
+const hotbarBindingLabel = (
+  profile: OpenAgentsInputProfile,
+  actionId: string,
+): string => {
+  const binding = profile.bindings[actionId]?.[0] ?? null
+  return binding === null ? "?" : openAgentsInputBindingLabel(binding)
+}
+
+const hotbarSlotIcon = (name: IconName): Html =>
+  h.span(
+    [
+      cls("hotbar-slot-icon"),
+      h.AriaHidden(true),
+      h.DataAttribute("hotbar-icon", name),
+      h.Style({ "--hotbar-slot-icon-mask": iconMaskValue(name) }),
+    ],
     [],
   )
+
+const hotbarSlotView = (
+  profile: OpenAgentsInputProfile,
+  slot: HotbarSlot,
+): Html => {
+  const chord = hotbarBindingLabel(profile, slot.actionId)
+  const title = `${slot.label} (${chord})`
+  const baseAttrs: ReadonlyArray<Attribute<Message>> = [
+    cls(
+      `hotbar-slot hotbar-slot-action${
+        slot.number === 1
+          ? " hotbar-slot-button hotbar-slot-coder"
+          : " hotbar-slot-empty"
+      }`,
+    ),
+    h.DataAttribute("hotbar-action", slot.actionId),
+    h.DataAttribute("hotbar-key", chord),
+    h.Title(title),
+    h.AriaLabel(title),
+  ]
+  const face = slot.iconName === undefined
+    ? h.span([cls("hotbar-slot-label"), h.AriaHidden(true)], [chord])
+    : hotbarSlotIcon(slot.iconName)
+  const children = slot.number === 1
+    ? [
+        face,
+        h.span([cls("hotbar-slot-key"), h.AriaHidden(true)], [chord]),
+        h.span([cls("hotbar-slot-tooltip")], [title]),
+      ]
+    : [
+        face,
+      ]
+  return slot.number === 1
+    ? h.button(
+        [
+          ...baseAttrs,
+          h.Type("button"),
+          h.OnClick(ClickedHotbarNewCoderSession()),
+        ],
+        children,
+      )
+    : h.div([...baseAttrs, h.AriaHidden(true)], children)
 }
 
 const hotbar = (
   model: Model,
   placement: "floating" | "inline" = "floating",
-): Html =>
-  h.div(
+): Html => {
+  const profile = parseOpenAgentsInputProfileOrDefault(model.inputProfile)
+  return h.div(
     [
       cls(`hotbar hotbar-${placement}`),
       h.Role("toolbar"),
       h.AriaLabel("Hotbar"),
     ],
-    HOTBAR_SLOTS.map((slot) => hotbarSlotView(model, slot)),
+    HOTBAR_SLOTS.map((slot) => hotbarSlotView(profile, slot)),
   )
+}
 
 // ── Nodes pane ────────────────────────────────────────────────────────────────
 
@@ -877,6 +930,11 @@ const approvalRowView = (approval: ApprovalRow): Html => {
 }
 
 const pendingApprovals = (model: Model): ReadonlyArray<ApprovalRow> => {
+  const sync = modelCodeModeSync(model)
+  if (sync !== null) {
+    const resolved = new Set(model.resolvedApprovals)
+    return sync.approvals.filter((a) => !resolved.has(a.approvalRef))
+  }
   const node = modelNode(model)
   const resolved = new Set(model.resolvedApprovals)
   return (node?.approvals ?? []).filter((a) => !resolved.has(a.approvalRef))
@@ -944,8 +1002,143 @@ const accountPickerLabel = (row: AccountRow): string => {
   return row.ready ? base : `${base} (blocked)`
 }
 
+const syncAccountPickerLabel = (row: CodeModeSyncAccountRow): string => {
+  const base =
+    row.accountRef !== null
+      ? `${row.provider} · ${row.accountRef}`
+      : `${row.provider} · default home`
+  if (!row.live && row.managed) return `${base} (syncing)`
+  return row.ready ? base : `${base} (blocked)`
+}
+
+const routeHash = (value: string): string => {
+  let hash = 2166136261
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0")
+}
+
+const routeSafeSegment = (value: string): string =>
+  value
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 96) || "unknown"
+
+const fallbackCodeModeAccountRows = (model: Model): readonly CodeModeSyncAccountRow[] =>
+  (modelNode(model)?.accounts ?? []).map((row) => ({
+    key:
+      row.accountRef !== null
+        ? `${row.provider}:ref:${row.accountRef}`
+        : `${row.provider}:hash:${row.accountRefHash}`,
+    provider: row.provider,
+    accountRef: row.accountRef,
+    accountRefHash: row.accountRefHash,
+    label:
+      row.accountRef !== null
+        ? `${row.provider} ${row.accountRef}`
+        : `${row.provider} default`,
+    selector: row.selector,
+    ready: row.ready,
+    managed: false,
+    live: true,
+    homePresent: null,
+    priority: row.priority,
+    blockerRefs: row.blockerRefs,
+    source: row.selector === "default_home" ? "default_home" : "live_only",
+  }))
+
+const composerRouteWorkspaceRef = (model: Model): string | null => {
+  const sessions = modelCodeModeSync(model)?.sessions ?? modelNode(model)?.sessions ?? []
+  const sessionRef = model.composerSessionRef ?? model.selectedSessionRef
+  const sessionWorkspace =
+    sessionRef === null
+      ? null
+      : (sessions.find((row) => row.sessionRef === sessionRef)?.workspaceRef ?? null)
+  if (sessionWorkspace !== null && sessionWorkspace.trim() !== "") return sessionWorkspace
+  if (model.composerWorkspaceMode === "managed") {
+    const parsed = parseManagedWorktreeRequest({
+      repo: model.composerManagedRepo,
+      baseRef: model.composerManagedBaseRef,
+    })
+    return parsed.ok
+      ? `workspace.github.${routeSafeSegment(parsed.request.fullName)}.${routeSafeSegment(parsed.request.baseRef)}`
+      : null
+  }
+  const path = model.composerRepoPath.trim()
+  return path === "" ? null : `workspace.local.${routeHash(path)}`
+}
+
+const composerRouteInput = (
+  model: Model,
+  adapter: CodeModeSpawnAdapter,
+) => ({
+  adapter,
+  selectedAccountRef: model.composerAccountRef,
+  accounts: modelCodeModeSync(model)?.accounts ?? fallbackCodeModeAccountRows(model),
+  sessions: modelCodeModeSync(model)?.sessions ?? modelNode(model)?.sessions ?? [],
+  workspaceRef: composerRouteWorkspaceRef(model),
+  allowDefaultHome: true,
+})
+
+const composerAccountRoutePreview = (model: Model): CodeModeAccountRoute | null =>
+  model.spawnAdapter === "apple_fm"
+    ? null
+    : projectCodeModeAccountRoute(composerRouteInput(model, model.spawnAdapter))
+
+const composerAccountRouteOverride = (model: Model) =>
+  model.spawnAdapter === "apple_fm"
+    ? null
+    : nextCodeModeAccountOverride(composerRouteInput(model, model.spawnAdapter))
+
+const compactDiagnosticSource = (
+  sourceRef: string | null,
+  fallback: string,
+): string => {
+  const text = sourceRef?.trim() ?? ""
+  if (text === "") return fallback
+  if (text.startsWith("account.")) return shortAccountHash(text)
+  return text.length > 36 ? `${text.slice(0, 16)}…${text.slice(-8)}` : text
+}
+
+const compactDiagnosticBody = (
+  key: string,
+  body: string,
+): string => {
+  if (key.startsWith("account.") && key.endsWith(".blocked")) {
+    return "This account is not ready; open Accounts for details."
+  }
+  return body.replace(/account\.[A-Za-z0-9._-]{16,}/g, (match) => shortAccountHash(match))
+}
+
+const codeModeSyncDiagnostics = (model: Model, limit = 3): Html => {
+  const sync = modelCodeModeSync(model)
+  const diagnostics = sync?.diagnostics ?? []
+  if (diagnostics.length === 0) return h.empty
+  return h.div(
+    [
+      cls("code-mode-sync-diagnostics"),
+      h.DataAttribute("autopilot-code-mode-sync", sync?.syncRef ?? "pending"),
+      h.DataAttribute("autopilot-code-mode-sync-diagnostics", String(diagnostics.length)),
+    ],
+    diagnostics.slice(0, limit).map((diagnostic) =>
+      h.p(
+        [
+          cls(`code-mode-sync-diagnostic code-mode-sync-${diagnostic.severity}`),
+          h.DataAttribute("autopilot-code-mode-sync-diagnostic", diagnostic.key),
+          h.Title(compactDiagnosticSource(diagnostic.sourceRef, diagnostic.title)),
+        ],
+        [`${diagnostic.title}: ${compactDiagnosticBody(diagnostic.key, diagnostic.body)}`],
+      ),
+    ),
+  )
+}
+
 type VerseCodeAccountInventoryRow = Readonly<{
   key: string
+  provider: "codex" | "claude_agent"
   label: string
   state: "ready" | "blocked"
   stateText: string
@@ -980,51 +1173,39 @@ const verseSelectorLabel = (selector: string | null | undefined): string => {
 const verseCodeAccountInventoryRows = (
   model: Model,
 ): ReadonlyArray<VerseCodeAccountInventoryRow> => {
-  const managedRows =
-    sortManagedAccountRows(
-      modelManagedAccounts(model)?.accounts.filter((row) => row.provider === "codex") ?? [],
-    )
-  const liveRows =
-    modelNode(model)?.accounts?.filter((row) => row.provider === "codex") ?? []
-  const liveByRef = new Map<string, AccountRow>()
-  for (const row of liveRows) {
-    if (row.accountRef !== null) liveByRef.set(row.accountRef, row)
+  const provider = model.spawnAdapter === "claude_agent" ? "claude_agent" : "codex"
+  const sync = modelCodeModeSync(model)
+  if (sync !== null) {
+    return sync.accounts
+      .filter((row) => row.provider === provider)
+      .map((row) => ({
+        key: row.key,
+        provider,
+        label: row.accountRef ?? "default",
+        state: row.ready ? "ready" : "blocked",
+        stateText: !row.live && row.managed ? "syncing" : row.ready ? "ready" : "blocked",
+        priorityText: row.priority === null ? "prio auto" : `prio ${row.priority}`,
+        selectorText: verseSelectorLabel(row.selector),
+        hashText: shortAccountHash(row.accountRefHash),
+        selected: model.composerAccountRef === row.accountRef,
+        accountRef: row.accountRef,
+      }))
   }
-  const seen = new Set<string>()
-  const rows: VerseCodeAccountInventoryRow[] = managedRows.map((row) => {
-    seen.add(`ref:${row.ref}`)
-    const live = liveByRef.get(row.ref) ?? null
-    const ready = live?.ready ?? row.homePresent
-    return {
-      key: `managed:${row.ref}`,
-      label: row.ref,
-      state: ready ? "ready" : "blocked",
-      stateText: ready ? "ready" : "blocked",
-      priorityText: row.priority === null ? "prio auto" : `prio ${row.priority}`,
-      selectorText: verseSelectorLabel(live?.selector),
-      hashText: shortAccountHash(live?.accountRefHash),
-      selected: model.composerAccountRef === row.ref,
-      accountRef: row.ref,
-    }
-  })
-  for (const live of liveRows) {
-    const seenKey = live.accountRef === null ? "default" : `ref:${live.accountRef}`
-    if (seen.has(seenKey)) continue
-    seen.add(seenKey)
-    const label = live.accountRef ?? "default"
-    rows.push({
-      key: `live:${label}`,
-      label,
-      state: live.ready ? "ready" : "blocked",
-      stateText: live.ready ? "ready" : "blocked",
-      priorityText: live.priority === null ? "prio auto" : `prio ${live.priority}`,
-      selectorText: verseSelectorLabel(live.selector),
-      hashText: shortAccountHash(live.accountRefHash),
-      selected: model.composerAccountRef === live.accountRef,
-      accountRef: live.accountRef,
-    })
-  }
-  return rows
+  const managedRows = sortManagedAccountRows(
+    modelManagedAccounts(model)?.accounts.filter((row) => row.provider === provider) ?? [],
+  )
+  return managedRows.map((row) => ({
+    key: `managed:${row.ref}`,
+    provider,
+    label: row.ref,
+    state: row.homePresent ? "ready" : "blocked",
+    stateText: row.homePresent ? "ready" : "blocked",
+    priorityText: row.priority === null ? "prio auto" : `prio ${row.priority}`,
+    selectorText: "managed",
+    hashText: "hash pending",
+    selected: model.composerAccountRef === row.ref,
+    accountRef: row.ref,
+  }))
 }
 
 const verseCodeAccountInventoryRowView = (
@@ -1038,6 +1219,7 @@ const verseCodeAccountInventoryRowView = (
         }`,
       ),
       h.Type("button"),
+      h.DataAttribute("verse-code-account-provider", row.provider),
       h.DataAttribute("verse-code-account-ref", row.accountRef ?? "default"),
       h.DataAttribute("verse-code-account-state", row.state),
       h.OnClick(SelectedComposerAccount({ accountRef: row.accountRef })),
@@ -1065,15 +1247,18 @@ const verseCodeAccountInventory = (model: Model): Html => {
   if (model.verseMode !== "code") return h.empty
   const rows = verseCodeAccountInventoryRows(model)
   const selected = rows.find((row) => row.selected) ?? null
+  const provider = model.spawnAdapter === "claude_agent" ? "claude_agent" : "codex"
+  const providerLabel = provider === "claude_agent" ? "Claude Agent" : "Codex"
   return h.aside(
     [
       cls("verse-code-account-inventory"),
-      h.AriaLabel("Codex accounts"),
+      h.AriaLabel(`${providerLabel} accounts`),
       h.DataAttribute("verse-code-account-inventory", rows.length > 0 ? "ready" : "empty"),
+      h.DataAttribute("verse-code-account-provider", provider),
     ],
     [
       h.header([cls("verse-code-account-head")], [
-        h.span([cls("verse-code-account-title mono")], ["Codex accounts"]),
+        h.span([cls("verse-code-account-title mono")], [`${providerLabel} accounts`]),
         h.span([cls("verse-code-account-active mono")], [
           selected === null ? "default route" : `using ${selected.label}`,
         ]),
@@ -1089,8 +1274,11 @@ const verseCodeAccountInventory = (model: Model): Html => {
       model.managedAccountsPending
         ? h.p([cls("verse-code-account-status mono")], ["refreshing accounts"])
         : h.empty,
+      codeModeSyncDiagnostics(model),
       rows.length === 0
-        ? h.p([cls("verse-code-account-empty")], ["No Codex accounts projected yet."])
+        ? h.p([cls("verse-code-account-empty")], [
+            `No ${providerLabel} accounts projected yet.`,
+          ])
         : h.div([cls("verse-code-account-list")], rows.map(verseCodeAccountInventoryRowView)),
     ],
   )
@@ -3969,9 +4157,10 @@ const sessionListRow = (
 }
 
 const sessionsPane = (model: Model): Html => {
+  const sync = modelCodeModeSync(model)
   const node = modelNode(model)
-  const allSessions: ReadonlyArray<SessionSummary> = node?.sessions ?? []
-  const accounts = node?.accounts ?? []
+  const allSessions: ReadonlyArray<SessionSummary> = sync?.sessions ?? node?.sessions ?? []
+  const accounts = sync?.liveAccounts ?? node?.accounts ?? []
   const projection = projectSessionPane({
     sessions: allSessions,
     accounts,
@@ -3997,6 +4186,7 @@ const sessionsPane = (model: Model): Html => {
             : stateBreakdown(allSessions),
         ],
       ),
+      codeModeSyncDiagnostics(model),
       h.div([cls("session-filter-grid")], [
         sessionFilterGroup<SessionFilter>(
           "status",
@@ -4258,10 +4448,11 @@ const swarmBatchForm = (model: Model): Html => {
 }
 
 const swarmPane = (model: Model): Html => {
+  const sync = modelCodeModeSync(model)
   const node = modelNode(model)
-  const sessions: ReadonlyArray<SessionSummary> = node?.sessions ?? []
-  const accounts: ReadonlyArray<AccountRow> = node?.accounts ?? []
-  const events = node?.events ?? {}
+  const sessions: ReadonlyArray<SessionSummary> = sync?.sessions ?? node?.sessions ?? []
+  const accounts: ReadonlyArray<AccountRow> = sync?.liveAccounts ?? node?.accounts ?? []
+  const events = sync?.events ?? node?.events ?? {}
   const ordered = orderSwarmSessions(sessions)
   // #5469: turn the adjacency ordering into an explicit depth-annotated tree so
   // sub-agents (parentRef children) render nested instead of as flat rows.
@@ -5066,6 +5257,181 @@ const inferenceGatewayCard = (model: Model): Html => {
   ])
 }
 
+const KEYBINDING_CATEGORY_ORDER = [
+  "Movement",
+  "Camera",
+  "Targeting",
+  "Interaction",
+  "HUD",
+  "App",
+  "Code",
+  "Action Bar",
+] as const
+
+const keybindingsSettingsCard = (model: Model): Html => {
+  const profile = parseOpenAgentsInputProfileOrDefault(model.inputProfile)
+  const conflicts = detectOpenAgentsInputConflicts(profile)
+  const specsByCategory = keybindingSpecsByCategory()
+  return card("Keybindings", [
+    h.div([h.DataAttribute("keybindings-settings", "ready")], []),
+    h.p([cls("card-body")], [
+      "Edit the active Verse/action profile. Keyboard capture is live; mouse and wheel rows are shown as bindings but capture remains keyboard-first.",
+    ]),
+    h.div([cls("keybinding-toolbar")], [
+      h.span([cls("empty-state mono")], [
+        `${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"}`,
+      ]),
+      h.button(
+        [
+          cls("adapter-btn"),
+          h.Type("button"),
+          h.DataAttribute("keybinding-reset-all", "true"),
+          h.OnClick(ResetAllInputBindings()),
+        ],
+        ["Restore all"],
+      ),
+      model.inputBindingCapture === null
+        ? h.empty
+        : h.button(
+            [
+              cls("adapter-btn"),
+              h.Type("button"),
+              h.OnClick(CancelledInputBindingCapture()),
+            ],
+            ["Cancel capture"],
+          ),
+    ]),
+    ...KEYBINDING_CATEGORY_ORDER.flatMap((category) => {
+      const specs = specsByCategory.get(category) ?? []
+      return [
+        h.div([cls("keybinding-category"), h.Key(`keybinding-${category}`)], [
+          h.div([cls("keybinding-category-head")], [
+            h.h3([cls("field-label")], [category]),
+      h.button(
+        [
+          cls("adapter-btn"),
+          h.Type("button"),
+          h.DataAttribute("keybinding-reset-category", category),
+          h.OnClick(ResetInputBindingCategory({ category })),
+        ],
+        ["Restore category"],
+            ),
+          ]),
+          specs.length === 0
+            ? emptyLine("Reserved for upcoming coding actions.")
+            : h.div(
+                [cls("keybinding-grid")],
+                specs.map((spec) =>
+                  keybindingRow(
+                    profile,
+                    spec,
+                    conflictsForAction(conflicts, spec.id),
+                    model.inputBindingCapture,
+                  ),
+                ),
+              ),
+        ]),
+      ]
+    }),
+  ])
+}
+
+const keybindingSpecsByCategory = (): Map<
+  string,
+  ReadonlyArray<OpenAgentsInputActionSpec>
+> => {
+  const groups = new Map<string, Array<OpenAgentsInputActionSpec>>()
+  for (const spec of openAgentsInputActionSpecs) {
+    const group = groups.get(spec.category) ?? []
+    group.push(spec)
+    groups.set(spec.category, group)
+  }
+  return groups
+}
+
+const conflictsForAction = (
+  conflicts: ReadonlyArray<OpenAgentsInputConflict>,
+  actionId: string,
+): ReadonlyArray<OpenAgentsInputConflict> =>
+  conflicts.filter((conflict) => conflict.actionIds.includes(actionId))
+
+const keybindingRow = (
+  profile: OpenAgentsInputProfile,
+  spec: OpenAgentsInputActionSpec,
+  conflicts: ReadonlyArray<OpenAgentsInputConflict>,
+  capture: Model["inputBindingCapture"],
+): Html => {
+  const bindings = profile.bindings[spec.id] ?? []
+  return h.div(
+    [
+      cls(`keybinding-row${conflicts.length > 0 ? " keybinding-row-conflict" : ""}`),
+      h.DataAttribute("keybinding-action", spec.id),
+    ],
+    [
+      h.div([cls("keybinding-action")], [
+        h.strong([], [spec.title]),
+        h.code([cls("keybinding-action-id")], [spec.id]),
+      ]),
+      h.span([cls("keybinding-context")], [spec.contexts.join(", ")]),
+      keybindingSlotButton(spec, bindings[0], 0, capture),
+      keybindingSlotButton(spec, bindings[1], 1, capture),
+      h.span([cls("keybinding-conflict")], [
+        conflicts.length === 0
+          ? "clear"
+          : conflicts.map(conflict => conflict.bindingLabel).join(", "),
+      ]),
+      h.button(
+        [
+          cls("adapter-btn"),
+          h.Type("button"),
+          h.DataAttribute("keybinding-reset-action", spec.id),
+          h.OnClick(ResetInputBinding({ actionId: spec.id })),
+        ],
+        ["Restore"],
+      ),
+    ],
+  )
+}
+
+const keybindingSlotButton = (
+  spec: OpenAgentsInputActionSpec,
+  binding: OpenAgentsInputProfile["bindings"][string][number] | undefined,
+  slot: number,
+  capture: Model["inputBindingCapture"],
+): Html => {
+  const isCapturing =
+    capture?.actionId === spec.id && capture.slot === slot
+  return h.button(
+    [
+      cls(`keybinding-binding${isCapturing ? " capturing" : ""}`),
+      h.Type("button"),
+      h.Tabindex(0),
+      h.Autofocus(isCapturing),
+      h.DataAttribute("keybinding-slot", String(slot)),
+      h.OnClick(StartedInputBindingCapture({ actionId: spec.id, slot })),
+      h.OnKeyDownPreventDefault((key, modifiers) => {
+        const captured = capturedKeyboardBindingFromKey(key, modifiers)
+        return captured === null
+          ? Option.none()
+          : Option.some(
+              CapturedInputBinding({
+                actionId: spec.id,
+                slot,
+                binding: captured,
+              }),
+            )
+      }),
+    ],
+    [
+      isCapturing
+        ? "Press a key"
+        : binding === undefined
+          ? slot === 0 ? "Set primary" : "Set alternate"
+          : openAgentsInputBindingLabel(binding),
+    ],
+  )
+}
+
 const settingsPane = (model: Model): Html => {
   const node = modelNode(model)
   const installReadiness = modelInstallReadiness(model)
@@ -5091,6 +5457,7 @@ const settingsPane = (model: Model): Html => {
           ),
         ),
       ]),
+      keybindingsSettingsCard(model),
       card("First-run Health", [
         h.p([cls("card-body")], [
           "Status: ",
@@ -5264,17 +5631,19 @@ type SessionDetailContext = Readonly<{
 }>
 
 const selectedSessionContext = (model: Model): SessionDetailContext | null => {
-  const node = modelNode(model)
+  const sync = modelCodeModeSync(model)
+  const node = sync?.node ?? modelNode(model)
   const ref = model.selectedSessionRef
-  const session = ref ? (node?.sessions.find((s) => s.sessionRef === ref) ?? null) : null
+  const sessions = sync?.sessions ?? node?.sessions ?? []
+  const session = ref ? (sessions.find((s) => s.sessionRef === ref) ?? null) : null
   if (node === null || ref === null || session === null) return null
   return {
     node,
     ref,
     session,
-    events: node.events?.[ref] ?? [],
-    stats: node.artifacts?.[ref],
-    accounts: node.accounts ?? [],
+    events: sync?.events[ref] ?? node.events?.[ref] ?? [],
+    stats: sync?.artifacts[ref] ?? node.artifacts?.[ref],
+    accounts: sync?.liveAccounts ?? node.accounts ?? [],
   }
 }
 
@@ -5851,11 +6220,15 @@ const SPAWN_ADAPTER_LABEL: Record<"codex" | "claude_agent" | "apple_fm", string>
 // session.spawn's accountRef). Hidden for Apple FM (no per-account selection).
 const composerAccountPicker = (model: Model): Html => {
   if (model.spawnAdapter === "apple_fm") return h.empty
-  const node = modelNode(model)
-  const accounts = (node?.accounts ?? []).filter(
+  const sync = modelCodeModeSync(model)
+  const accounts = (sync?.accounts ?? []).filter(
     (row) => row.provider === model.spawnAdapter && row.accountRef !== null,
   )
-  if (accounts.length === 0) return h.empty
+  const fallbackAccounts = (modelNode(model)?.accounts ?? []).filter(
+    (row) => row.provider === model.spawnAdapter && row.accountRef !== null,
+  )
+  const accountRows = accounts.length > 0 ? accounts : fallbackAccounts
+  if (accountRows.length === 0) return h.empty
   const defaultActive = model.composerAccountRef === null
   return h.div(
     [],
@@ -5872,7 +6245,7 @@ const composerAccountPicker = (model: Model): Html => {
             ],
             ["Default"],
           ),
-          ...accounts.map((row) =>
+          ...accountRows.map((row) =>
             h.button(
               [
                 cls(
@@ -5884,7 +6257,11 @@ const composerAccountPicker = (model: Model): Html => {
                   SelectedComposerAccount({ accountRef: row.accountRef }),
                 ),
               ],
-              [accountPickerLabel(row)],
+              [
+                "key" in row
+                  ? syncAccountPickerLabel(row as CodeModeSyncAccountRow)
+                  : accountPickerLabel(row as AccountRow),
+              ],
             ),
           ),
         ],
@@ -5895,19 +6272,12 @@ const composerAccountPicker = (model: Model): Html => {
 
 const composerSelectedAccountText = (model: Model): string => {
   if (model.spawnAdapter === "apple_fm") return "Apple FM local runtime"
-  const provider = model.spawnAdapter === "codex" ? "Codex" : "Claude"
-  const selected = model.composerAccountRef
-  if (selected === null) return `${provider} default route`
-  const accounts = modelNode(model)?.accounts ?? null
-  if (accounts === null) return `${provider} ${selected}`
-  const row =
-    accounts.find(
-      (account) =>
-        account.provider === model.spawnAdapter &&
-        account.accountRef === selected,
-    ) ?? null
-  if (row === null) return `${provider} ${selected} unavailable`
-  return `${provider} ${selected} ${row.ready ? "ready" : "blocked"}`
+  const route = composerAccountRoutePreview(model)
+  return route === null
+    ? "default route"
+    : route.blocker === null
+      ? `${route.label} · ${route.detail}`
+      : route.detail
 }
 
 const composerTargetText = (model: Model): string => {
@@ -5928,14 +6298,45 @@ const composerVerifyText = (model: Model): string => {
   return count === 0 ? "no verify commands" : `${count} verify command${count === 1 ? "" : "s"}`
 }
 
+const composerRoutePill = (model: Model): Html => {
+  const route = composerAccountRoutePreview(model)
+  if (route === null) {
+    return h.span([cls("composer-run-context-pill")], ["account: Apple FM local runtime"])
+  }
+  return h.span(
+    [
+      cls("composer-run-context-pill"),
+      h.DataAttribute("autopilot-account-route", route.source),
+      h.DataAttribute("autopilot-account-route-hash", route.evidence.accountHash ?? ""),
+    ],
+    [`account: ${composerSelectedAccountText(model)}`],
+  )
+}
+
+const composerRouteOverrideButton = (model: Model): Html => {
+  const override = composerAccountRouteOverride(model)
+  if (override === null) return h.empty
+  return h.button(
+    [
+      cls("composer-run-context-action"),
+      h.Type("button"),
+      h.Title(`Run this same task with ${override.label}`),
+      h.DataAttribute("autopilot-account-route-override", override.accountRef ?? "default"),
+      h.OnClick(ClickedOverrideComposerAccountRoute()),
+    ],
+    ["Use another account"],
+  )
+}
+
 const composerRunContext = (model: Model): Html =>
   h.div(
     [cls("composer-run-context"), h.DataAttribute("autopilot-composer-run-context", "")],
     [
       h.span([cls("composer-run-context-pill")], [`runtime: ${SPAWN_ADAPTER_LABEL[model.spawnAdapter]}`]),
-      h.span([cls("composer-run-context-pill")], [`account: ${composerSelectedAccountText(model)}`]),
+      composerRoutePill(model),
       h.span([cls("composer-run-context-pill")], [`target: ${composerTargetText(model)}`]),
       h.span([cls("composer-run-context-pill")], [`verify: ${composerVerifyText(model)}`]),
+      composerRouteOverrideButton(model),
     ],
   )
 
@@ -6152,11 +6553,13 @@ const composerReplyBar = (model: Model, canReply: boolean): Html =>
   ])
 
 const composerActiveSession = (model: Model): Html => {
+  const sync = modelCodeModeSync(model)
   const node = modelNode(model)
   const ref = model.composerSessionRef
-  const session = ref ? (node?.sessions.find((s) => s.sessionRef === ref) ?? null) : null
-  const events = ref ? (node?.events?.[ref] ?? []) : []
-  const stats = ref ? node?.artifacts?.[ref] : undefined
+  const sessions = sync?.sessions ?? node?.sessions ?? []
+  const session = ref ? (sessions.find((s) => s.sessionRef === ref) ?? null) : null
+  const events = ref ? (sync?.events[ref] ?? node?.events?.[ref] ?? []) : []
+  const stats = ref ? (sync?.artifacts[ref] ?? node?.artifacts?.[ref]) : undefined
   const state = session?.state ?? null
   const canReply = composerCanReply(state)
 
@@ -6311,7 +6714,7 @@ const accountManagementCard = (model: Model): Html => {
   const managed = modelManagedAccounts(model)
   const rows = sortManagedAccountRows(managed?.accounts ?? [])
   const node = modelNode(model)
-  const liveAccounts = node?.accounts ?? []
+  const liveAccounts = modelCodeModeSync(model)?.liveAccounts ?? node?.accounts ?? []
   return card("Accounts", [
     h.p([cls("card-body")], [
       "Manage which provider accounts this node can run coding sessions under. Priority orders dispatch (lower runs first).",
@@ -6322,6 +6725,7 @@ const accountManagementCard = (model: Model): Html => {
           [model.managedAccountsStatus.text],
         )
       : h.empty,
+    codeModeSyncDiagnostics(model),
     // Live readiness/quota for every discovered account (shared component).
     liveAccounts.length > 0
       ? h.div(
@@ -6402,6 +6806,79 @@ const accountsPane = (model: Model): Html =>
       accountManagementCard(model),
     ],
   )
+
+const hostDiagnosticStatusLabel = (status: HostDiagnosticRow["status"]): string => {
+  switch (status) {
+    case "ok":
+      return "ok"
+    case "blocked":
+      return "blocked"
+    case "warning":
+      return "warning"
+    case "info":
+      return "info"
+  }
+}
+
+const hostDiagnosticRowView = (row: HostDiagnosticRow): Html =>
+  h.article(
+    [
+      cls(`host-diagnostic-row host-diagnostic-${row.status}`),
+      h.Key(row.key),
+      h.DataAttribute("autopilot-host-diagnostic", row.key),
+      h.DataAttribute("autopilot-host-diagnostic-section", row.section),
+      h.DataAttribute("autopilot-host-diagnostic-status", row.status),
+    ],
+    [
+      h.div([cls("host-diagnostic-main")], [
+        h.span([cls("host-diagnostic-title")], [row.title]),
+        h.span([cls("host-diagnostic-summary")], [row.summary]),
+      ]),
+      h.span([cls(`host-diagnostic-badge host-diagnostic-badge-${row.status}`)], [
+        hostDiagnosticStatusLabel(row.status),
+      ]),
+      h.p([cls("host-diagnostic-detail")], [row.detail]),
+      row.sourceRefs.length === 0
+        ? h.empty
+        : h.p([cls("host-diagnostic-refs mono")], [row.sourceRefs.join(" · ")]),
+    ],
+  )
+
+const diagnosticsPane = (model: Model): Html => {
+  const panel = projectHostDiagnosticsPanel({
+    nodeLaunchStatus: model.nodeLaunchStatus,
+    node: modelNode(model),
+    sync: modelCodeModeSync(model),
+    sceneDiagnostics: verseSceneDiagnostics(),
+  })
+  const exportText = JSON.stringify(panel.exportData, null, 2)
+  return h.div(
+    [cls("diagnostics-pane"), h.DataAttribute("autopilot-host-diagnostics", "")],
+    [
+      paneTitle("Diagnostics"),
+      h.div([cls("host-diagnostic-counters")], [
+        h.span([cls("host-diagnostic-counter mono")], [`sessions ${panel.counters.sessions}`]),
+        h.span([cls("host-diagnostic-counter mono")], [`events ${panel.counters.streamEvents}`]),
+        h.span([cls("host-diagnostic-counter mono")], [`remounts ${panel.counters.sceneRemounts}`]),
+        h.span([cls("host-diagnostic-counter mono")], [`camera ${panel.counters.cameraControlEvents}`]),
+      ]),
+      h.section(
+        [cls("host-diagnostic-grid")],
+        panel.rows.map(hostDiagnosticRowView),
+      ),
+      h.section([cls("host-diagnostic-export")], [
+        h.h2([cls("card-title")], ["Public-safe export"]),
+        h.pre(
+          [
+            cls("host-diagnostic-export-body mono"),
+            h.DataAttribute("autopilot-host-diagnostics-export", ""),
+          ],
+          [exportText],
+        ),
+      ]),
+    ],
+  )
+}
 
 const chatRoleLabel = (role: ChatMessage["role"]): string => {
   switch (role) {
@@ -6608,8 +7085,18 @@ export const verseSceneVisualization = (model: Model): TrainingRunVisualizationO
   const withBase = withPylonBaseLayer(withBulletin, pylonBase)
   const multiplayer = modelChatWorldMultiplayer(model)
   const withWorld = withChatWorldMultiplayerLayer(withBase, multiplayer, {
-    localAvatarRef: CHAT_WORLD_DESKTOP_AVATAR_REF,
+    // Self-filter on THIS instance's own per-character avatar key (computed from
+    // the live Cloudflare world identity + OA_CHARACTER once known), so each instance
+    // hides only its own character and renders every other avatar — including
+    // other characters of the same account. Falls back to the legacy constant
+    // before the identity lands (pre-connect), when there are no remote rows yet.
+    localAvatarRef: multiplayer?.localAvatarRef ?? CHAT_WORLD_DESKTOP_AVATAR_REF,
   })
+  const withInference = withChatWorldInferenceLayer(withWorld, multiplayer)
+  const inputBindings = verseInputBindingProjection(
+    model.inputProfile,
+    model.verseMode === "code" ? "verse_code_overlay" : "verse_explore",
+  )
   const lastPose =
     model.verseSceneRestorePose === null
       ? undefined
@@ -6625,10 +7112,15 @@ export const verseSceneVisualization = (model: Model): TrainingRunVisualizationO
           capturedAtMs: model.verseSceneRestorePose.capturedAtMs,
         }
   const navigable = {
-    ...withWorld,
+    ...withInference,
     cameraMode: "perspective_walk" as const,
     controller: "third_person_character" as const,
+    keyboardTargeting: {
+      ...(withInference.keyboardTargeting ?? {}),
+      ...inputBindings.keyboardTargeting,
+    },
     thirdPersonController: {
+      keyboardBindings: inputBindings.movement,
       character: {
         walkSpeed: 3.8,
         runSpeed: 6.7,
@@ -6637,7 +7129,7 @@ export const verseSceneVisualization = (model: Model): TrainingRunVisualizationO
       gravity: -13.5,
     },
     sceneChrome: {
-      ...(withWorld.sceneChrome ?? {}),
+      ...(withInference.sceneChrome ?? {}),
       lossPanel: "hidden" as const,
       statusChart: "hidden" as const,
     },
@@ -6654,6 +7146,7 @@ export const verseSceneVisualization = (model: Model): TrainingRunVisualizationO
         multiplayer,
       )
     : poseStableNavigable
+  recordVerseInputBindingDiagnostic(inputBindings)
   recordVerseVisualizationKey(visualization)
   return visualization
 }
@@ -6661,6 +7154,26 @@ export const verseSceneVisualization = (model: Model): TrainingRunVisualizationO
 export const chatSceneVisualization = verseSceneVisualization
 
 let lastVerseVisualizationKey: string | null = null
+let lastVerseInputBindingDiagnosticKey: string | null = null
+
+const recordVerseInputBindingDiagnostic = (
+  projection: VerseInputBindingProjection,
+): void => {
+  const key = JSON.stringify({
+    activeContext: projection.activeContext,
+    lastResolvedAction: projection.lastResolvedAction,
+    profileId: projection.profileId,
+    schemaVersion: projection.schemaVersion,
+  })
+  if (key === lastVerseInputBindingDiagnosticKey) return
+  lastVerseInputBindingDiagnosticKey = key
+  recordVerseSceneDiagnostic("input.profile", {
+    activeContext: projection.activeContext,
+    lastResolvedAction: projection.lastResolvedAction,
+    profileId: projection.profileId,
+    schemaVersion: projection.schemaVersion,
+  })
+}
 
 const recordVerseVisualizationKey = (
   visualization: TrainingRunVisualizationOptions,
@@ -7021,7 +7534,7 @@ const verseCodeDockAgentStream = (
   const rows = projectAgentStreamRows({
     session,
     events,
-    accounts: modelNode(model)?.accounts ?? [],
+    accounts: modelCodeModeSync(model)?.liveAccounts ?? modelNode(model)?.accounts ?? [],
   }).slice(-6)
   return h.div(
     [cls("agent-stream"), h.DataAttribute("agent-stream", session.sessionRef)],
@@ -7039,9 +7552,11 @@ const verseCodeDockAgentStream = (
 
 const verseCodeDockActiveSession = (model: Model): Html => {
   const ref = model.composerSessionRef
+  const sync = modelCodeModeSync(model)
   const node = modelNode(model)
-  const session = ref ? (node?.sessions.find((row) => row.sessionRef === ref) ?? null) : null
-  const events = ref ? (node?.events?.[ref] ?? []) : []
+  const sessions = sync?.sessions ?? node?.sessions ?? []
+  const session = ref ? (sessions.find((row) => row.sessionRef === ref) ?? null) : null
+  const events = ref ? (sync?.events[ref] ?? node?.events?.[ref] ?? []) : []
   const state = session?.state ?? null
   const canReply = composerCanReply(state)
   const activeLabel = ref === null ? "No active Codex session" : compactSessionRef(ref)
@@ -7127,6 +7642,17 @@ const verseCodeDockComposer = (model: Model): Html =>
       h.div([cls("verse-code-dock-row verse-code-dock-row-tight")], [
         h.span([cls("verse-code-dock-label")], ["Composer"]),
         h.span([cls("verse-code-dock-route")], [composerSelectedAccountText(model)]),
+        composerAccountRouteOverride(model) === null
+          ? h.empty
+          : h.button(
+              [
+                cls("verse-code-dock-button subtle"),
+                h.Type("button"),
+                h.Title("Run this same task with another account"),
+                h.OnClick(ClickedOverrideComposerAccountRoute()),
+              ],
+              ["Other"],
+            ),
       ]),
       h.p([cls("verse-code-dock-note")], [compactWorkspaceLabel(model)]),
       h.textarea(
@@ -7217,7 +7743,8 @@ const verseCodeDockPermissions = (model: Model): Html => {
 
 const verseCodeDock = (model: Model): Html => {
   if (model.verseMode !== "code") return h.empty
-  const activeCount = modelNode(model)?.sessions.length ?? 0
+  const activeCount =
+    modelCodeModeSync(model)?.counts.sessions ?? modelNode(model)?.sessions.length ?? 0
   return h.aside(
     [
       cls("verse-code-dock"),
@@ -7252,6 +7779,7 @@ const verseCodeDock = (model: Model): Html => {
             ),
           ]),
         ]),
+        codeModeSyncDiagnostics(model, 2),
         model.composerSessionRef === null
           ? verseCodeDockComposer(model)
           : verseCodeDockActiveSession(model),
@@ -7324,7 +7852,10 @@ const shellTargetLabel = (target: ShellTarget): string =>
 const shellTargetTabs = (active: ShellTarget): Html =>
   h.div(
     [
-      cls("shell-target-tabs"),
+      ...stylexAttrsWithClass<Message>(
+        "shell-target-tabs",
+        desktopShellStyles.targetTabs,
+      ),
       h.Role("tablist"),
       h.AriaLabel("Shell target"),
       h.Title("Shift+Tab cycles shell target"),
@@ -7332,7 +7863,11 @@ const shellTargetTabs = (active: ShellTarget): Html =>
     shellTargetOptions.map((option) =>
       h.button(
         [
-          cls(`shell-target-tab${active === option.target ? " active" : ""}`),
+          ...stylexAttrsWithClass<Message>(
+            `shell-target-tab${active === option.target ? " active" : ""}`,
+            desktopShellStyles.targetTab,
+            active === option.target && desktopShellStyles.targetTabActive,
+          ),
           h.Type("button"),
           h.Role("tab"),
           h.Title(`${option.title} (Shift+Tab)`),
@@ -7461,19 +7996,79 @@ const shellStreamParts = (text: string): ReadonlyArray<ShellStreamPart> | null =
   return sawStreamPart && parts.length > 0 ? parts : null
 }
 
+const shellStreamPartStyle = (kind: ShellStreamPartKind) => {
+  switch (kind) {
+    case "answer":
+      return desktopShellStyles.streamPartAnswer
+    case "tool":
+      return desktopShellStyles.streamPartTool
+    case "result":
+      return desktopShellStyles.streamPartResult
+    case "status":
+      return desktopShellStyles.streamPartStatus
+    case "tokens":
+      return desktopShellStyles.streamPartTokens
+    case "reasoning":
+      return null
+  }
+}
+
+const shellStreamPartBodyStyle = (kind: ShellStreamPartKind) => {
+  switch (kind) {
+    case "reasoning":
+      return desktopShellStyles.streamPartBodyReasoning
+    case "status":
+    case "tokens":
+      return desktopShellStyles.streamPartBodyMuted
+    case "answer":
+    case "result":
+    case "tool":
+      return null
+  }
+}
+
 const shellStreamPartView = (part: ShellStreamPart): Html =>
   h.div(
     [
-      cls(`shell-stream-part shell-stream-part-${part.kind}`),
+      ...stylexAttrsWithClass<Message>(
+        `shell-stream-part shell-stream-part-${part.kind}`,
+        desktopShellStyles.streamPart,
+        shellStreamPartStyle(part.kind),
+      ),
       h.DataAttribute("autopilot-shell-stream-part", part.kind),
     ],
     [
-      h.div([cls("shell-stream-part-label")], [part.label]),
+      h.div(
+        stylexAttrsWithClass<Message>(
+          "shell-stream-part-label",
+          desktopShellStyles.streamPartLabel,
+        ),
+        [part.label],
+      ),
       part.kind === "answer"
-        ? h.div([cls("shell-stream-part-body shell-stream-answer")], [part.body])
+        ? h.div(
+            stylexAttrsWithClass<Message>(
+              "shell-stream-part-body shell-stream-answer",
+              desktopShellStyles.streamPartBody,
+              desktopShellStyles.streamAnswer,
+            ),
+            [part.body],
+          )
         : h.div(
-            [cls("shell-stream-part-body")],
-            [h.pre([cls("shell-stream-pre")], [part.body])],
+            stylexAttrsWithClass<Message>(
+              "shell-stream-part-body",
+              desktopShellStyles.streamPartBody,
+              shellStreamPartBodyStyle(part.kind),
+            ),
+            [
+              h.pre(
+                stylexAttrsWithClass<Message>(
+                  "shell-stream-pre",
+                  desktopShellStyles.streamPre,
+                ),
+                [part.body],
+              ),
+            ],
           ),
     ],
   )
@@ -7483,9 +8078,24 @@ const shellTurnBody = (turn: {
   text: string
 }): Html => {
   const parts = turn.role === "autopilot" ? shellStreamParts(turn.text) : null
-  if (parts === null) return h.div([cls("shell-turn-text")], [turn.text])
+  if (parts === null) {
+    return h.div(
+      stylexAttrsWithClass<Message>(
+        "shell-turn-text",
+        desktopShellStyles.turnText,
+        turn.role === "you" && desktopShellStyles.turnTextYou,
+      ),
+      [turn.text],
+    )
+  }
   return h.div(
-    [cls("shell-stream"), h.DataAttribute("autopilot-shell-stream", "")],
+    [
+      ...stylexAttrsWithClass<Message>(
+        "shell-stream",
+        desktopShellStyles.stream,
+      ),
+      h.DataAttribute("autopilot-shell-stream", ""),
+    ],
     parts.map((part) => shellStreamPartView(part)),
   )
 }
@@ -7496,10 +8106,18 @@ const shellTurnView = (turn: {
   text: string
 }): Html =>
   h.div(
-    [cls(`shell-turn shell-turn-${turn.role}`)],
+    [
+      ...stylexAttrsWithClass<Message>(
+        `shell-turn shell-turn-${turn.role}`,
+        desktopShellStyles.turn,
+      ),
+    ],
     [
       h.div(
-        [cls("shell-turn-role")],
+        stylexAttrsWithClass<Message>(
+          "shell-turn-role",
+          desktopShellStyles.turnRole,
+        ),
         [
           turn.target === "current"
             ? turn.role
@@ -7512,25 +8130,37 @@ const shellTurnView = (turn: {
 
 const shellPane = (model: Model): Html =>
   h.div(
-    [cls("shell-pane")],
+    stylexAttrsWithClass<Message>(
+      "shell-pane",
+      desktopShellStyles.pane,
+    ),
     [
       // The conversation (empty until the first response → truly black on launch).
       model.shellTurns.length === 0
         ? h.empty
         : h.div(
-            [cls("shell-conversation")],
+            stylexAttrsWithClass<Message>(
+              "shell-conversation",
+              desktopShellStyles.conversation,
+            ),
             model.shellTurns.map((turn) => shellTurnView(turn)),
           ),
       // The single bottom text bar.
       h.div(
-        [cls("shell-bar")],
+        stylexAttrsWithClass<Message>(
+          "shell-bar",
+          desktopShellStyles.bar,
+        ),
         [
           // Bottom-left hotbar; blank cells are inert, and the chat input sits
           // immediately to its right.
           hotbar(model, "inline"),
           shellTargetTabs(model.shellTarget),
           h.input([
-            cls("shell-input"),
+            ...stylexAttrsWithClass<Message>(
+              "shell-input",
+              desktopShellStyles.input,
+            ),
             h.Type("text"),
             h.Placeholder(""),
             h.Autofocus(true),
@@ -7771,6 +8401,8 @@ const paneContent = (model: Model, kind: PaneId): Html => {
       return diffArtifactsPane(model)
     case "terminal-log":
       return terminalLogPane(model)
+    case "diagnostics":
+      return diagnosticsPane(model)
     case "accounts":
       return accountsPane(model)
     case "spawn":
@@ -7844,12 +8476,61 @@ const PANE_KIND_LABELS: ReadonlyMap<PaneId, string> = (() => {
 const paneKindLabel = (kind: PaneId): string =>
   PANE_KIND_LABELS.get(kind) ?? kind
 
+const paneResizeStyle = (handle: PaneResizeHandle) => {
+  switch (handle) {
+    case "top":
+      return [
+        desktopPaneStyles.resizeHorizontal,
+        desktopPaneStyles.resizeTop,
+      ] as const
+    case "bottom":
+      return [
+        desktopPaneStyles.resizeHorizontal,
+        desktopPaneStyles.resizeBottom,
+      ] as const
+    case "left":
+      return [
+        desktopPaneStyles.resizeVertical,
+        desktopPaneStyles.resizeLeft,
+      ] as const
+    case "right":
+      return [
+        desktopPaneStyles.resizeVertical,
+        desktopPaneStyles.resizeRight,
+      ] as const
+    case "topleft":
+      return [
+        desktopPaneStyles.resizeCorner,
+        desktopPaneStyles.resizeTopLeft,
+      ] as const
+    case "topright":
+      return [
+        desktopPaneStyles.resizeCorner,
+        desktopPaneStyles.resizeTopRight,
+      ] as const
+    case "bottomleft":
+      return [
+        desktopPaneStyles.resizeCorner,
+        desktopPaneStyles.resizeBottomLeft,
+      ] as const
+    case "bottomright":
+      return [
+        desktopPaneStyles.resizeCorner,
+        desktopPaneStyles.resizeBottomRight,
+      ] as const
+  }
+}
+
 // One resize handle: a small grab target on an edge/corner. Pointer-down starts a
 // resize gesture for THIS handle (the reducer captures the pane's start rect).
 const paneResizeHandleView = (pane: ManagedPane, handle: PaneResizeHandle): Html =>
   h.div(
     [
-      cls(`pane-window-resize pane-window-resize-${handle}`),
+      ...stylexAttrsWithClass<Message>(
+        `pane-window-resize pane-window-resize-${handle}`,
+        desktopPaneStyles.resize,
+        ...paneResizeStyle(handle),
+      ),
       h.OnPointerDown((_pointerType, button, _sx, _sy, _ts, clientX, clientY) =>
         button === 0
           ? Option.some(
@@ -7870,7 +8551,10 @@ const paneResizeHandleView = (pane: ManagedPane, handle: PaneResizeHandle): Html
 const managedPaneWindow = (model: Model, pane: ManagedPane): Html =>
   h.div(
     [
-      cls("pane-window"),
+      ...stylexAttrsWithClass<Message>(
+        "pane-window",
+        desktopPaneStyles.window,
+      ),
       // Absolute geometry straight from the pane data; z stacks focused on top.
       h.Style({
         left: `${pane.rect.x}px`,
@@ -7881,12 +8565,17 @@ const managedPaneWindow = (model: Model, pane: ManagedPane): Html =>
       }),
       // Clicking anywhere in the window focuses (brings to front).
       h.OnMouseDown(FocusedManagedPane({ paneId: pane.id })),
+      h.DataAttribute("pane-kind", pane.kind),
+      h.DataAttribute("pane-id", pane.id),
     ],
     [
       // Title bar — the move handle. Pointer-down starts a move gesture.
       h.div(
         [
-          cls("pane-window-titlebar"),
+          ...stylexAttrsWithClass<Message>(
+            "pane-window-titlebar",
+            desktopPaneStyles.titlebar,
+          ),
           h.OnPointerDown((_pointerType, button, _sx, _sy, _ts, clientX, clientY) =>
             button === 0
               ? Option.some(
@@ -7902,10 +8591,19 @@ const managedPaneWindow = (model: Model, pane: ManagedPane): Html =>
           ),
         ],
         [
-          h.span([cls("pane-window-title")], [paneKindLabel(pane.kind)]),
+          h.span(
+            stylexAttrsWithClass<Message>(
+              "pane-window-title",
+              desktopPaneStyles.title,
+            ),
+            [paneKindLabel(pane.kind)],
+          ),
           h.button(
             [
-              cls("pane-window-close"),
+              ...stylexAttrsWithClass<Message>(
+                "pane-window-close",
+                desktopPaneStyles.close,
+              ),
               h.Type("button"),
               h.Title("Close pane"),
               h.OnClick(ClosedManagedPane({ paneId: pane.id })),
@@ -7915,7 +8613,13 @@ const managedPaneWindow = (model: Model, pane: ManagedPane): Html =>
         ],
       ),
       // The pane body: the SAME existing content, rendered inside the window.
-      h.div([cls("pane-window-body")], [paneContent(model, pane.kind)]),
+      h.div(
+        stylexAttrsWithClass<Message>(
+          "pane-window-body",
+          desktopPaneStyles.body,
+        ),
+        [paneContent(model, pane.kind)],
+      ),
       // The 8 resize handles.
       ...PANE_RESIZE_HANDLES.map((handle) => paneResizeHandleView(pane, handle)),
     ],
@@ -7928,7 +8632,13 @@ const managedPaneLayer = (model: Model): Html => {
   const layer: PaneLayer = modelPaneLayer(model)
   if (layer.panes.length === 0) return h.empty
   return h.div(
-    [cls("pane-layer"), h.AriaLabel("Open panes")],
+    [
+      ...stylexAttrsWithClass<Message>(
+        "pane-layer",
+        desktopPaneStyles.layer,
+      ),
+      h.AriaLabel("Open panes"),
+    ],
     layer.panes.map((pane) => managedPaneWindow(model, pane)),
   )
 }
@@ -7945,7 +8655,13 @@ const rootView = (model: Model): Html => {
   // command palette (#5464) still overlays it so Cmd-K opens the hidden full UI.
   if (model.pane === "shell") {
     return h.div(
-      [cls("app-shell app-shell-shell"), themeData],
+      [
+        ...stylexAttrsWithClass<Message>(
+          "app-shell app-shell-shell",
+          desktopRootStyles.shellShell,
+        ),
+        themeData,
+      ],
       [shellPane(model), managedPaneLayer(model), commandPalette(model)],
     )
   }
@@ -7955,7 +8671,13 @@ const rootView = (model: Model): Html => {
   // rides along as the bottom command bar.
   if (model.pane === "network") {
     return h.div(
-      [cls("app-shell app-shell-network"), themeData],
+      [
+        ...stylexAttrsWithClass<Message>(
+          "app-shell app-shell-network",
+          desktopRootStyles.networkShell,
+        ),
+        themeData,
+      ],
       [networkPane(model), managedPaneLayer(model), hotbar(model), commandPalette(model)],
     )
   }
@@ -7967,13 +8689,16 @@ const rootView = (model: Model): Html => {
       [
         cls("app-shell app-shell-verse"),
         themeData,
+        h.Tabindex(-1),
         h.DataAttribute("verse-mode", model.verseMode),
+        h.DataAttribute("verse-focus-root", "true"),
       ],
       [
         chatPane(model),
         verseCodeAccountInventory(model),
         verseCodeDock(model),
         verseCodeControlsVisible(model) ? managedPaneLayer(model) : h.empty,
+        hotbar(model),
         CHAT_WORLD_HUD ? verseBottomHud(model) : h.empty,
         verseCodeControlsVisible(model) ? commandPalette(model) : h.empty,
       ],
@@ -7988,7 +8713,10 @@ const rootView = (model: Model): Html => {
       // avoids making "shell" the product story.
       h.button(
         [
-          cls("shell-return"),
+          ...stylexAttrsWithClass<Message>(
+            "shell-return",
+            desktopShellStyles.returnButton,
+          ),
           h.Type("button"),
           h.Title("Open fallback shell (Esc)"),
           h.AriaLabel("Open fallback shell"),

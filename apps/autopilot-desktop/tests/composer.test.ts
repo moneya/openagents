@@ -23,6 +23,7 @@ import {
   ChangedSpawnAdapter,
   ChangedSpawnObjective,
   ChangedVerseMode,
+  ClickedOverrideComposerAccountRoute,
   ClickedComposerNewThread,
   ClickedComposerReply,
   ClickedComposerSpawn,
@@ -164,7 +165,7 @@ describe("composer reducer (#5355)", () => {
     expect(cmd.args?.objective).toBe("add a /health route and a test")
   })
 
-  test("ChangedVerseMode(code) defaults the composer runtime to Codex", () => {
+  test("ChangedVerseMode(code) preserves Claude Agent runtime", () => {
     const start = Model.make({
       ...initialModel,
       pane: "chat",
@@ -172,7 +173,42 @@ describe("composer reducer (#5355)", () => {
     })
     const [model] = update(start, ChangedVerseMode({ mode: "code" }))
     expect(model.verseMode).toBe("code")
-    expect(model.spawnAdapter).toBe("codex")
+    expect(model.spawnAdapter).toBe("claude_agent")
+    expect(model.managedAccountsStatus.text).toContain("Claude Agent")
+  })
+
+  test("Verse code mode starts Claude Agent when Claude was selected", () => {
+    const start = Model.make({
+      ...initialModel,
+      pane: "chat",
+      spawnAdapter: "claude_agent",
+      spawnObjective: "start a real Claude session from Verse",
+      composerRepoPath: "/Users/me/code/repo",
+    })
+
+    const [codeMode] = update(start, ChangedVerseMode({ mode: "code" }))
+    const [model, commands] = update(codeMode, ClickedComposerSpawn())
+    expect(model.composerPending).toBe(true)
+    expect(commands).toHaveLength(1)
+    const cmd = commands[0] as unknown as {
+      name?: string
+      args?: { adapter?: string; objective?: string; worktreePath?: string | null }
+    }
+    expect(cmd.name).toBe("SpawnComposerTurn")
+    expect(cmd.args?.adapter).toBe("claude_agent")
+    expect(cmd.args?.objective).toBe("start a real Claude session from Verse")
+    expect(cmd.args?.worktreePath).toBe("/Users/me/code/repo")
+  })
+
+  test("ChangedVerseMode(code) maps Apple FM to Claude Agent for session.spawn", () => {
+    const start = Model.make({
+      ...initialModel,
+      pane: "chat",
+      spawnAdapter: "apple_fm",
+    })
+    const [model] = update(start, ChangedVerseMode({ mode: "code" }))
+    expect(model.verseMode).toBe("code")
+    expect(model.spawnAdapter).toBe("claude_agent")
   })
 
   test("ChangedSpawnAdapter clears stale selected account refs", () => {
@@ -210,6 +246,89 @@ describe("composer reducer (#5355)", () => {
     const [, personalCommands] = update(personal, ClickedComposerSpawn())
     const personalCmd = personalCommands[0] as unknown as { args?: { accountRef?: string | null } }
     expect(personalCmd.args?.accountRef).toBe("personal")
+  })
+
+  test("ClickedComposerSpawn sends the priority route when no account is selected", () => {
+    const [withNode] = update(
+      Model.make({
+        ...initialModel,
+        pane: "composer",
+        spawnAdapter: "codex",
+        spawnObjective: "ship the priority route",
+      }),
+      GotNodeState({
+        node: nodeWithCodexAccounts([
+          { accountRef: "work", ready: true, priority: 5 },
+          { accountRef: "personal", ready: true, priority: 1 },
+        ]),
+      }),
+    )
+
+    const tree = serializeView(view(withNode))
+    expect(tree).toContain("autopilot-account-route")
+    expect(tree).toContain("priority")
+
+    const [, commands] = update(withNode, ClickedComposerSpawn())
+    const cmd = commands[0] as unknown as { args?: { accountRef?: string | null } }
+    expect(cmd.args?.accountRef).toBe("personal")
+  })
+
+  test("ClickedComposerSpawn sends the last-used workspace route before priority", () => {
+    const previousSession = {
+      sessionRef: "session.pylon.codex.previous",
+      adapter: "codex" as const,
+      state: "completed" as const,
+      objectiveRef: "objective.previous",
+      workspaceRef: "workspace.openagents.desktop",
+      accountRefHash: "account.pylon.codex.work",
+      latestActivity: "completed previous work",
+      updatedAt: "2026-06-21T23:00:00.000Z",
+    }
+    const baseNode = nodeWithCodexAccounts([
+      { accountRef: "work", ready: true, priority: 5 },
+      { accountRef: "personal", ready: true, priority: 1 },
+    ])
+    const [withNode] = update(
+      Model.make({
+        ...initialModel,
+        selectedSessionRef: previousSession.sessionRef,
+        spawnAdapter: "codex",
+        spawnObjective: "ship the workspace route",
+      }),
+      GotNodeState({
+        node: {
+          ...baseNode,
+          sessions: [previousSession],
+        },
+      }),
+    )
+
+    const [, commands] = update(withNode, ClickedComposerSpawn())
+    const cmd = commands[0] as unknown as { args?: { accountRef?: string | null } }
+    expect(cmd.args?.accountRef).toBe("work")
+  })
+
+  test("ClickedOverrideComposerAccountRoute cycles the same task to another account", () => {
+    const [withNode] = update(
+      Model.make({
+        ...initialModel,
+        spawnAdapter: "codex",
+        spawnObjective: "run the same task elsewhere",
+        composerAccountRef: "work",
+      }),
+      GotNodeState({
+        node: nodeWithCodexAccounts([
+          { accountRef: "work", ready: true, priority: 0 },
+          { accountRef: "personal", ready: true, priority: 1 },
+        ]),
+      }),
+    )
+
+    const [model, commands] = update(withNode, ClickedOverrideComposerAccountRoute())
+    expect(commands).toHaveLength(0)
+    expect(model.composerAccountRef).toBe("personal")
+    expect(model.spawnObjective).toBe("run the same task elsewhere")
+    expect(model.composerStatus.text).toContain("personal")
   })
 
   test("ClickedComposerSpawn blocks if the selected Codex account is unavailable", () => {
@@ -270,7 +389,8 @@ describe("composer reducer (#5355)", () => {
     const tree = serializeView(view(model).body)
     expect(tree).toContain("autopilot-composer-run-context")
     expect(tree).toContain("runtime: codex")
-    expect(tree).toContain("account: Codex work ready")
+    expect(tree).toContain("account: Codex work")
+    expect(tree).toContain("selected account")
     expect(tree).toContain("target: /Users/me/code/repo")
     expect(tree).toContain("verify: 2 verify commands")
   })

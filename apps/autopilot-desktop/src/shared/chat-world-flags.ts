@@ -55,6 +55,30 @@ export const agentCharacterCreationFlag = (): boolean =>
 export const chatWorldMultiplayerFlag = (): boolean =>
   verseFeatureFlag("VITE_CHAT_WORLD_MULTIPLAYER")
 
+// MMO character selection (#verse/mmo-characters-per-account). One account can
+// field MANY characters; this app launch picks ONE via OA_CHARACTER. Default
+// "main" so a single instance behaves exactly as before. Two instances on the
+// same account with OA_CHARACTER=main and OA_CHARACTER=alt become two distinct,
+// mutually-visible avatars.
+//
+// Plumbing note: OA_CHARACTER is set on the Bun LAUNCHER process at runtime and
+// is NOT VITE_-prefixed, so it is absent from both `import.meta.env` (a
+// build-time Vite define) and the renderer's (non-existent) `process.env`. The
+// Bun host therefore injects the resolved value into the webview as the global
+// `globalThis.__OA_CHARACTER` (see src/bun/index.ts), and we read that FIRST.
+// The env paths remain as fallbacks for Vite builds/tests. See
+// docs/game/2026-06-21-mmo-characters-per-account-verse-presence.md.
+export const chatWorldCharacterId = (): string => {
+  const injected = (globalThis as { __OA_CHARACTER?: unknown }).__OA_CHARACTER
+  if (typeof injected === "string") {
+    const trimmedInjected = injected.trim()
+    if (trimmedInjected.length > 0) return trimmedInjected
+  }
+  const raw = envValue("OA_CHARACTER") ?? envValue("VITE_OA_CHARACTER")
+  const trimmed = raw?.trim()
+  return trimmed !== undefined && trimmed.length > 0 ? trimmed : "main"
+}
+
 // One switch for visible Verse HUD/actions. Default OFF for the current launch
 // pass: the world remains navigable, but bottom bars and global shortcuts stay
 // dark unless explicitly enabled.

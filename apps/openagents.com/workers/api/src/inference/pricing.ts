@@ -24,7 +24,6 @@
 // Cached input is billed at a fraction of the input rate; batch requests get a
 // flat discount on both directions. All discounts come off COST before margin
 // so margin is preserved (docs §6: "funded by real savings, not margin").
-
 import { type InferenceUsage } from './provider-adapter'
 
 // ----------------------------------------------------------------------------
@@ -253,6 +252,23 @@ const VERTEX_GEMINI_COST: Readonly<Record<string, ModelCostPerMtok>> = {
   },
 }
 
+// First Khala virtual model id (M0 / #6008). It is a public OpenAgents model
+// alias backed by the existing Gemini Flash lane until the full Khala
+// coordinator/worker fabric lands; adding it here keeps catalog, quote, and
+// receipt-first metering prices derived from the same source of truth.
+export const KHALA_MINI_MODEL_ID = 'openagents/khala-mini'
+export const KHALA_CODE_MODEL_ID = 'openagents/khala-code'
+
+// True when the requested id is an OpenAgents Khala virtual model. M0 ships a
+// single cheap tier (khala-mini) plus the coding verifier tier (khala-code);
+// the `openagents/khala-` prefix keeps future tiers (pro) recognized as Khala
+// without another edit. Used by the gateway to attach the disclosure
+// (`openagents`) block to the response so a Khala request is auditable (which
+// concrete model/worker actually served it). Bounded id check, not an intent
+// parser.
+export const isKhalaModel = (model: string): boolean =>
+  model.trim().toLowerCase().startsWith('openagents/khala-')
+
 // Unknown-model fallback cost. Conservative: priced like a mid open model so an
 // un-tabled model is never under-charged below plausible cost (docs edge:
 // unknown models still clear a sane floor). Not a measured rate.
@@ -324,6 +340,25 @@ export const MODEL_PRICING_TABLE: ReadonlyArray<ModelPricingEntry> = [
     VERTEX_GEMINI_COST['gemini-3.5-flash']!,
     true,
   ),
+  // Khala M0 virtual model alias. Uses the same current cost basis as the
+  // Gemini Flash backing lane; the richer Khala coordinator, worker fabric,
+  // verification, and settlement receipt fields remain separate milestones.
+  entry(
+    KHALA_MINI_MODEL_ID,
+    'vertex-gemini',
+    VERTEX_GEMINI_COST['gemini-3.5-flash']!,
+    true,
+  ),
+  // Khala coding verifier tier (#6010). Backed by the open/code lane today so
+  // catalog, quote, route, and receipt all agree before the full Khala worker
+  // fabric lands. The verifier receipt is attached by chat-completions-routes;
+  // pricing stays model/usage-only.
+  entry(
+    KHALA_CODE_MODEL_ID,
+    'fireworks',
+    FIREWORKS_OPEN_COST['kimi-k2p7-code']!,
+    false,
+  ),
   // Fireworks open-model lane — REAL cost (verified 2026-06-19).
   entry('gpt-oss-20b', 'fireworks', FIREWORKS_OPEN_COST['gpt-oss-20b']!, false),
   entry(
@@ -371,7 +406,7 @@ export const MODEL_PRICING_TABLE: ReadonlyArray<ModelPricingEntry> = [
 
 // Index for O(1) lookup by lowercased model alias.
 const MODEL_INDEX: ReadonlyMap<string, ModelPricingEntry> = new Map(
-  MODEL_PRICING_TABLE.map((e) => [e.model, e]),
+  MODEL_PRICING_TABLE.map(e => [e.model, e]),
 )
 
 // Resolve a model alias to its pricing entry (case-insensitive). Returns

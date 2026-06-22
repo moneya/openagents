@@ -31,11 +31,21 @@ iteration), the **top operating rule is CONSTANT MOTION**:
 - `apps/openagents.com/` owns the `openagents.com` product surface, including
   the current Autopilot, Forum, Sites, and public proof implementation
   material.
-- `apps/openagents-world-spacetimedb/` owns the self-hosted SpacetimeDB
-  `openagents-world` module for live world projection and interaction state.
-  It is separate from `apps/openagents.com/` because it builds and deploys as a
-  Rust/WASM database module, not as part of the Cloudflare Worker or browser
-  app.
+- `apps/openagents-world/` is the Cloudflare Worker + Region Durable Object
+  home for live Verse world projection, presence, local interaction,
+  interest-scoped fanout, world WebSocket transport, D1 projection rows, queue
+  markers, and DO alarm expiry. New world-backend work belongs there, using
+  Effect, Effect Schema, D1, hibernatable WebSockets, and the shared world
+  packages below.
+- `packages/world-contract/` is the shared Effect Schema contract home for
+  public-safe world rows, commands, deltas, cursors, moderation decisions, and
+  WoC-style read-model projection types.
+- `packages/world-client/` is the shared desktop/web Verse world client that
+  mirrors snapshots and deltas into a read-only `WorldReadModel`.
+- The old self-hosted SpacetimeDB `openagents-world` module was deleted during
+  the Cloudflare Verse World cutover. Do not re-clone, regenerate bindings for,
+  or add production world features to that path; port useful historical schema
+  or reducer ideas into the Cloudflare/Effect world service instead.
 - `apps/forum/` owns the forum extraction target for
   `openagents.com/forum`. The live Forum routes stay inside the
   `openagents.com` Worker for now because they share auth, D1, payment
@@ -104,6 +114,11 @@ iteration), the **top operating rule is CONSTANT MOTION**:
   silently leave a red, and never describe a partially-green run as clean.
 - Keep new TypeScript implementation work on Bun, Effect, Effect Schema, and
   Foldkit where `apps/openagents.com` already uses it.
+- Never stash, reset, checkout, restore, or otherwise move another agent's
+  uncommitted work out of the way. If a checkout is dirty with concurrent work
+  and you need a clean tree for tests, commits, or pushes, create a fresh
+  worktree from clean `origin/main` and do the scoped work there. Leave the
+  original dirty checkout intact and report the conflict or blocker honestly.
 - Do not reintroduce the old Cargo or Tauri workspace unless the user asks for
   explicit historical compatibility work.
 - **Mobile build/ship policy (owner mandate): NO Expo/EAS cloud.** For

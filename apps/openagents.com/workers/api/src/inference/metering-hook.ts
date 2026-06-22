@@ -33,6 +33,7 @@ import { workerLogEntry } from '../observability'
 import {
   type PayInPlan,
   createPayInStatements,
+  markPayInPaidStatements,
   runLedgerStatements,
 } from '../payments-ledger'
 import { currentIsoTimestamp } from '../runtime-primitives'
@@ -171,8 +172,15 @@ export type LedgerMeteringDeps = Readonly<{
   // decision's PayIn-shaped legs through the revenue-loop spine — but only when
   // the decision is `armed` (owner-armed gate). The serving fabric is inert today,
   // so no receipt flows and this never fires; the seam is shaped to receive it.
+  //
+  // The sink also receives the serving RECEIPT that produced the decision, so a
+  // Bitcoin/Spark settlement sink (`khala-verified-work-settlement.ts`, M3 #6011)
+  // can read the served model + parity result it needs to settle real sats to the
+  // serving node(s) over Spark. The receipt is the same one on `context` — passed
+  // explicitly so the sink contract is self-contained.
   recordServingPayout?: (
     decision: ServingNodePayoutDecision,
+    receipt: ServingReceipt,
   ) => Effect.Effect<void>
   // The owner-armed payout-mode gate (mdk-payout-mode-gate.ts) the serving-payout
   // decision consults. Defaults to a DISABLED gate (no live payout) so the seam
@@ -199,27 +207,46 @@ export const inferenceChargeReceiptRef = (requestId: string): string =>
 export const inferenceChargeContextRef = (
   input: Readonly<{
     adapterId: string
+    requestedModel?: string
     servedModel: string
     totalTokens: number
   }>,
-): string =>
-  `inference:${encodeURIComponent(input.adapterId)}:served:${encodeURIComponent(input.servedModel)}:tokens:${Math.max(0, Math.trunc(input.totalTokens))}`
+): string => {
+  const base = `inference:${encodeURIComponent(input.adapterId)}:served:${encodeURIComponent(input.servedModel)}:tokens:${Math.max(0, Math.trunc(input.totalTokens))}`
+  const requestedModel = input.requestedModel?.trim() ?? ''
+  return requestedModel.length === 0
+    ? base
+    : `${base}:requested:${encodeURIComponent(requestedModel)}`
+}
 
 export const parseInferenceChargeContextRef = (
   value: string,
-): Readonly<{ servedModel: string; totalTokens: number }> | undefined => {
-  const match = /^inference:[^:]+:served:([^:]+):tokens:(\d+)$/.exec(value)
+): Readonly<{
+  adapterId: string
+  requestedModel?: string
+  servedModel: string
+  totalTokens: number
+}> | undefined => {
+  const match =
+    /^inference:([^:]+):served:([^:]+):tokens:(\d+)(?::requested:([^:]+))?$/.exec(
+      value,
+    )
   if (match === null) {
     return undefined
   }
 
-  const totalTokens = Number(match[2])
+  const totalTokens = Number(match[3])
   if (!Number.isSafeInteger(totalTokens)) {
     return undefined
   }
 
+  const requestedModel = match[4]
   return {
-    servedModel: decodeURIComponent(match[1] ?? ''),
+    adapterId: decodeURIComponent(match[1] ?? ''),
+    ...(requestedModel === undefined
+      ? {}
+      : { requestedModel: decodeURIComponent(requestedModel) }),
+    servedModel: decodeURIComponent(match[2] ?? ''),
     totalTokens,
   }
 }
@@ -330,7 +357,7 @@ export const makeLedgerMeteringHook = (
       // actual ledger write/dispatch through the revenue-loop spine; the default
       // (undefined) path dispatches nothing — no live payout.
       if (decision.armed && deps.recordServingPayout !== undefined) {
-        yield* deps.recordServingPayout(decision)
+        yield* deps.recordServingPayout(decision, receipt)
       }
     })
 
@@ -373,6 +400,7 @@ export const makeLedgerMeteringHook = (
         accountRef: context.accountRef,
         contextRef: inferenceChargeContextRef({
           adapterId: context.adapterId,
+          requestedModel: context.requestedModel,
           servedModel: priced.model,
           totalTokens: context.usage.totalTokens,
         }),
@@ -388,10 +416,19 @@ export const makeLedgerMeteringHook = (
       //     pre-gate should have caught it, but we never silently go negative.
       // Both surface as a caught batch failure; we classify by re-reading whether
       // the charge row already exists.
+      const settledAt = nowIso()
       const settle = yield* Effect.tryPromise({
         catch: inferenceMeteringPersistenceError,
         try: () =>
-          runLedgerStatements(deps.db, createPayInStatements(plan, nowIso())),
+          runLedgerStatements(deps.db, [
+            ...createPayInStatements(plan, settledAt),
+            // Inference charges have no external forwarding leg; a successful
+            // balance debit is the settlement event the public receipt proves.
+            ...markPayInPaidStatements(
+              { balancePayoutLegs: [], payInId: plan.payInId },
+              settledAt,
+            ),
+          ]),
       }).pipe(
         Effect.map(() => ({ ok: true as const })),
         Effect.catch(() => Effect.succeed({ ok: false as const })),

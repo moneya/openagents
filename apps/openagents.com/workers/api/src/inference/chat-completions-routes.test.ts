@@ -8,26 +8,31 @@ import {
   handleChatCompletions,
   isInferenceGatewayEnabled,
 } from './chat-completions-routes'
+import { decideFairShare, decideSpendCap } from './inference-abuse-controls'
 import {
-  type MeteringContext,
-  type MeteringHook,
-} from './metering-hook'
+  BROKEN_CONTROLS_CROSSY_ROAD_HTML,
+  GOOD_CROSSY_ROAD_HTML,
+} from './khala-code-verifier.fixtures'
+import { type MeteringContext, type MeteringHook } from './metering-hook'
+import {
+  FIREWORKS_ADAPTER_ID,
+  VERTEX_GEMINI_ADAPTER_ID,
+  selectAdapterPlan,
+} from './model-router'
+import {
+  ALL_LANES_UNARMED,
+  resolveSupplyLaneArming,
+} from './model-serving-policy'
+import { KHALA_CODE_MODEL_ID, KHALA_MINI_MODEL_ID } from './pricing'
 import {
   InferenceAdapterError,
   type InferenceProviderAdapter,
   InferenceProviderRegistry,
 } from './provider-adapter'
 import { STUB_ECHO_ADAPTER_ID, stubEchoAdapter } from './stub-echo-adapter'
-import {
-  decideFairShare,
-  decideSpendCap,
-} from './inference-abuse-controls'
-import {
-  ALL_LANES_UNARMED,
-  resolveSupplyLaneArming,
-} from './model-serving-policy'
 
-const run = <A>(effect: Effect.Effect<A>): Promise<A> => Effect.runPromise(effect)
+const run = <A>(effect: Effect.Effect<A>): Promise<A> =>
+  Effect.runPromise(effect)
 
 const authOk: InferenceAuth = async () => ({ accountRef: 'agent:test-user' })
 const authNone: InferenceAuth = async () => undefined
@@ -50,10 +55,7 @@ const baseDeps = (
   ...overrides,
 })
 
-const chatRequest = (
-  body: unknown,
-  init: RequestInit = {},
-): Request =>
+const chatRequest = (body: unknown, init: RequestInit = {}): Request =>
   new Request('https://openagents.com/v1/chat/completions', {
     body: JSON.stringify(body),
     method: 'POST',
@@ -189,7 +191,10 @@ describe('POST /v1/chat/completions', () => {
     const response = await run(
       handleChatCompletions(
         chatRequest(helloBody),
-        baseDeps({ newId: () => 'chatcmpl-fixed', nowEpochSeconds: () => 1_700_000_000 }),
+        baseDeps({
+          newId: () => 'chatcmpl-fixed',
+          nowEpochSeconds: () => 1_700_000_000,
+        }),
       ),
     )
     expect(response.status).toBe(200)
@@ -312,12 +317,18 @@ describe('POST /v1/chat/completions', () => {
     const failingAdapter: InferenceProviderAdapter = {
       complete: () =>
         Effect.fail(
-          new InferenceAdapterError({ adapterId: 'boom', reason: 'upstream down' }),
+          new InferenceAdapterError({
+            adapterId: 'boom',
+            reason: 'upstream down',
+          }),
         ),
       id: STUB_ECHO_ADAPTER_ID,
       stream: () =>
         Effect.fail(
-          new InferenceAdapterError({ adapterId: 'boom', reason: 'upstream down' }),
+          new InferenceAdapterError({
+            adapterId: 'boom',
+            reason: 'upstream down',
+          }),
         ),
     }
     const registry = new InferenceProviderRegistry()
@@ -347,12 +358,20 @@ describe('POST /v1/chat/completions', () => {
   ): InferenceProviderAdapter => ({
     complete: () =>
       Effect.fail(
-        new InferenceAdapterError({ adapterId: id, reason: `${id} down`, retryable }),
+        new InferenceAdapterError({
+          adapterId: id,
+          reason: `${id} down`,
+          retryable,
+        }),
       ),
     id,
     stream: () =>
       Effect.fail(
-        new InferenceAdapterError({ adapterId: id, reason: `${id} down`, retryable }),
+        new InferenceAdapterError({
+          adapterId: id,
+          reason: `${id} down`,
+          retryable,
+        }),
       ),
   })
 
@@ -411,6 +430,169 @@ describe('POST /v1/chat/completions', () => {
     expect(overflowCalls).toBe(0)
   })
 
+  // KHALA DISCLOSURE BLOCK (M0 / #6008) ------------------------------------
+  // A Khala model id is one endpoint over a pool; the response carries a
+  // non-breaking `openagents` block disclosing which concrete model/worker
+  // actually served it. Non-Khala responses are unchanged.
+
+  test('a Khala request returns the openagents disclosure block', async () => {
+    // khala-mini classifies to the Gemini lane; register an echo adapter under
+    // that lane id so the default plan resolves it.
+    const registry = new InferenceProviderRegistry()
+    registry.register(echoAdapter(VERTEX_GEMINI_ADAPTER_ID))
+
+    const response = await run(
+      handleChatCompletions(
+        chatRequest({
+          messages: [{ content: 'hello world', role: 'user' }],
+          model: KHALA_MINI_MODEL_ID,
+        }),
+        // Use the real planner (as the Worker wires it) so khala-mini routes to
+        // its Gemini backing lane.
+        baseDeps({ lanePlan: selectAdapterPlan, registry }),
+      ),
+    )
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      model: string
+      openagents?: {
+        requested_model: string
+        served_model: string
+        worker: string
+        lane: string
+        verification: string
+      }
+    }
+    expect(body.model).toBe(KHALA_MINI_MODEL_ID)
+    expect(body.openagents).toEqual({
+      lane: 'gemini',
+      requested_model: KHALA_MINI_MODEL_ID,
+      served_model: KHALA_MINI_MODEL_ID,
+      verification: 'none',
+      worker: VERTEX_GEMINI_ADAPTER_ID,
+    })
+  })
+
+  test('a khala-code accepted artifact returns test_passed with receipt metadata', async () => {
+    const registry = new InferenceProviderRegistry()
+    registry.register(echoAdapter(FIREWORKS_ADAPTER_ID))
+    const meteringHook: MeteringHook = () =>
+      Effect.sync(() => ({
+        metered: true,
+        receiptRef: 'receipt.inference.charge.chatcmpl-khala-code-pass',
+      }))
+
+    const response = await run(
+      handleChatCompletions(
+        chatRequest({
+          messages: [{ content: GOOD_CROSSY_ROAD_HTML, role: 'user' }],
+          model: KHALA_CODE_MODEL_ID,
+        }),
+        baseDeps({
+          lanePlan: selectAdapterPlan,
+          meteringHook,
+          newId: () => 'chatcmpl-khala-code-pass',
+          registry,
+        }),
+      ),
+    )
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      model: string
+      openagents?: {
+        receipt: string
+        receipt_url: string
+        requested_model: string
+        reward_handoff: string
+        route: string
+        rubric: {
+          failed_checks: ReadonlyArray<string>
+          passed_checks: ReadonlyArray<string>
+          ref: string
+        }
+        scalar_reward: number
+        served_model: string
+        verification: string
+        verification_receipt: string
+        verified: boolean
+        worker: string
+        workers: ReadonlyArray<string>
+      }
+    }
+
+    expect(body.model).toBe(KHALA_CODE_MODEL_ID)
+    expect(body.openagents).toMatchObject({
+      lane: 'open',
+      receipt: 'receipt.inference.charge.chatcmpl-khala-code-pass',
+      receipt_url:
+        '/api/public/inference/receipts/receipt.inference.charge.chatcmpl-khala-code-pass',
+      requested_model: KHALA_CODE_MODEL_ID,
+      route: 'coding',
+      scalar_reward: 1,
+      served_model: KHALA_CODE_MODEL_ID,
+      verification: 'test_passed',
+      verified: true,
+      worker: FIREWORKS_ADAPTER_ID,
+      workers: [FIREWORKS_ADAPTER_ID, 'khala-code-crossy-road-verifier'],
+    })
+    expect(body.openagents?.rubric.failed_checks).toEqual([])
+    expect(body.openagents?.rubric.passed_checks).toContain(
+      'restart_resets_character',
+    )
+    expect(body.openagents?.verification_receipt).toMatch(
+      /^receipt\.inference\.khala_code\.verification\.chatcmpl-khala-code-pass\./u,
+    )
+    expect(body.openagents?.reward_handoff).toContain(
+      'accepted_outcome.khala_code.crossy_road.',
+    )
+  })
+
+  test('a khala-code deliberately broken artifact reports verified false', async () => {
+    const registry = new InferenceProviderRegistry()
+    registry.register(echoAdapter(FIREWORKS_ADAPTER_ID))
+
+    const response = await run(
+      handleChatCompletions(
+        chatRequest({
+          messages: [
+            { content: BROKEN_CONTROLS_CROSSY_ROAD_HTML, role: 'user' },
+          ],
+          model: KHALA_CODE_MODEL_ID,
+        }),
+        baseDeps({
+          lanePlan: selectAdapterPlan,
+          newId: () => 'chatcmpl-khala-code-fail',
+          registry,
+        }),
+      ),
+    )
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      openagents?: {
+        rubric: { failed_checks: ReadonlyArray<string> }
+        scalar_reward: number
+        verification: string
+        verified: boolean
+      }
+    }
+
+    expect(body.openagents?.verification).toBe('failed')
+    expect(body.openagents?.verified).toBe(false)
+    expect(body.openagents?.rubric.failed_checks).toContain(
+      'direction_controls',
+    )
+    expect(body.openagents?.scalar_reward).toBeLessThan(1)
+  })
+
+  test('a non-Khala request omits the openagents block', async () => {
+    const response = await run(
+      handleChatCompletions(chatRequest(helloBody), baseDeps()),
+    )
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as { openagents?: unknown }
+    expect(body.openagents).toBeUndefined()
+  })
+
   test('returns model_unavailable when no planned lane is registered', async () => {
     const response = await run(
       handleChatCompletions(
@@ -458,7 +640,9 @@ describe('POST /v1/chat/completions serving-policy gate', () => {
     const response = await run(
       handleChatCompletions(
         chatRequest(geminiBody),
-        baseDeps({ laneArming: resolveSupplyLaneArming({ VERTEX_SA_KEY: 'x' }) }),
+        baseDeps({
+          laneArming: resolveSupplyLaneArming({ VERTEX_SA_KEY: 'x' }),
+        }),
       ),
     )
     expect(response.status).toBe(200)
@@ -534,7 +718,11 @@ describe('POST /v1/chat/completions abuse gates (#5486)', () => {
         baseDeps({
           checkFairShare: async () =>
             decideFairShare({
-              limits: { maxRequests: 60, maxTokens: 2_000_000, windowSeconds: 60 },
+              limits: {
+                maxRequests: 60,
+                maxTokens: 2_000_000,
+                windowSeconds: 60,
+              },
               usage: { requestsInWindow: 60, tokensInWindow: 0 },
             }),
         }),
@@ -624,7 +812,9 @@ describe('POST /v1/chat/completions abuse gates (#5486)', () => {
 describe('inference provider registry seam', () => {
   test('resolves a registered adapter and reports its ids', () => {
     const registry = registryWithStub()
-    expect(registry.resolve(STUB_ECHO_ADAPTER_ID)?.id).toBe(STUB_ECHO_ADAPTER_ID)
+    expect(registry.resolve(STUB_ECHO_ADAPTER_ID)?.id).toBe(
+      STUB_ECHO_ADAPTER_ID,
+    )
     expect(registry.resolve('not-registered')).toBeUndefined()
     expect(registry.ids()).toEqual([STUB_ECHO_ADAPTER_ID])
   })

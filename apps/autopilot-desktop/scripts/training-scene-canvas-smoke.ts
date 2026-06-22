@@ -249,8 +249,11 @@ const visualization = withChatWorldPaymentLayer(
   {
     connected: true,
     database: "openagents-world",
-    worldUrl: "https://spacetime.openagents.com",
+    worldUrl: "https://openagents-world.openagents.workers.dev",
     regionRef: "region.smoke",
+    projectedAtMs: Date.parse("2026-06-20T00:00:00.000Z"),
+    gateways: [],
+    inferenceEvents: [],
     stations: [{
       pylonRef: "pylon.smoke.alpha",
       label: "Smoke Alpha Pylon",
@@ -269,10 +272,12 @@ const visualization = withChatWorldPaymentLayer(
       z: 1.25,
       yaw: 0,
       movementMode: "walk",
+      lastSeenEpochMs: Date.parse("2026-06-20T00:00:00.000Z"),
       chatMessages: [],
       attentionRefs: [],
     }],
     proximityChatCount: 0,
+    localAvatarRef: null,
   },
 )
 

@@ -26,6 +26,7 @@
 // (particle.size / particle.realBitcoinMoved) so they survive into the inspector
 // even where the shared bezier renderer draws a single beam style.
 
+import { verseIconRecipeForId } from "@openagentsinc/three-effect/core"
 import type {
   TrainingRunEntityDefinition,
   TrainingRunBeamDefinition,
@@ -33,6 +34,7 @@ import type {
   TrainingRunRemoteAvatarDefinition,
   TrainingRunVector,
   TrainingRunVisualizationOptions,
+  VerseIconRecipe,
 } from "@openagentsinc/three-effect/core"
 
 import type { ChatWorldPylonScene, PaymentParticle } from "./chat-world-scene.js"
@@ -121,7 +123,11 @@ const endpointRingPosition = (index: number, count: number): TrainingRunVector =
 const endpointStatus = (particle: PaymentParticle): string =>
   particle.realBitcoinMoved ? "verified" : "active"
 
-export type ChatWorldPaymentEndpointSource = "station" | "avatar" | "fallback"
+export type ChatWorldPaymentEndpointSource =
+  | "avatar"
+  | "fallback"
+  | "gateway"
+  | "station"
 
 export type ChatWorldPaymentEndpoint = Readonly<{
   ref: string
@@ -149,19 +155,39 @@ const vectorFromXYZ = (
       ]
     : null
 
-// ── Public SpacetimeDB world → visible station/avatar entities ──────────────
+// ── Public Cloudflare world world → visible station/avatar entities ──────────────
 
 export const CHAT_WORLD_STATION_NODE_PREFIX = "world:station:"
+export const CHAT_WORLD_GATEWAY_NODE_PREFIX = "world:gateway:"
+export const CHAT_WORLD_INFERENCE_NODE_PREFIX = "world:inference:"
 export const CHAT_WORLD_AVATAR_NODE_PREFIX = "world:avatar:"
-export const CHAT_WORLD_REMOTE_AVATAR_STALE_AFTER_MS = 6_000
+// The stale FADE is disabled. It used to drop an idle-but-present remote's body
+// to 0.35 opacity after 6s (via three-effect's liveness), leaving only the bright
+// accent ring — so a player standing still looked like they vanished into a ring.
+// An idle avatar sends no position keepalive, so `Date.now() - updatedAtMs`
+// crossed 6s while the player was still very much present. A huge stale threshold
+// keeps present avatars solid. Despawn (full removal) is kept at 12s as a
+// client-side backstop; the server (leave_region / position TTL) is the real
+// removal signal that drops avatars from world.agents.
+export const CHAT_WORLD_REMOTE_AVATAR_STALE_AFTER_MS = 86_400_000
 export const CHAT_WORLD_REMOTE_AVATAR_DESPAWN_AFTER_MS = 12_000
 export const CHAT_WORLD_TARGET_DEFAULT_MAX_CANDIDATES = 24
 export const CHAT_WORLD_TARGET_DEFAULT_MAX_DISTANCE_METERS = 96
 
 export type ChatWorldMultiplayerLayer = {
-  readonly entities: ReadonlyArray<TrainingRunEntityDefinition>
+  readonly entities: ReadonlyArray<ChatWorldVisualEntityDefinition>
   readonly remoteAvatars: ReadonlyArray<TrainingRunRemoteAvatarDefinition>
 }
+
+type ChatWorldGatewayLane =
+  ChatWorldMultiplayerProjection["gateways"][number]["lane"]
+
+export type ChatWorldVisualEntityDefinition = TrainingRunEntityDefinition &
+  Readonly<{
+    gatewayLane?: ChatWorldGatewayLane
+    iconRecipe?: VerseIconRecipe
+    visualKind?: "default" | "gateway_portal"
+  }>
 
 export type ChatWorldMultiplayerLayerOptions = Readonly<{
   localAvatarRef?: string | null
@@ -350,7 +376,7 @@ export const chatWorldMultiplayerLayer = (
 ): ChatWorldMultiplayerLayer => {
   if (world?.connected !== true) return { entities: [], remoteAvatars: [] }
 
-  const entities: TrainingRunEntityDefinition[] = []
+  const entities: ChatWorldVisualEntityDefinition[] = []
   const remoteAvatars: TrainingRunRemoteAvatarDefinition[] = []
   const nowMs = options.nowMs ?? world.projectedAtMs
   const staleAfterMs = options.staleAfterMs ?? CHAT_WORLD_REMOTE_AVATAR_STALE_AFTER_MS
@@ -365,6 +391,7 @@ export const chatWorldMultiplayerLayer = (
       label: station.label,
       status: "verified",
       position,
+      iconRecipe: verseIconRecipeForId(station.pylonRef || "pylon"),
     })
   }
 
@@ -418,7 +445,7 @@ const indexEndpoint = (
 // Build an exact-ref endpoint index from the already-projected public world rows.
 // Stations map by pylonRef; avatars map by both actorRef and avatarRef. The
 // fallback ring below remains explicitly labeled, so unknown endpoints never
-// pretend to have a real SpacetimeDB position.
+// pretend to have a real Cloudflare world position.
 export const chatWorldPaymentEndpointIndex = (
   world: ChatWorldMultiplayerProjection | null | undefined,
 ): ChatWorldPaymentEndpointIndex => {
@@ -435,6 +462,18 @@ export const chatWorldPaymentEndpointIndex = (
       source: "station",
     }
     indexEndpoint(index, station.pylonRef, endpoint)
+  }
+
+  for (const gateway of world.gateways) {
+    const position = vectorFromXYZ(gateway.x, gateway.y, gateway.z)
+    if (position === null) continue
+    const endpoint: ChatWorldPaymentEndpoint = {
+      ref: gateway.gatewayRef,
+      label: gateway.label,
+      position,
+      source: "gateway",
+    }
+    indexEndpoint(index, gateway.gatewayRef, endpoint)
   }
 
   for (const agent of world.agents) {
@@ -495,10 +534,12 @@ const endpointDetail = (
 }
 
 export type ChatWorldPaymentLayer = {
-  readonly entities: ReadonlyArray<TrainingRunEntityDefinition>
+  readonly entities: ReadonlyArray<ChatWorldVisualEntityDefinition>
   readonly beams: ReadonlyArray<TrainingRunBeamDefinition>
   readonly bursts: ReadonlyArray<TrainingRunBurstDefinition>
 }
+
+export type ChatWorldInferenceLayer = ChatWorldPaymentLayer
 
 // Build the evidence-bound payment layer from the active particles. Stable ids
 // per particle keep positions steady across re-renders; the sourceRefs ride both
@@ -512,7 +553,7 @@ export const chatWorldPaymentLayer = (
   const renderable = particles.filter((p) => p.sourceRefs.length > 0)
   const endpoints = chatWorldPaymentEndpointIndex(world)
 
-  const entityById = new Map<string, TrainingRunEntityDefinition>()
+  const entityById = new Map<string, ChatWorldVisualEntityDefinition>()
   const beams: TrainingRunBeamDefinition[] = []
   const bursts: TrainingRunBurstDefinition[] = []
 
@@ -538,6 +579,7 @@ export const chatWorldPaymentLayer = (
         label: endpointLabel(fromEndpoint, "from"),
         detail: endpointDetail(primaryRef, fromEndpoint, particle, "from"),
         position: fromEndpoint.position,
+        iconRecipe: verseIconRecipeForId(fromEndpoint.ref),
       })
     }
     if (!entityById.has(toId)) {
@@ -547,6 +589,9 @@ export const chatWorldPaymentLayer = (
         label: endpointLabel(toEndpoint, "to"),
         detail: endpointDetail(primaryRef, toEndpoint, particle, "to"),
         position: toEndpoint.position,
+        iconRecipe: verseIconRecipeForId(
+          particle.realBitcoinMoved ? "zap" : "settlement",
+        ),
       })
     }
 
@@ -565,7 +610,158 @@ export const chatWorldPaymentLayer = (
   return { entities: [...entityById.values()], beams, bursts }
 }
 
-// ── Compose pylons + multiplayer + payments into one visualization object ────
+const inferenceStatus = (
+  verification: ChatWorldMultiplayerProjection["inferenceEvents"][number]["verification"],
+): string => {
+  if (verification === "failed") return "blocked"
+  if (
+    verification === "exact_trace_replay" ||
+    verification === "test_passed"
+  ) {
+    return "verified"
+  }
+  if (verification === "seeded") return "active"
+  return "queued"
+}
+
+const inferenceEndpointFor = (
+  refs: ReadonlyArray<string>,
+  fallback: ChatWorldPaymentEndpoint,
+  endpoints: ChatWorldPaymentEndpointIndex,
+): ChatWorldPaymentEndpoint => {
+  for (const ref of refs) {
+    const endpoint = resolveChatWorldPaymentEndpoint(ref, fallback.position, endpoints)
+    if (endpoint.source !== "fallback") return endpoint
+  }
+  return fallback
+}
+
+const inferenceFallbackPosition = (index: number, total: number): TrainingRunVector =>
+  endpointRingPosition(index + total * 2, Math.max(1, total * 3))
+
+const inferenceSourceRefs = (
+  event: ChatWorldMultiplayerProjection["inferenceEvents"][number],
+): ReadonlyArray<string> => {
+  const out: string[] = []
+  for (const ref of event.sourceRefs) {
+    const trimmed = ref.trim()
+    if (trimmed.length > 0 && !out.includes(trimmed)) out.push(trimmed)
+  }
+  return out
+}
+
+const inferenceMotionSimulated = (refs: ReadonlyArray<string>): boolean =>
+  refs.some((ref) => /\bfixture\b|fixture:|scaffold/i.test(ref))
+
+export const chatWorldInferenceLayer = (
+  world: ChatWorldMultiplayerProjection | null | undefined,
+): ChatWorldInferenceLayer => {
+  if (world?.connected !== true) return { entities: [], beams: [], bursts: [] }
+  const endpoints = chatWorldPaymentEndpointIndex(world)
+  const entityById = new Map<string, ChatWorldVisualEntityDefinition>()
+  const beams: TrainingRunBeamDefinition[] = []
+  const bursts: TrainingRunBurstDefinition[] = []
+
+  for (const gateway of world.gateways) {
+    const position = vectorFromXYZ(gateway.x, gateway.y, gateway.z)
+    if (position === null) continue
+    entityById.set(`${CHAT_WORLD_GATEWAY_NODE_PREFIX}${gateway.gatewayRef}`, {
+      id: `${CHAT_WORLD_GATEWAY_NODE_PREFIX}${gateway.gatewayRef}`,
+      label: gateway.label,
+      detail: `${gateway.providerLabel} · ${gateway.lane} · ${gateway.gatewayRef}`,
+      status: gateway.status === "working" ? "active" : gateway.status,
+      position,
+      iconRecipe: verseIconRecipeForId(`gateway:${gateway.lane}:${gateway.gatewayRef}`),
+      visualKind: "gateway_portal",
+      gatewayLane: gateway.lane,
+    })
+  }
+
+  world.inferenceEvents.forEach((event, index) => {
+    const refs = inferenceSourceRefs(event)
+    if (refs.length === 0) return
+    const fromId = `${CHAT_WORLD_INFERENCE_NODE_PREFIX}${event.eventRef}:from`
+    const toId = `${CHAT_WORLD_INFERENCE_NODE_PREFIX}${event.eventRef}:to`
+    const status = inferenceStatus(event.verification)
+    const fallbackFrom: ChatWorldPaymentEndpoint = {
+      ref: event.requestRef,
+      label: "Khala request",
+      position: inferenceFallbackPosition(index * 2, world.inferenceEvents.length),
+      source: "fallback",
+    }
+    const fallbackTo: ChatWorldPaymentEndpoint = {
+      ref: event.gatewayRef ?? event.route,
+      label: event.gatewayRef === null ? "Khala route" : "Gateway route",
+      position: inferenceFallbackPosition(index * 2 + 1, world.inferenceEvents.length),
+      source: "fallback",
+    }
+    const fromEndpoint = inferenceEndpointFor(event.workerRefs, fallbackFrom, endpoints)
+    const toEndpoint = inferenceEndpointFor(
+      event.gatewayRef === null ? event.workerRefs : [event.gatewayRef, ...event.workerRefs],
+      fallbackTo,
+      endpoints,
+    )
+    const costDetail = event.costMsat === null
+      ? "cost not public"
+      : `${event.costMsat} msat`
+
+    entityById.set(fromId, {
+      id: fromId,
+      label: endpointLabel(fromEndpoint, "from"),
+      detail: `${event.receiptRef} · ${event.model} · ${event.route} · ${fromEndpoint.source}`,
+      status,
+      position: fromEndpoint.position,
+      iconRecipe: verseIconRecipeForId(fromEndpoint.ref),
+    })
+    const toGatewayLane = toEndpoint.source === "gateway"
+      ? world.gateways.find(gateway => gateway.gatewayRef === toEndpoint.ref)?.lane
+      : undefined
+
+    entityById.set(toId, {
+      id: toId,
+      label: endpointLabel(toEndpoint, "to"),
+      detail: `${event.receiptRef} · ${costDetail} · ${toEndpoint.label} · ${toEndpoint.source}`,
+      status,
+      position: toEndpoint.position,
+      iconRecipe: verseIconRecipeForId(
+        toEndpoint.source === "gateway" ? `gateway:${toEndpoint.ref}` : "receipt",
+      ),
+      ...(toGatewayLane === undefined
+        ? {}
+        : {
+            gatewayLane: toGatewayLane,
+            visualKind: "gateway_portal" as const,
+          }),
+      ...(toEndpoint.source === "gateway" && toGatewayLane === undefined
+        ? {
+            visualKind: "gateway_portal" as const,
+          }
+        : {}),
+    })
+
+    const evidence = {
+      motionId: event.eventRef,
+      motionKind: event.gatewayRef === null
+        ? "khala_in_world_inference"
+        : "khala_gateway_inference",
+      sourceRefs: refs,
+      generatedAt: event.generatedAt,
+      simulated: inferenceMotionSimulated(refs),
+    } as const
+    beams.push({ fromId, toId, style: "crackling_arc", ...evidence })
+    if (
+      event.settled ||
+      event.verification === "exact_trace_replay" ||
+      event.verification === "test_passed"
+    ) {
+      bursts.push({ atId: toId, ...evidence })
+    }
+  })
+
+  return { entities: [...entityById.values()], beams, bursts }
+}
+
+// ── Compose pylons + multiplayer + inference + payments into one visualization object ────
 
 export const withChatWorldMultiplayerLayer = (
   base: TrainingRunVisualizationOptions,
@@ -584,6 +780,22 @@ export const withChatWorldMultiplayerLayer = (
       despawnAfterMs: options.despawnAfterMs ?? CHAT_WORLD_REMOTE_AVATAR_DESPAWN_AFTER_MS,
       staleAfterMs: options.staleAfterMs ?? CHAT_WORLD_REMOTE_AVATAR_STALE_AFTER_MS,
     },
+  }
+}
+
+export const withChatWorldInferenceLayer = (
+  base: TrainingRunVisualizationOptions,
+  world: ChatWorldMultiplayerProjection | null | undefined,
+): TrainingRunVisualizationOptions => {
+  const layer = chatWorldInferenceLayer(world)
+  if (layer.entities.length === 0) return base
+  return {
+    ...appendVerseVisualization(base, {
+      entities: layer.entities,
+      beams: layer.beams,
+      bursts: layer.bursts,
+    }),
+    motionPolicy: { ...(base.motionPolicy ?? {}), evidence: "required" },
   }
 }
 

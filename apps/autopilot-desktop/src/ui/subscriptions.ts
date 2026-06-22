@@ -14,6 +14,14 @@
 
 import { Effect, Queue, Stream } from "effect"
 import { Subscription } from "foldkit"
+import {
+  openAgentsDefaultInputProfile,
+  openAgentsInputActionMapFromProfile,
+  openAgentsInputActionSpecById,
+  resolveOpenAgentsKeyboardEventActionBindings,
+  type OpenAgentsInputActionMap,
+  type OpenAgentsInputContext,
+} from "@openagentsinc/input-bindings"
 
 import { setEmit } from "./bridge.js"
 import {
@@ -31,10 +39,11 @@ import type { Model } from "./model.js"
 import {
   subscribePaymentParticles,
   subscribePylonScene,
-  subscribeSpacetimeWorld,
+  subscribeCloudflareWorld,
 } from "./chat-world-subscriptions.js"
 import {
   chatWorldBuildFlags,
+  chatWorldCharacterId,
   chatWorldMultiplayerFlag,
 } from "../shared/chat-world-flags.js"
 
@@ -52,58 +61,142 @@ const inboundStream: Stream.Stream<Message> = Stream.callback<Message>((queue) =
   ).pipe(Effect.flatMap(() => Effect.never)),
 )
 
-// #5465: the keyboard shortcut layer. A persistent `keydown` listener on the
-// webview window turns each key press into a single raw `PressedKey` message;
-// the PURE reducer (update.ts) decides what it means against the active pane +
-// palette state, so the whole shortcut layer is unit-testable without a DOM.
+// #5465/#5946: the keyboard shortcut layer. A persistent `keydown` listener on
+// the webview window turns key presses into the existing raw `PressedKey`
+// compatibility message; the PURE reducer (update.ts) still decides what that
+// means against the active pane + palette state.
 //
-// We translate only the keys the reducer cares about (Cmd/Ctrl-K,
-// Cmd/Ctrl-Enter, Escape, Arrow Up/Down, Enter, j/k) and `preventDefault` those
-// so the webview never swallows them; everything else passes through untouched.
-// `inEditable` reflects focus so the reducer can ignore bare nav keys mid-typing.
-// The hotbar's numbered cells are intentionally inert, so digit keys are not
-// captured here.
-const KEYBOARD_KEYS = new Set([
-  "k",
-  "Enter",
-  "Escape",
-  "ArrowUp",
-  "ArrowDown",
-  "j",
+// The important change from the old path is that forwarding is now driven by
+// the shared input action profile rather than a hand-written raw-key whitelist.
+// That keeps the real DOM path aligned with the tested action catalog; for
+// example, Cmd/Ctrl-Shift-V now resolves because `hud.toggle_code_overlay` is in
+// the profile instead of hoping `"v"` was remembered in a static Set.
+const ACTION_BAR_SLOT_ACTION_IDS = Array.from(
+  { length: 10 },
+  (_, index) => `action_bar.slot_${index + 1}`,
+)
+
+const isActionBarSlotActionId = (actionId: string): boolean =>
+  actionId.startsWith("action_bar.slot_")
+
+const DESKTOP_SHORTCUT_ACTION_IDS = new Set([
+  ...ACTION_BAR_SLOT_ACTION_IDS,
+  "app.command_palette",
+  "app.submit",
+  "app.pane_next",
+  "app.pane_previous",
+  "hud.toggle_code_overlay",
+  "palette.close",
+  "palette.run",
+  "palette.move_up",
+  "palette.move_down",
 ])
+
+const PALETTE_ACTION_IDS = new Set([
+  "palette.close",
+  "palette.run",
+  "palette.move_up",
+  "palette.move_down",
+])
+
+const desktopDefaultInputActionMap = openAgentsInputActionMapFromProfile(
+  openAgentsDefaultInputProfile,
+)
 
 export const keyboardForwardDecision = (input: {
   readonly key: string
+  readonly code?: string
   readonly meta: boolean
   readonly ctrl: boolean
+  readonly shift?: boolean
+  readonly alt?: boolean
   readonly inEditable: boolean
-}): { readonly forward: boolean; readonly preventDefault: boolean } => {
-  const modified = input.meta || input.ctrl
+}, actionMap: OpenAgentsInputActionMap = desktopDefaultInputActionMap): {
+  readonly forward: boolean
+  readonly preventDefault: boolean
+} => {
   const key = input.key
+  const actionIds = resolveDesktopKeyboardActionIds(input, actionMap)
   if (input.inEditable) {
-    const paletteEditingKey = !modified && (
-      key === "Escape" || key === "ArrowUp" || key === "ArrowDown" || key === "Enter"
+    const paletteEditingAction = actionIds.some((actionId) =>
+      PALETTE_ACTION_IDS.has(actionId)
     )
     return {
-      forward: KEYBOARD_KEYS.has(key) && paletteEditingKey,
-      preventDefault: key === "Escape",
+      forward: paletteEditingAction,
+      preventDefault: paletteEditingAction && key === "Escape",
     }
   }
-  const modifiedShortcut = modified && (
-    key.toLowerCase() === "k" || key === "Enter"
+  const modifiedShortcut = actionIds.some((actionId) =>
+    actionId === "app.command_palette" ||
+    actionId === "app.submit" ||
+    actionId === "hud.toggle_code_overlay"
   )
-  const escapeKey = key === "Escape"
-  const paletteKey = !modified && (
-    key === "ArrowUp" || key === "ArrowDown" || key === "Enter"
+  const escapeKey = actionIds.includes("palette.close")
+  const bareNavKey = actionIds.some((actionId) =>
+    actionId === "app.pane_next" || actionId === "app.pane_previous"
   )
-  const bareNavKey = !modified && !input.inEditable && (key === "j" || key === "k")
-  const forward =
-    KEYBOARD_KEYS.has(key) && (modifiedShortcut || escapeKey || paletteKey || bareNavKey)
+  const actionBarSlot = actionIds.some(isActionBarSlotActionId)
+  const forward = actionIds.length > 0
   return {
     forward,
-    preventDefault: forward && (modifiedShortcut || escapeKey || bareNavKey),
+    preventDefault: forward && (modifiedShortcut || escapeKey || bareNavKey || actionBarSlot),
   }
 }
+
+const resolveDesktopKeyboardActionIds = (
+  input: {
+    readonly key: string
+    readonly code?: string
+    readonly meta: boolean
+    readonly ctrl: boolean
+    readonly shift?: boolean
+    readonly alt?: boolean
+    readonly inEditable: boolean
+  },
+  actionMap: OpenAgentsInputActionMap,
+): ReadonlyArray<string> => {
+  const activeContexts = desktopKeyboardContexts(input.inEditable)
+  const event = input.code === undefined
+    ? {
+      key: input.key,
+      metaKey: input.meta,
+      ctrlKey: input.ctrl,
+      shiftKey: input.shift === true,
+      altKey: input.alt === true,
+    }
+    : {
+      key: input.key,
+      code: input.code,
+      metaKey: input.meta,
+      ctrlKey: input.ctrl,
+      shiftKey: input.shift === true,
+      altKey: input.alt === true,
+    }
+  return resolveOpenAgentsKeyboardEventActionBindings(
+    actionMap,
+    event,
+    { allowExtraModifiers: false },
+  )
+    .map((match) => match.actionId)
+    .filter((actionId) => DESKTOP_SHORTCUT_ACTION_IDS.has(actionId))
+    .filter((actionId) => {
+      const spec = openAgentsInputActionSpecById.get(actionId)
+      return spec?.contexts.some((context) => activeContexts.includes(context)) === true
+    })
+}
+
+const desktopKeyboardContexts = (
+  inEditable: boolean,
+): ReadonlyArray<OpenAgentsInputContext> =>
+  inEditable
+    ? ["command_palette"]
+    : [
+        "global",
+        "managed_pane",
+        "command_palette",
+        "verse_explore",
+        "verse_code_overlay",
+      ]
 
 const isEditableTarget = (target: EventTarget | null): boolean => {
   const el = target as { tagName?: string; isContentEditable?: boolean } | null
@@ -123,27 +216,48 @@ const keyboardStream: Stream.Stream<Message> = Stream.callback<Message>((queue) 
       const handler = (raw: unknown): void => {
         const event = raw as {
           key?: string
+          code?: string
           metaKey?: boolean
           ctrlKey?: boolean
           shiftKey?: boolean
           target?: EventTarget | null
           preventDefault?: () => void
+          stopPropagation?: () => void
+          stopImmediatePropagation?: () => void
         }
         const key = event.key ?? ""
+        const code = event.code
         const meta = event.metaKey ?? false
         const ctrl = event.ctrlKey ?? false
         const inEditable = isEditableTarget(event.target ?? null)
-        // Only forward keys the reducer might act on. Modified keys are limited
-        // to Cmd/Ctrl-K and Cmd/Ctrl-Enter so native edit/movement commands
-        // (Cmd-C/V/X/A/Z, Cmd-arrow, etc.) keep reaching WebKit/AppKit.
-        const decision = keyboardForwardDecision({ key, meta, ctrl, inEditable })
+        const shortcutInput = code === undefined
+          ? {
+              key,
+              meta,
+              ctrl,
+              shift: event.shiftKey ?? false,
+              inEditable,
+            }
+          : {
+              key,
+              code,
+              meta,
+              ctrl,
+              shift: event.shiftKey ?? false,
+              inEditable,
+            }
+        // Only forward actions the reducer might act on. Native edit/movement
+        // commands (Cmd-C/V/X/A/Z, Cmd-arrow, etc.) keep reaching WebKit/AppKit.
+        const decision = keyboardForwardDecision(shortcutInput)
         if (!decision.forward) return
         if (decision.preventDefault) {
           event.preventDefault?.()
+          event.stopPropagation?.()
+          event.stopImmediatePropagation?.()
         }
         Queue.offerUnsafe(
           queue,
-          PressedKey({ key, meta, ctrl, shift: event.shiftKey ?? false, inEditable }),
+          PressedKey(shortcutInput),
         )
         // Palette focus management. The reducer toggles the command palette on
         // Cmd/Ctrl-K (and closes it on Escape / after running a command via
@@ -273,12 +387,17 @@ const chatWorldSubscriptionFlags = () => ({
   CHAT_WORLD_MULTIPLAYER: chatWorldMultiplayerFlag(),
 })
 
-const spacetimeWorldStream: Stream.Stream<Message> = Stream.callback<Message>((queue) =>
+const cloudflareWorldStream: Stream.Stream<Message> = Stream.callback<Message>((queue) =>
   Effect.acquireRelease(
     Effect.sync(() =>
-      subscribeSpacetimeWorld(
+      subscribeCloudflareWorld(
         (world) => Queue.offerUnsafe(queue, GotChatWorldMultiplayer({ world })),
-        { flags: chatWorldSubscriptionFlags() },
+        // Pass the character resolver LAZILY (a getter), not an eager string.
+        // The Bun host injects globalThis.__OA_CHARACTER (chatWorldCharacterId
+        // reads it) and the dom-ready injection may land after this subscription
+        // mounts; resolving at join/move time — after the async Cloudflare world
+        // connect — makes the value deterministic regardless of inject timing.
+        { flags: chatWorldSubscriptionFlags(), characterId: () => chatWorldCharacterId() },
       ),
     ),
     (unsubscribe) => Effect.sync(() => unsubscribe()),
@@ -325,7 +444,7 @@ export const subscriptions = Subscription.make<Model, Message>()(() => ({
   // (no I/O) unless their build flag is on, so flag-OFF behavior is unchanged.
   chatWorldScene: Subscription.persistent(pylonSceneStream),
   chatWorldPayments: Subscription.persistent(paymentParticleStream),
-  chatWorldSpacetime: Subscription.persistent(spacetimeWorldStream),
+  chatWorldCloudflare: Subscription.persistent(cloudflareWorldStream),
   onboardingStatusRefresh: Subscription.persistent(onboardingStatusRefreshStream),
   verseTrainingProjection: Subscription.persistent(verseTrainingProjectionStream),
 }))

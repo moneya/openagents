@@ -331,6 +331,7 @@ import {
   InferenceAdapterError,
   InferenceProviderRegistry,
 } from './inference/provider-adapter'
+import { makePsionicFabricAdapter } from './inference/psionic-fabric-serve'
 import { handleQuote } from './inference/quote-routes'
 import { stubEchoAdapter } from './inference/stub-echo-adapter'
 import {
@@ -443,6 +444,24 @@ import {
   readOperatorTargetUser,
   readSelectedInferenceCreditTargetUser as readSelectedInferenceCreditTargetUserBase,
 } from './operator-targets'
+import { makeCrmBatchRoutes } from './crm-batch-routes'
+import { makeCrmMcpCatalog } from './crm-mcp'
+import { makeCrmMcpDiscoveryRoutes } from './crm-mcp-discovery-routes'
+import {
+  crmMcpAdminPrincipal,
+  mcpTenantHeader,
+  readMcpBearerToken,
+  resolveCrmMcpGrantPrincipal,
+} from './crm-mcp-grant'
+import { makeCrmMcpGrantRoutes } from './crm-mcp-grant-routes'
+import { makeCrmMcpRoutes } from './crm-mcp-routes'
+import { makeCrmCommandRoutes } from './crm-command-routes'
+import { makeCrmEmailRoutes } from './crm-email-routes'
+import { makeCrmImportRoutes } from './crm-import-routes'
+import { isCrmResendSendEnabled, makeCrmResendSender } from './crm-resend'
+import { makeCrmResendRoutes } from './crm-resend-routes'
+import { makeCrmSendRoutes } from './crm-send-routes'
+import { makeCrmRoutes } from './crm-routes'
 import { makePartnerAgreementRoutes } from './partner-agreement-routes'
 import { PartnerPayoutDispatchError } from './partner-payout-dispatch'
 import { makePartnerPayoutLedgerRoutes } from './partner-payout-ledger-routes'
@@ -597,6 +616,10 @@ import {
   TassadarPerceptaArchitectureReceiptsEndpoint,
   handleTassadarPerceptaArchitectureReceiptsApi,
 } from './tassadar-percepta-architecture-receipts-routes'
+import {
+  TassadarPerceptaCpuTransformTrainingReceiptsEndpoint,
+  handleTassadarPerceptaCpuTransformTrainingReceiptsApi,
+} from './tassadar-percepta-cpu-transform-training-receipts-routes'
 import {
   TassadarReplayRequest,
   runTassadarReplayValidation,
@@ -7061,6 +7084,81 @@ const partnerAgreementRoutes = makePartnerAgreementRoutes<WorkerBindings>({
   requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
 })
 
+const crmRoutes = makeCrmRoutes<WorkerBindings>({
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+})
+
+const crmImportRoutes = makeCrmImportRoutes<WorkerBindings>({
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+})
+
+const crmEmailRoutes = makeCrmEmailRoutes<WorkerBindings>({
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+})
+
+const resolveCrmResendDeps = (env: WorkerBindings) => {
+  const enabled = isCrmResendSendEnabled(
+    (env as { CRM_RESEND_SEND_ENABLED?: string | undefined }).CRM_RESEND_SEND_ENABLED,
+  )
+  const resend = getResendEmailConfig(env)
+  if (resend === undefined) {
+    return { enabled, fromEmail: null, sender: null }
+  }
+  return {
+    enabled,
+    fromEmail: resend.fromEmail,
+    sender: makeCrmResendSender({
+      apiKey: resend.apiKey,
+      replyTo: resend.replyToEmail,
+    }),
+  }
+}
+
+const crmResendRoutes = makeCrmResendRoutes<WorkerBindings>({
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+  resolveResendDeps: resolveCrmResendDeps,
+})
+
+const crmSendRoutes = makeCrmSendRoutes<WorkerBindings>({
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+  resolveResendDeps: resolveCrmResendDeps,
+})
+
+const crmCommandRoutes = makeCrmCommandRoutes<WorkerBindings>({
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+  resolveResendDeps: resolveCrmResendDeps,
+})
+
+const crmBatchRoutes = makeCrmBatchRoutes<WorkerBindings>({
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+  resolveResendDeps: resolveCrmResendDeps,
+})
+
+// CRM MCP server (epic #5991): read-only catalog (#5993) + resources (#5994),
+// authenticated to a bound principal — admin token = full CRM authority on the
+// header/default tenant; a scoped grant (#5995) = its declared authorities +
+// bound tenant. The catalog filters tools/resources by the principal's grants.
+const crmMcpRoutes = makeCrmMcpRoutes<WorkerBindings>({
+  authenticate: async (request, env) => {
+    const isAdmin = await requireAdminApiToken(request, env)
+    if (isAdmin) {
+      return crmMcpAdminPrincipal(mcpTenantHeader(request), currentIsoTimestamp())
+    }
+    const token = readMcpBearerToken(request)
+    if (token === undefined) {
+      return null
+    }
+    return resolveCrmMcpGrantPrincipal(openAgentsDatabase(env), token, currentIsoTimestamp())
+  },
+  catalog: makeCrmMcpCatalog<WorkerBindings>({ resolveResendDeps: resolveCrmResendDeps }),
+})
+
+const crmMcpGrantRoutes = makeCrmMcpGrantRoutes<WorkerBindings>({
+  requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
+})
+
+const crmMcpDiscoveryRoutes = makeCrmMcpDiscoveryRoutes()
+
 const agentScopedGrantRoutes = makeAgentScopedGrantRoutes({
   requireAdminApiToken: (request, env) => requireAdminApiToken(request, env),
   appOrigin: getAppOrigin,
@@ -8075,6 +8173,38 @@ const registerPassthroughAdapters = (
   }
 }
 
+// OpenAgents serving-fabric lane (#5483 / Khala M4 #6012) — the `openagents-
+// network` adapter wired to a Psionic serve transport. The lane is routed AHEAD
+// of passthrough for the OPEN class (model-router.ts), but stays INERT until a
+// LIVE Psionic serve transport is wired: with no transport bound the lane is
+// simply NOT registered, and `dispatchWithOverflow` (which filters the plan to
+// registered adapters) skips it and overflows to passthrough — never a faked
+// serve. The live fabric is owner-gated / Psionic-planned (decentralized-serving
+// -shard-wan.md §7), so no transport is bound here today; the concrete dispatch
+// (ask-plan -> execute -> consume EXACT-PARITY receipt; no parity -> no success)
+// is proven against a local/fake serve in psionic-fabric-serve.test.ts and
+// registers behind this seam with no routing change once a transport lands.
+//
+// The Worker env carries no live fabric serve binding yet, so this narrow env
+// slice has no transport field to read; the function is the activation point a
+// future wiring fills in (mirroring registerPassthroughAdapters). It is a no-op
+// today and keeps the lane honestly skipped.
+type FabricServeEnv = Readonly<Record<string, unknown>>
+
+const registerFabricServeAdapter = (
+  registry: InferenceProviderRegistry,
+  _env: FabricServeEnv,
+): void => {
+  // No live Psionic serve transport is bound in this repo (owner-gated). When a
+  // real transport client lands, build it from the env here and register:
+  //   registry.register(makePsionicFabricAdapter({ transport }))
+  // Until then the lane stays unregistered and routing skips it. The unused
+  // factory import is intentionally referenced so the seam stays type-checked
+  // and the registration path cannot silently rot.
+  void makePsionicFabricAdapter
+  void registry
+}
+
 // Per-request env holder for env-dependent inference adapters. A Cloudflare
 // Worker has no env at module scope, so the module-level adapter registry reads
 // the live env (set by the /v1/chat/completions handler before dispatch) when
@@ -8329,12 +8459,21 @@ const exactRouteRegistry = makeExactRouteRegistry<Env>([
   },
   {
     // Tassadar Percepta executor architecture receipts (#5523 / DE-5 #5528;
-    // promise models.tassadar_percepta_executor.v1, red). Read-only refs and
+    // promise models.tassadar_percepta_executor.v1, planned). Read-only refs and
     // digest projection: clears only the architecture-receipt blocker while
     // Pylon CPU-transform training receipts remain missing. No trained model,
     // inference endpoint, spend, settlement, promotion, or green claim.
     path: TassadarPerceptaArchitectureReceiptsEndpoint,
     handler: request => handleTassadarPerceptaArchitectureReceiptsApi(request),
+  },
+  {
+    // Tassadar Percepta CPU-transform training receipt status (#5523 / DE-5
+    // #5528; promise models.tassadar_percepta_executor.v1, planned). Read-only
+    // status projection: exposes the architecture and Artanis dataset inputs
+    // while every real training receipt gate remains false.
+    path: TassadarPerceptaCpuTransformTrainingReceiptsEndpoint,
+    handler: request =>
+      handleTassadarPerceptaCpuTransformTrainingReceiptsApi(request),
   },
   {
     path: '/api/public/demand-provenance',
@@ -9534,6 +9673,10 @@ const exactRouteRegistry = makeExactRouteRegistry<Env>([
     path: '/v1/chat/completions',
     handler: (request, env) => {
       registerPassthroughAdapters(inferenceProviderRegistry, env)
+      // Serving-fabric lane (#5483 / Khala M4 #6012). No-op today (no live
+      // Psionic serve transport bound); keeps the lane honestly skipped until a
+      // transport lands, with no routing change required to activate it.
+      registerFabricServeAdapter(inferenceProviderRegistry, env)
       // Capture the live env so env-dependent adapters (Vertex #5480) can mint
       // credentials from Worker secrets at call time. INERT regardless: the
       // gateway is gated by INFERENCE_GATEWAY_ENABLED below.
@@ -9949,7 +10092,17 @@ const routeRequest = makeWorkerRouteRequest({
       env,
       ctx,
     ) ??
-    partnerAgreementRoutes.routePartnerAgreementRequest(request, env, ctx),
+    partnerAgreementRoutes.routePartnerAgreementRequest(request, env, ctx) ??
+    crmImportRoutes.routeCrmImportRequest(request, env, ctx) ??
+    crmEmailRoutes.routeCrmEmailRequest(request, env, ctx) ??
+    crmResendRoutes.routeCrmResendRequest(request, env, ctx) ??
+    crmSendRoutes.routeCrmSendRequest(request, env, ctx) ??
+    crmCommandRoutes.routeCrmCommandRequest(request, env, ctx) ??
+    crmBatchRoutes.routeCrmBatchRequest(request, env, ctx) ??
+    crmMcpDiscoveryRoutes.routeCrmMcpDiscoveryRequest(request, env, ctx) ??
+    crmMcpGrantRoutes.routeCrmMcpGrantRequest(request, env, ctx) ??
+    crmMcpRoutes.routeCrmMcpRequest(request, env, ctx) ??
+    crmRoutes.routeCrmRequest(request, env, ctx),
   routeOnboardingRequest: onboardingRoutes.routeOnboardingRequest,
   routeNexusPylonVisibilityRequest:
     nexusPylonVisibilityRoutes.routeNexusPylonVisibilityRequest,

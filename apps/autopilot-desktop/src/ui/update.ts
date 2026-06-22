@@ -37,6 +37,7 @@ import {
   PublishVerseLocalPose,
   QueueTrainingCloseout,
   QueueTrainingLaunch,
+  PersistInputProfile,
   PersistPreferences,
   ReconcileTrainingWindow,
   RemoveManagedAccount,
@@ -103,6 +104,14 @@ import {
   recordLatestVerseLocalPose,
 } from "./verse-local-pose.js"
 import { recordVerseSceneDiagnostic } from "./verse-scene-diagnostics.js"
+import {
+  decodeInputBindingOrNull,
+  inputProfileWithBinding,
+  inputProfileWithResetAction,
+  inputProfileWithResetAll,
+  inputProfileWithResetCategory,
+} from "./input-profile-preferences.js"
+import { safeInputProfileValue } from "./verse-input-bindings.js"
 // HUD H3 (#5501): the pure PaneManager reducer + the layer accessor. update.ts
 // maps each managed-pane Message to one `PaneLayerAction` and stores the result
 // back on the Model. The viewport is read here (real window when present, a fixed
@@ -112,8 +121,12 @@ import {
   BLUEPRINT_CHAT_REPLAY_SIGNATURE_REF,
   BLUEPRINT_CHAT_REPLAY_TOOL_REF,
   Model,
+  modelAppleFmReadiness,
+  modelBuiltInAgentReadiness,
+  modelInferenceGatewayReadiness,
   modelManagedAccounts,
   modelNode,
+  modelCodeModeSync,
   modelPaneLayer,
   type ChatMessage,
   type PaneId,
@@ -129,6 +142,17 @@ import {
   DEFAULT_DESKTOP_PROOF_REPLAY_SLUG,
   type DesktopProofReplayProjection,
 } from "../shared/proof-replays.js"
+import {
+  projectCodeModeSyncSnapshot,
+  type CodeModeSyncAccountRow,
+  type CodeModeSyncSource,
+} from "./code-mode-sync.js"
+import {
+  nextCodeModeAccountOverride,
+  projectCodeModeAccountRoute,
+  type CodeModeAccountRoute,
+  type CodeModeSpawnAdapter,
+} from "./code-mode-account-routing.js"
 import { validatePromiseSurfacingInput } from "../shared/promise-surfacing.js"
 import {
   paymentParticleTsMs,
@@ -138,7 +162,6 @@ import {
 } from "../shared/chat-world-scene.js"
 import { VERSE_TRAINING_NODE_PREFIX } from "../shared/verse-training-visualization.js"
 import type {
-  AccountRow,
   AppleFmReadinessResponse,
   BuiltInAgentReadinessResponse,
   ChooseIdentityResponse,
@@ -165,6 +188,25 @@ type Result = readonly [Model, ReadonlyArray<Command.Command<Message>>]
 
 const noCommands: ReadonlyArray<Command.Command<Message>> = []
 
+const withCodeModeSync = (
+  model: Model,
+  source: CodeModeSyncSource,
+): Model =>
+  Model.make({
+    ...model,
+    codeModeSync: projectCodeModeSyncSnapshot({
+      source,
+      node: modelNode(model),
+      managedAccounts: modelManagedAccounts(model),
+      inferenceGatewayReadiness: modelInferenceGatewayReadiness(model),
+      builtInAgentReadiness: modelBuiltInAgentReadiness(model),
+      appleFmReadiness: modelAppleFmReadiness(model),
+      selectedSessionRef: model.selectedSessionRef,
+      composerAdapter: model.spawnAdapter,
+      composerAccountRef: model.composerAccountRef,
+    }),
+  })
+
 const verseSceneActive = (model: Model): boolean => {
   const flags = chatWorldBuildFlags()
   return flags.CHAT_WORLD_SCENE && model.pane === "chat" && model.verseEnabled
@@ -175,6 +217,40 @@ const verseCodeControlsEnabled = (model: Model): boolean =>
 
 const verseControlsDisabled = (model: Model): boolean =>
   verseSceneActive(model) && !verseCodeControlsEnabled(model)
+
+const openNewCoderSession = (model: Model): Result => {
+  const codeModeAdapter =
+    model.spawnAdapter === "apple_fm" ? "claude_agent" : model.spawnAdapter
+  return [
+    withCodeModeSync(
+      Model.make({
+        ...model,
+        pane: "chat",
+        verseEnabled: true,
+        verseMode: "code",
+        spawnAdapter: codeModeAdapter,
+        composerAccountRef: null,
+        composerSessionRef: null,
+        composerReply: "",
+        composerTurns: [],
+        composerStatus: { text: "", tone: "idle" },
+        composerPending: false,
+        composerPendingObjective: null,
+        spawnObjective: "",
+        managedAccountsPending: true,
+        managedAccountsStatus: {
+          text:
+            codeModeAdapter === "claude_agent"
+              ? "loading Claude Agent accounts..."
+              : "loading Codex accounts...",
+          tone: "info" as const,
+        },
+      }),
+      "model_tick",
+    ),
+    [LoadManagedAccounts()],
+  ]
+}
 
 // #5730: how many active payment particles the chat-world scene keeps at once.
 // Bounds the live beam/burst count behind chat and the scene-options signature
@@ -560,6 +636,9 @@ const persistPreferencesFor = (model: Model): Command.Command<Message> =>
     gatewayInferenceFallback: model.gatewayInferenceFallback,
   })
 
+const persistInputProfileFor = (model: Model): Command.Command<Message> =>
+  PersistInputProfile({ profile: safeInputProfileValue(model.inputProfile) })
+
 const proofReplayCommandRequestForModel = (
   model: Model,
 ): ProofReplayCommandRequest =>
@@ -604,6 +683,7 @@ const isTrainingPane = (pane: PaneId): boolean =>
 const isNetworkPane = (pane: PaneId): boolean => pane === "network"
 const isBuiltInAgentPane = (pane: PaneId): boolean => pane === "builtin-agent"
 const isSettingsPane = (pane: PaneId): boolean => pane === "settings"
+const isDiagnosticsPane = (pane: PaneId): boolean => pane === "diagnostics"
 // AO-4 (#5445): the onboarding wizard pane refreshes the identity-choice state +
 // the live onboarding chain status whenever it is opened.
 const isOnboardingPane = (pane: PaneId): boolean => pane === "onboarding"
@@ -613,51 +693,100 @@ const isOnboardingPane = (pane: PaneId): boolean => pane === "onboarding"
 const isAccountManagingPane = (pane: PaneId): boolean =>
   pane === "accounts" || pane === "composer" || pane === "spawn" || pane === "settings"
 
+const diagnosticsRefreshCommands = (): ReadonlyArray<Command.Command<Message>> => [
+  LoadManagedAccounts(),
+  LoadInferenceGatewayReadiness(),
+  LoadBuiltInAgentReadiness(),
+  LoadAppleFmReadiness(),
+  LoadInstallReadiness(),
+]
+
 const managedAccountRefPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/
 
-type ComposerSpawnAdapter = "codex" | "claude_agent"
-
-const composerSelectedAccountRow = (
-  model: Model,
-  adapter: ComposerSpawnAdapter,
-): AccountRow | null => {
-  const selected = model.composerAccountRef
-  if (selected === null) return null
-  return (
-    modelNode(model)?.accounts?.find(
-      (row) => row.provider === adapter && row.accountRef === selected,
-    ) ?? null
-  )
+const routeHash = (value: string): string => {
+  let hash = 2166136261
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0")
 }
+
+const routeSafeSegment = (value: string): string =>
+  value
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 96) || "unknown"
+
+const fallbackCodeModeAccountRows = (model: Model): readonly CodeModeSyncAccountRow[] =>
+  (modelNode(model)?.accounts ?? []).map((row) => ({
+    key:
+      row.accountRef !== null
+        ? `${row.provider}:ref:${row.accountRef}`
+        : `${row.provider}:hash:${row.accountRefHash}`,
+    provider: row.provider,
+    accountRef: row.accountRef,
+    accountRefHash: row.accountRefHash,
+    label:
+      row.accountRef !== null
+        ? `${row.provider} ${row.accountRef}`
+        : `${row.provider} default`,
+    selector: row.selector,
+    ready: row.ready,
+    managed: false,
+    live: true,
+    homePresent: null,
+    priority: row.priority,
+    blockerRefs: row.blockerRefs,
+    source: row.selector === "default_home" ? "default_home" : "live_only",
+  }))
+
+const composerRouteWorkspaceRef = (model: Model): string | null => {
+  const sessions = modelCodeModeSync(model)?.sessions ?? modelNode(model)?.sessions ?? []
+  const sessionRef = model.composerSessionRef ?? model.selectedSessionRef
+  const sessionWorkspace =
+    sessionRef === null
+      ? null
+      : (sessions.find((row) => row.sessionRef === sessionRef)?.workspaceRef ?? null)
+  if (sessionWorkspace !== null && sessionWorkspace.trim() !== "") return sessionWorkspace
+  if (model.composerWorkspaceMode === "managed") {
+    const parsed = parseManagedWorktreeRequest({
+      repo: model.composerManagedRepo,
+      baseRef: model.composerManagedBaseRef,
+    })
+    return parsed.ok
+      ? `workspace.github.${routeSafeSegment(parsed.request.fullName)}.${routeSafeSegment(parsed.request.baseRef)}`
+      : null
+  }
+  const path = model.composerRepoPath.trim()
+  return path === "" ? null : `workspace.local.${routeHash(path)}`
+}
+
+const composerAccountRoute = (
+  model: Model,
+  adapter: CodeModeSpawnAdapter,
+): CodeModeAccountRoute =>
+  projectCodeModeAccountRoute({
+    adapter,
+    selectedAccountRef: model.composerAccountRef,
+    accounts: modelCodeModeSync(model)?.accounts ?? fallbackCodeModeAccountRows(model),
+    sessions: modelCodeModeSync(model)?.sessions ?? modelNode(model)?.sessions ?? [],
+    workspaceRef: composerRouteWorkspaceRef(model),
+    allowDefaultHome: true,
+  })
 
 const composerAccountBlocker = (
   model: Model,
-  adapter: ComposerSpawnAdapter,
-): string | null => {
-  const selected = model.composerAccountRef
-  if (selected === null) return null
-  const accounts = modelNode(model)?.accounts ?? null
-  if (accounts === null) return null
-  const row = composerSelectedAccountRow(model, adapter)
-  const label = adapter === "codex" ? "Codex" : "Claude Agent"
-  if (row === null) {
-    return `selected ${label} account "${selected}" is unavailable; choose another account`
-  }
-  if (!row.ready) {
-    return `selected ${label} account "${selected}" is blocked; choose another account`
-  }
-  return null
-}
+  adapter: CodeModeSpawnAdapter,
+): string | null => composerAccountRoute(model, adapter).blocker
 
 const composerAccountRefForAdapter = (
   model: Model,
-  adapter: ComposerSpawnAdapter,
+  adapter: CodeModeSpawnAdapter,
 ): string | null => {
-  const selected = model.composerAccountRef
-  if (selected === null) return null
-  const accounts = modelNode(model)?.accounts ?? null
-  if (accounts === null) return adapter === "codex" ? selected : null
-  return composerSelectedAccountRow(model, adapter)?.ready === true ? selected : null
+  const route = composerAccountRoute(model, adapter)
+  return route.blocker === null ? route.accountRef : null
 }
 
 const onboardingCompletionPane = (
@@ -873,8 +1002,11 @@ export const update = (model: Model, message: Message): Result => {
       // #5466: each poll reconciles the live chat turn's program steps from the
       // real session events (verified only on real terminal evidence).
       return [
-        reconcileShellCodingTurns(
-          reconcileChatTurn(Model.make({ ...model, node: message.node })),
+        withCodeModeSync(
+          reconcileShellCodingTurns(
+            reconcileChatTurn(Model.make({ ...model, node: message.node })),
+          ),
+          "node_state",
         ),
         noCommands,
       ]
@@ -920,7 +1052,7 @@ export const update = (model: Model, message: Message): Result => {
         noCommands,
       ]
     case "GotChatWorldMultiplayer":
-      // #5825: public SpacetimeDB world projection for the Verse. The webview
+      // #5825: public Cloudflare world world projection for the Verse. The webview
       // stores it opaque and the view composes it read-only with training,
       // pylon, and payment layers; reducer never owns world authority.
       return [
@@ -970,6 +1102,80 @@ export const update = (model: Model, message: Message): Result => {
         [PublishVerseLocalPose({ pose: message.pose })],
       ]
     case "SettledVerseLocalPosePublish":
+      return [model, noCommands]
+    case "ChangedInputProfile":
+      return [
+        Model.make({
+          ...model,
+          inputProfile: safeInputProfileValue(message.profile),
+          inputBindingCapture: null,
+        }),
+        noCommands,
+      ]
+    case "StartedInputBindingCapture":
+      return [
+        Model.make({
+          ...model,
+          inputBindingCapture: {
+            actionId: message.actionId,
+            slot: message.slot,
+          },
+        }),
+        noCommands,
+      ]
+    case "CancelledInputBindingCapture":
+      return [
+        Model.make({ ...model, inputBindingCapture: null }),
+        noCommands,
+      ]
+    case "CapturedInputBinding": {
+      const binding = decodeInputBindingOrNull(message.binding)
+      if (binding === null) {
+        return [Model.make({ ...model, inputBindingCapture: null }), noCommands]
+      }
+      const next = Model.make({
+        ...model,
+        inputProfile: inputProfileWithBinding(
+          model.inputProfile,
+          message.actionId,
+          message.slot,
+          binding,
+        ),
+        inputBindingCapture: null,
+      })
+      return [next, [persistInputProfileFor(next)]]
+    }
+    case "ResetInputBinding": {
+      const next = Model.make({
+        ...model,
+        inputProfile: inputProfileWithResetAction(
+          model.inputProfile,
+          message.actionId,
+        ),
+        inputBindingCapture: null,
+      })
+      return [next, [persistInputProfileFor(next)]]
+    }
+    case "ResetInputBindingCategory": {
+      const next = Model.make({
+        ...model,
+        inputProfile: inputProfileWithResetCategory(
+          model.inputProfile,
+          message.category,
+        ),
+        inputBindingCapture: null,
+      })
+      return [next, [persistInputProfileFor(next)]]
+    }
+    case "ResetAllInputBindings": {
+      const next = Model.make({
+        ...model,
+        inputProfile: inputProfileWithResetAll(),
+        inputBindingCapture: null,
+      })
+      return [next, [persistInputProfileFor(next)]]
+    }
+    case "SettledPersistInputProfile":
       return [model, noCommands]
     case "GotNotifications":
       return [Model.make({ ...model, notifications: message.view }), noCommands]
@@ -1079,6 +1285,15 @@ export const update = (model: Model, message: Message): Result => {
                 },
               }
             : {}),
+          ...(isDiagnosticsPane(message.pane)
+            ? {
+                managedAccountsPending: true,
+                managedAccountsStatus: {
+                  text: "loading diagnostics...",
+                  tone: "info" as const,
+                },
+              }
+            : {}),
         }),
         [
           ...(isTrainingPane(message.pane)
@@ -1108,6 +1323,7 @@ export const update = (model: Model, message: Message): Result => {
               // the gateway readiness (credits/hint) on enter alongside accounts.
               [LoadManagedAccounts(), LoadInferenceGatewayReadiness()]
             : noCommands),
+          ...(isDiagnosticsPane(message.pane) ? diagnosticsRefreshCommands() : noCommands),
         ],
       ]
 
@@ -1174,14 +1390,26 @@ export const update = (model: Model, message: Message): Result => {
     // PressedKey is interpreted purely (keyboard.ts) then re-dispatched as an
     // existing Message, so every shortcut reuses a real handler (no no-ops).
     case "PressedKey": {
-      if (verseControlsDisabled(model)) return [model, noCommands]
-      const intent = interpretKey(model, {
-        key: message.key,
-        meta: message.meta,
-        ctrl: message.ctrl,
-        shift: message.shift,
-        inEditable: message.inEditable,
-      })
+      const keyEvent = message.code === undefined
+        ? {
+            key: message.key,
+            meta: message.meta,
+            ctrl: message.ctrl,
+            shift: message.shift,
+            inEditable: message.inEditable,
+          }
+        : {
+            key: message.key,
+            code: message.code,
+            meta: message.meta,
+            ctrl: message.ctrl,
+            shift: message.shift,
+            inEditable: message.inEditable,
+          }
+      const intent = interpretKey(model, keyEvent)
+      if (verseControlsDisabled(model) && intent.kind !== "open-coder-session") {
+        return [model, noCommands]
+      }
       switch (intent.kind) {
         case "none":
           return [model, noCommands]
@@ -1217,19 +1445,24 @@ export const update = (model: Model, message: Message): Result => {
             Model.make({ ...model, verseEnabled: !model.verseEnabled }),
             noCommands,
           ]
+        case "open-coder-session":
+          return openNewCoderSession(model)
       }
     }
 
     case "SelectedSession":
       return [
-        Model.make({
-          ...model,
-          pane: "session-detail",
-          selectedSessionRef: message.sessionRef,
-          sessionDetailView: "overview",
-          expandedEvents: [],
-          selectedDiffFilePath: null,
-        }),
+        withCodeModeSync(
+          Model.make({
+            ...model,
+            pane: "session-detail",
+            selectedSessionRef: message.sessionRef,
+            sessionDetailView: "overview",
+            expandedEvents: [],
+            selectedDiffFilePath: null,
+          }),
+          "model_tick",
+        ),
         noCommands,
       ]
     case "ChangedSessionFilter":
@@ -1292,24 +1525,34 @@ export const update = (model: Model, message: Message): Result => {
     case "ToggleVerse":
       if (verseControlsDisabled(model)) return [model, noCommands]
       return [Model.make({ ...model, verseEnabled: !model.verseEnabled }), noCommands]
+    case "ClickedHotbarNewCoderSession":
+      return openNewCoderSession(model)
     case "ChangedVerseMode": {
       const enteringCode = message.mode === "code" && model.verseMode !== "code"
+      const codeModeAdapter =
+        model.spawnAdapter === "apple_fm" ? "claude_agent" : model.spawnAdapter
       return [
-        Model.make({
-          ...model,
-          verseMode: message.mode,
-          ...(enteringCode
-            ? {
-                spawnAdapter: "codex" as const,
-                composerAccountRef: null,
-                managedAccountsPending: true,
-                managedAccountsStatus: {
-                  text: "loading Codex accounts...",
-                  tone: "info" as const,
-                },
-              }
-            : {}),
-        }),
+        withCodeModeSync(
+          Model.make({
+            ...model,
+            verseMode: message.mode,
+            ...(enteringCode
+              ? {
+                  spawnAdapter: codeModeAdapter,
+                  composerAccountRef: null,
+                  managedAccountsPending: true,
+                  managedAccountsStatus: {
+                    text:
+                      codeModeAdapter === "claude_agent"
+                        ? "loading Claude Agent accounts..."
+                        : "loading Codex accounts...",
+                    tone: "info" as const,
+                  },
+                }
+              : {}),
+          }),
+          "model_tick",
+        ),
         enteringCode ? [LoadManagedAccounts()] : noCommands,
       ]
     }
@@ -1437,21 +1680,24 @@ export const update = (model: Model, message: Message): Result => {
       const projection = message.projection as BuiltInAgentReadinessResponse
       const blockerCount = projection.blockerRefs.length
       return [
-        Model.make({
-          ...model,
-          builtInAgentReadiness: projection,
-          builtInAgentStatus: projection.ok
-            ? {
-                text: `ready · ${projection.meteringLabel}`,
-                tone: "success",
-              }
-            : {
-                text:
-                  projection.error ??
-                  `${blockerCount} blocker${blockerCount === 1 ? "" : "s"}`,
-                tone: projection.error ? "error" : "info",
-              },
-        }),
+        withCodeModeSync(
+          Model.make({
+            ...model,
+            builtInAgentReadiness: projection,
+            builtInAgentStatus: projection.ok
+              ? {
+                  text: `ready · ${projection.meteringLabel}`,
+                  tone: "success",
+                }
+              : {
+                  text:
+                    projection.error ??
+                    `${blockerCount} blocker${blockerCount === 1 ? "" : "s"}`,
+                  tone: projection.error ? "error" : "info",
+                },
+          }),
+          "readiness",
+        ),
         noCommands,
       ]
     }
@@ -1479,23 +1725,26 @@ export const update = (model: Model, message: Message): Result => {
       const projection = message.projection as AppleFmReadinessResponse
       const blockerCount = projection.blockerRefs.length
       return [
-        Model.make({
-          ...model,
-          appleFmReadiness: projection,
-          appleFmPending: false,
-          appleFmStatus: projection.ok
-            ? {
-                text: `ready · ${projection.model}`,
-                tone: "success",
-              }
-            : {
-                text:
-                  projection.error ??
-                  projection.message ??
-                  `${blockerCount} blocker${blockerCount === 1 ? "" : "s"}`,
-                tone: projection.error ? "error" : "info",
-              },
-        }),
+        withCodeModeSync(
+          Model.make({
+            ...model,
+            appleFmReadiness: projection,
+            appleFmPending: false,
+            appleFmStatus: projection.ok
+              ? {
+                  text: `ready · ${projection.model}`,
+                  tone: "success",
+                }
+              : {
+                  text:
+                    projection.error ??
+                    projection.message ??
+                    `${blockerCount} blocker${blockerCount === 1 ? "" : "s"}`,
+                  tone: projection.error ? "error" : "info",
+                },
+          }),
+          "readiness",
+        ),
         noCommands,
       ]
     }
@@ -1504,7 +1753,10 @@ export const update = (model: Model, message: Message): Result => {
       // decision (decideInference) + the composer low-balance hint. No status
       // line of its own — the coding surfaces read it directly off the model.
       return [
-        Model.make({ ...model, inferenceGatewayReadiness: message.projection }),
+        withCodeModeSync(
+          Model.make({ ...model, inferenceGatewayReadiness: message.projection }),
+          "readiness",
+        ),
         noCommands,
       ]
     case "ClickedStartAppleFm":
@@ -2697,6 +2949,7 @@ export const update = (model: Model, message: Message): Result => {
           ...model,
           pane: "composer",
           expandedEvents: [],
+          selectedSessionRef: message.sessionRef,
           composerSessionRef: message.sessionRef,
           composerRepoPath: message.workspaceRef ?? "",
           composerReply: "",
@@ -2811,9 +3064,49 @@ export const update = (model: Model, message: Message): Result => {
       return [Model.make({ ...model, composerReply: message.value }), noCommands]
     case "SelectedComposerAccount":
       return [
-        Model.make({ ...model, composerAccountRef: message.accountRef }),
+        withCodeModeSync(
+          Model.make({ ...model, composerAccountRef: message.accountRef }),
+          "model_tick",
+        ),
         noCommands,
       ]
+    case "ClickedOverrideComposerAccountRoute": {
+      if (model.spawnAdapter === "apple_fm") return [model, noCommands]
+      const override = nextCodeModeAccountOverride({
+        adapter: model.spawnAdapter,
+        selectedAccountRef: model.composerAccountRef,
+        accounts: modelCodeModeSync(model)?.accounts ?? fallbackCodeModeAccountRows(model),
+        sessions: modelCodeModeSync(model)?.sessions ?? modelNode(model)?.sessions ?? [],
+        workspaceRef: composerRouteWorkspaceRef(model),
+        allowDefaultHome: true,
+      })
+      if (override === null) {
+        return [
+          Model.make({
+            ...model,
+            composerStatus: {
+              text: "no alternate account route is ready",
+              tone: "error",
+            },
+          }),
+          noCommands,
+        ]
+      }
+      return [
+        withCodeModeSync(
+          Model.make({
+            ...model,
+            composerAccountRef: override.accountRef,
+            composerStatus: {
+              text: `next run will use ${override.label}`,
+              tone: "info",
+            },
+          }),
+          "model_tick",
+        ),
+        noCommands,
+      ]
+    }
     // #5471: repo / worktree picker inputs.
     case "ChangedComposerWorkspaceMode":
       return [
@@ -3110,6 +3403,7 @@ export const update = (model: Model, message: Message): Result => {
           ...model,
           composerPending: false,
           composerSessionRef: message.sessionRef,
+          selectedSessionRef: message.sessionRef,
           composerStatus: { text: "running — streaming transcript", tone: "success" },
           // First turn clears the objective box so the form is reply-ready.
           spawnObjective: "",
@@ -3483,7 +3777,10 @@ export const update = (model: Model, message: Message): Result => {
         const accountCommands = isAccountManagingPane(message.pane)
           ? [LoadManagedAccounts(), LoadInferenceGatewayReadiness()]
           : noCommands
-        return [opened, [...commands, ...accountCommands]]
+        const diagnosticCommands = isDiagnosticsPane(message.pane)
+          ? diagnosticsRefreshCommands()
+          : noCommands
+        return [opened, [...commands, ...accountCommands, ...diagnosticCommands]]
       }
     case "ClosedManagedPane":
       return applyPaneLayerAction(model, { kind: "close", paneId: message.paneId })
@@ -3528,14 +3825,17 @@ export const update = (model: Model, message: Message): Result => {
         error?: string
       }
       return [
-        Model.make({
-          ...model,
-          managedAccounts: message.projection,
-          managedAccountsPending: false,
-          managedAccountsStatus: projection.ok
-            ? { text: "", tone: "idle" }
-            : { text: projection.error ?? "could not load accounts", tone: "error" },
-        }),
+        withCodeModeSync(
+          Model.make({
+            ...model,
+            managedAccounts: message.projection,
+            managedAccountsPending: false,
+            managedAccountsStatus: projection.ok
+              ? { text: "", tone: "idle" }
+              : { text: projection.error ?? "could not load accounts", tone: "error" },
+          }),
+          "managed_accounts",
+        ),
         noCommands,
       ]
     }
@@ -3647,17 +3947,20 @@ export const update = (model: Model, message: Message): Result => {
       // A successful mutation returns the refreshed list; clear the add-form on
       // success so the surface is ready for the next entry.
       return [
-        Model.make({
-          ...model,
-          managedAccounts: message.projection,
-          managedAccountsPending: false,
-          managedAccountsStatus: projection.ok
-            ? { text: "saved", tone: "success" }
-            : { text: projection.error ?? "account update failed", tone: "error" },
-          ...(projection.ok
-            ? { addAccountRef: "", addAccountHome: "", addAccountPriority: "" }
-            : {}),
-        }),
+        withCodeModeSync(
+          Model.make({
+            ...model,
+            managedAccounts: message.projection,
+            managedAccountsPending: false,
+            managedAccountsStatus: projection.ok
+              ? { text: "saved", tone: "success" }
+              : { text: projection.error ?? "account update failed", tone: "error" },
+            ...(projection.ok
+              ? { addAccountRef: "", addAccountHome: "", addAccountPriority: "" }
+              : {}),
+          }),
+          "account_mutation",
+        ),
         noCommands,
       ]
     }

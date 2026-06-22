@@ -1002,6 +1002,24 @@ Acceptance:
 
 ### VCODE-12 - Add The Codex Account And Session Sync Loop
 
+Implemented on 2026-06-21. `apps/autopilot-desktop/src/ui/code-mode-sync.ts`
+now builds one public-safe `CodeModeSyncSnapshot` from live node state,
+managed `dev.accounts`, session event tails, retained artifact stats,
+pending decisions, inference-gateway readiness, built-in agent quota, and
+Apple FM readiness. The reducer refreshes that snapshot on `GotNodeState`,
+managed-account refresh/mutation, readiness responses, selected-session
+changes, selected-account changes, and the code-mode toggle. Sessions, Swarm,
+Agent Stream, Decisions, Diff/Artifacts, Terminal/Log, Composer account
+picker, account management, and the Verse code dock now consume this same
+snapshot with raw node-state fallback during startup. The snapshot de-dupes
+sessions/events/accounts by stable refs and emits repair diagnostics for
+failed registry loads, managed-only accounts waiting for live readiness,
+blocked accounts, unavailable selected account/session, low gateway balance,
+quota exhaustion, and readiness failures. `tests/code-mode-sync.test.ts`
+proves account registry changes update picker rows and diagnostics without a
+reload, and a single node-state tick updates Sessions, Agent Stream,
+Decisions, and Diff/Artifacts together.
+
 Build:
 
 - Sync managed accounts, node state, session list, event stream, transcript
@@ -1019,6 +1037,20 @@ Acceptance:
 
 ### VCODE-13 - Add Multi-Codex Account Routing Defaults
 
+Implemented on 2026-06-21. `apps/autopilot-desktop/src/ui/code-mode-account-routing.ts`
+now owns the deterministic account-route projection used by Composer, batch,
+chat-spawn, shell coding, and the Verse code dock. The precedence is explicit
+selected account, last-used account for the safe workspace ref, managed priority,
+then default home only when that fallback is allowed. Explicit blocked or
+unavailable accounts produce a blocker and never fall through to another route.
+The Composer context and Verse dock show the chosen route before spawn, with
+route data attributes limited to the route source and a short account-hash
+tail. `ClickedOverrideComposerAccountRoute` cycles the same task to the next
+ready account/default route without changing the objective or spawning
+implicitly. `tests/code-mode-account-routing.test.ts` covers precedence,
+determinism, override cycling, and route-evidence redaction; Composer reducer
+tests prove priority and last-used routes reach `session.spawn`.
+
 Build:
 
 - Define routing precedence: explicit selected account, last-used account for
@@ -1033,6 +1065,22 @@ Acceptance:
 - Route decisions store only redacted account refs/hashes in session evidence.
 
 ### VCODE-14 - Add Code-Mode Host Readiness And Diagnostics
+
+Implemented on 2026-06-21. `apps/autopilot-desktop/src/ui/host-diagnostics-projection.ts`
+now projects one public-safe diagnostics panel from node-state, the code-mode
+sync snapshot, bridge launch lifecycle, and retained Verse scene diagnostics.
+The new Diagnostics pane is a Code destination and managed pane leaf; opening
+it refreshes managed accounts plus Codex, install, gateway, built-in agent, and
+Apple FM readiness inputs. Rows cover Pylon node state, Bun bridge status,
+Codex account readiness/blockers, stream-vs-poll health, transcript event-tail
+persistence, scene remount/black-frame counters, visualization key churn,
+mouselook camera-control events, and local-pose samples. The export payload is
+safe to paste by default: it shortens account/session refs, removes local paths,
+redacts secret-shaped tokens, and includes only bounded sanitized scene-event
+tails. `tests/host-diagnostics-projection.test.ts` covers the projection,
+public-safe export rendering, and reducer refresh commands, while the nav,
+black-screen, and code-sync regressions keep the new pane reachable without
+reopening the global HUD.
 
 Build:
 
@@ -1065,6 +1113,32 @@ Acceptance:
 - It produces logs and screenshots useful for debugging failures.
 - It becomes the gate before claiming Verse coding mode is ready.
 
+Implementation status, 2026-06-21:
+
+- Done in `apps/autopilot-desktop/scripts/verse-launch-smoke.ts`. The existing
+  packaged Verse launch smoke now enters code mode through a gated
+  `window.__OA_DESKTOP_SMOKE__` hook, selects a controlled Codex account,
+  opens composer/sessions/decisions/diff/terminal/diagnostics panes, injects a
+  controlled running Codex node state, captures overlay screenshots, and then
+  drags/wheels the scene from an uncovered canvas point to prove the Verse host
+  keeps accepting camera input.
+- The same script now accepts `AUTOPILOT_DESKTOP_SMOKE_URL` for dev-app runs
+  and uses the packaged app path when the variable is absent. Packaged proof is
+  part of `bun run smoke:verse-launch`; `bun run proof:verse-coding-overlay`
+  is an explicit alias for the same gate.
+- The smoke fails on missing stream rows, missing approvals, missing diff or
+  terminal panes, public-unsafe diagnostics export text, active scene remounts,
+  black-frame events, or lost camera-control diagnostics during overlay input.
+  It writes `verse-coding-overlay-smoke.png` and
+  `verse-coding-overlay-after-scene-input.png` alongside the existing first
+  render/movement/mouselook screenshots.
+- The smoke exposed a partial proof-artifact crash in the diff-artifact pane:
+  `artifactBrowserSections` assumed `deviationRefs` was always present.
+  `apps/autopilot-desktop/src/ui/helpers.ts` now treats missing deviation refs
+  as an empty list, and
+  `apps/autopilot-desktop/tests/diff-artifacts-pane.test.ts` covers the
+  regression.
+
 ### VCODE-16 - Extend To Claude Agent And Fable After Codex Is Green
 
 Build:
@@ -1080,6 +1154,27 @@ Acceptance:
 - Fable review is visibly a review/planning lane unless configured as an
   implementation adapter.
 - Non-Codex provider claims stay scoped to implemented, tested behavior.
+
+Implementation status, 2026-06-21:
+
+- Done for the shared Claude Agent UI contract in Autopilot Desktop. The
+  code-mode sync projection now carries the active composer adapter, so a
+  selected Claude Agent account is validated against Claude Agent rows instead
+  of the previous Codex-only diagnostic. Apple FM remains outside per-account
+  routing.
+- The Verse code-mode account inventory now follows the active coding adapter:
+  Codex still renders the Codex account list, while Claude Agent renders
+  `Claude Agent accounts`, uses the same selected-account state, and exposes
+  the same public-safe provider/ref/state data attributes for smoke tests.
+- `apps/autopilot-desktop/tests/code-mode-sync.test.ts` now proves a Claude
+  Agent session can flow through the same account, stream, approval,
+  diff/artifact, diagnostics, and Verse inventory shapes. The Codex route tests
+  remain intact, and `apps/autopilot-desktop/tests/code-mode-account-routing.test.ts`
+  adds a Claude Agent routing case to prevent Codex-account fallback.
+- This does not claim a new Claude Agent execution runtime beyond what the
+  existing bridge already supports. It makes the Verse coding panes provider
+  neutral for the tested shared projection contract and keeps Codex as the
+  reference smoke path.
 
 ## 12. Bottom Line
 

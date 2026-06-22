@@ -4,16 +4,17 @@ import {
   createVerseMultiplayerClient,
   parseActivityStreamData,
   publishActiveVerseLocalPose,
-  publishSpacetimeAvatarPosition,
+  publishCloudflareAvatarPosition,
   subscribePaymentParticles,
   subscribePylonScene,
-  subscribeSpacetimeWorld,
+  subscribeCloudflareWorld,
 } from "../src/ui/chat-world-subscriptions"
 import type {
   ChatWorldPylonScene,
   PaymentParticle,
 } from "../src/shared/chat-world-scene"
 import {
+  chatWorldDesktopAvatarRef,
   chatWorldRegionRefForRun,
   type ChatWorldMultiplayerProjection,
 } from "../src/shared/chat-world-multiplayer"
@@ -291,10 +292,10 @@ describe("subscribePaymentParticles (flag-gated, evidence-bound)", () => {
   })
 })
 
-describe("subscribeSpacetimeWorld", () => {
+describe("subscribeCloudflareWorld", () => {
   test("noop when CHAT_WORLD_MULTIPLAYER is off", () => {
     let connected = 0
-    const stop = subscribeSpacetimeWorld(() => {}, {
+    const stop = subscribeCloudflareWorld(() => {}, {
       flags: { CHAT_WORLD_MULTIPLAYER: false },
       connect: () => {
         connected += 1
@@ -332,7 +333,7 @@ describe("subscribeSpacetimeWorld", () => {
     let tokenRead: string | null = null
     let tokenWritten: string | null = null
 
-    const stop = subscribeSpacetimeWorld((world) => worlds.push(world), {
+    const stop = subscribeCloudflareWorld((world) => worlds.push(world), {
       flags: { CHAT_WORLD_MULTIPLAYER: true },
       runRef,
       nowMs: () => 1_000,
@@ -381,7 +382,7 @@ describe("subscribeSpacetimeWorld", () => {
       },
     })
 
-    expect(tokenRead).toBe("openagents.world.spacetimedb.token.v1")
+    expect(tokenRead).toBe("openagents.world.cloudflare.session.v1")
     expect(tokenWritten).toBe("fresh-token")
     expect(capturedQueries).toContain(
       `SELECT * FROM world_region WHERE region_ref = '${regionRef}'`,
@@ -406,6 +407,7 @@ describe("subscribeSpacetimeWorld", () => {
     expect(joins).toEqual([{
       regionRef,
       displayName: "Local Pylon",
+      characterId: "main",
     }])
 
     rows.avatarPosition.insert({
@@ -421,9 +423,192 @@ describe("subscribeSpacetimeWorld", () => {
     expect(worlds.length).toBeGreaterThanOrEqual(2)
 
     stop()
-    expect(leaves).toEqual([{ regionRef }])
+    expect(leaves).toEqual([{ regionRef, characterId: "main" }])
     expect(unsubscribed).toBe(true)
     expect(disconnected).toBe(true)
+  })
+
+  test("resolves the characterId LAZILY at join time, so a late OA_CHARACTER injection wins", () => {
+    // Regression for the webview-plumbing bug: the Bun host injects
+    // globalThis.__OA_CHARACTER (read by chatWorldCharacterId), and that
+    // injection may land AFTER the subscription mounts. The subscription must
+    // therefore read the character via a getter at join/move time, not capture
+    // it once at construction. Here we pass a getter, then set the value AFTER
+    // constructing the subscription but BEFORE applied()/join fires, and assert
+    // the join (and the self-filter key) use the late value, not a stale capture.
+    const joins: unknown[] = []
+    const leaves: unknown[] = []
+    const rows = fakeWorldRows()
+    let applied: (() => void) | null = null
+    const worlds: ChatWorldMultiplayerProjection[] = []
+    const identityHex = "1122334455667788990011223344556677"
+
+    let liveCharacter: string | null = "main"
+    const stop = subscribeCloudflareWorld((world) => worlds.push(world), {
+      flags: { CHAT_WORLD_MULTIPLAYER: true },
+      runRef,
+      nowMs: () => 1_000,
+      // Lazy getter, exactly like the real wiring (() => chatWorldCharacterId()).
+      characterId: () => liveCharacter,
+      storage: { getItem: () => null, setItem: () => {} },
+      connect: (input) => {
+        input.onConnected("tok", identityHex)
+        const builder = {
+          onApplied: (cb: () => void) => {
+            applied = cb
+            return builder
+          },
+          onError: () => builder,
+          subscribe: () => ({ unsubscribe: () => {} }),
+        }
+        return {
+          db: rows,
+          reducers: {
+            joinRegion: (args: unknown) => joins.push(args),
+            leaveRegion: (args: unknown) => leaves.push(args),
+          },
+          subscriptionBuilder: () => builder,
+          disconnect: () => {},
+        }
+      },
+    })
+
+    // The injection lands AFTER mount, BEFORE join. A stale eager capture would
+    // still say "main"; the lazy getter must observe "alt".
+    liveCharacter = "alt"
+    applied?.()
+
+    expect(joins).toEqual([{
+      regionRef,
+      displayName: "Autopilot Desktop",
+      characterId: "alt",
+    }])
+    // The self-filter key for this instance must use the SAME late value.
+    expect(worlds.at(-1)!.localAvatarRef).toBe(
+      chatWorldDesktopAvatarRef(identityHex, "alt"),
+    )
+
+    stop()
+    expect(leaves).toEqual([{ regionRef, characterId: "alt" }])
+  })
+
+  test("two distinct resolved character ids produce two distinct avatar / self-filter keys", () => {
+    // Two instances on the SAME account but different OA_CHARACTER values must
+    // become two distinct, mutually-visible avatars (distinct self-filter keys).
+    const identityHex = "00ff112233445566778899aabbccddee"
+    const mainRef = chatWorldDesktopAvatarRef(identityHex, "main")
+    const altRef = chatWorldDesktopAvatarRef(identityHex, "alt")
+    expect(mainRef).not.toBe(altRef)
+
+    const keyFor = (character: string): string | null => {
+      const rows = fakeWorldRows()
+      let applied: (() => void) | null = null
+      const worlds: ChatWorldMultiplayerProjection[] = []
+      const stop = subscribeCloudflareWorld((world) => worlds.push(world), {
+        flags: { CHAT_WORLD_MULTIPLAYER: true },
+        runRef,
+        nowMs: () => 1_000,
+        characterId: character,
+        storage: { getItem: () => null, setItem: () => {} },
+        connect: (input) => {
+          input.onConnected("tok", identityHex)
+          const builder = {
+            onApplied: (cb: () => void) => {
+              applied = cb
+              return builder
+            },
+            onError: () => builder,
+            subscribe: () => ({ unsubscribe: () => {} }),
+          }
+          return {
+            db: rows,
+            reducers: { joinRegion: () => {}, leaveRegion: () => {} },
+            subscriptionBuilder: () => builder,
+            disconnect: () => {},
+          }
+        },
+      })
+      applied?.()
+      const key = worlds.at(-1)!.localAvatarRef
+      stop()
+      return key
+    }
+
+    expect(keyFor("main")).toBe(mainRef)
+    expect(keyFor("alt")).toBe(altRef)
+    expect(keyFor("main")).not.toBe(keyFor("alt"))
+  })
+
+  test("self-filters only the local character once the identity is known, rendering other characters of the same account", () => {
+    // MMO model: one account (identity) fields many characters. This instance
+    // is OA_CHARACTER=main; the SAME account also runs OA_CHARACTER=alt in a
+    // second instance. Both characters' avatars exist in the world. The scene
+    // must hide ONLY this instance's own character (main) and render every other
+    // avatar — including the same account's "alt" character and unrelated
+    // remote avatars.
+    const identityHex = "00ff112233445566778899aabbccddee"
+    const localRef = chatWorldDesktopAvatarRef(identityHex, "main")
+    const sameAccountAltRef = chatWorldDesktopAvatarRef(identityHex, "alt")
+    const remoteRef = chatWorldDesktopAvatarRef("99887766554433221100", "main")
+
+    const rows = fakeWorldRows()
+    rows.agentAvatar = new FakeTable([
+      { avatarRef: localRef, actorRef: "a", actorKind: "guest", displayName: "Me (main)" },
+      { avatarRef: sameAccountAltRef, actorRef: "b", actorKind: "guest", displayName: "Me (alt)" },
+      { avatarRef: remoteRef, actorRef: "c", actorKind: "guest", displayName: "Someone else" },
+    ])
+    rows.avatarPosition = new FakeTable([
+      { avatarRef: localRef, regionRef, positionX: 0, positionY: 0, positionZ: 0, yaw: 0, movementMode: "idle", lastSeenEpochMs: 1_000 },
+      { avatarRef: sameAccountAltRef, regionRef, positionX: 2, positionY: 0, positionZ: 2, yaw: 0, movementMode: "idle", lastSeenEpochMs: 1_000 },
+      { avatarRef: remoteRef, regionRef, positionX: 4, positionY: 0, positionZ: 4, yaw: 0, movementMode: "idle", lastSeenEpochMs: 1_000 },
+    ])
+
+    const worlds: ChatWorldMultiplayerProjection[] = []
+    let applied: (() => void) | null = null
+
+    const stop = subscribeCloudflareWorld((world) => worlds.push(world), {
+      flags: { CHAT_WORLD_MULTIPLAYER: true },
+      runRef,
+      nowMs: () => 1_000,
+      characterId: "main",
+      storage: { getItem: () => null, setItem: () => {} },
+      connect: (input) => {
+        // onConnect yields BOTH the token and the live account identity.
+        input.onConnected("tok", identityHex)
+        const builder = {
+          onApplied: (cb: () => void) => {
+            applied = cb
+            return builder
+          },
+          onError: () => builder,
+          subscribe: () => ({ unsubscribe: () => {} }),
+        }
+        return {
+          db: rows,
+          reducers: { joinRegion: () => {}, leaveRegion: () => {} },
+          subscriptionBuilder: () => builder,
+          disconnect: () => {},
+        }
+      },
+    })
+
+    applied?.()
+    const latest = worlds.at(-1)!
+    // Projection carries this instance's own per-character key.
+    expect(latest.localAvatarRef).toBe(localRef)
+
+    // The scene self-filters on that key: local character hidden, the same
+    // account's other character and the unrelated remote both rendered.
+    const layer = chatWorldMultiplayerLayer(latest, {
+      localAvatarRef: latest.localAvatarRef,
+      nowMs: 1_000,
+    })
+    const rendered = layer.remoteAvatars.map((avatar) => avatar.id)
+    expect(rendered).not.toContain(localRef)
+    expect(rendered).toContain(sameAccountAltRef)
+    expect(rendered).toContain(remoteRef)
+
+    stop()
   })
 
   test("dispatches disconnected fallback and removes stale token when connect fails", () => {
@@ -431,7 +616,7 @@ describe("subscribeSpacetimeWorld", () => {
     let removed: string | null = null
     let scheduled = false
 
-    const stop = subscribeSpacetimeWorld((world) => worlds.push(world), {
+    const stop = subscribeCloudflareWorld((world) => worlds.push(world), {
       flags: { CHAT_WORLD_MULTIPLAYER: true },
       runRef,
       nowMs: () => 1_000,
@@ -472,7 +657,7 @@ describe("subscribeSpacetimeWorld", () => {
       ok: false,
       reason: "multiplayer client unavailable",
     })
-    expect(removed).toBe("openagents.world.spacetimedb.token.v1")
+    expect(removed).toBe("openagents.world.cloudflare.session.v1")
     expect(scheduled).toBe(false)
   })
 
@@ -578,12 +763,12 @@ describe("subscribeSpacetimeWorld", () => {
       displayName: "Sender",
       runRef,
       nowMs: () => nowMs,
-      worldUrl: "https://spacetime.openagents.com",
+      worldUrl: "https://openagents-world.openagents.workers.dev",
     })
     sender.joinRegion()
 
     const receiverWorlds: ChatWorldMultiplayerProjection[] = []
-    const stopReceiver = subscribeSpacetimeWorld(
+    const stopReceiver = subscribeCloudflareWorld(
       (world) => receiverWorlds.push(world),
       {
         flags: { CHAT_WORLD_MULTIPLAYER: true },
@@ -659,7 +844,7 @@ describe("subscribeSpacetimeWorld", () => {
     }
 
     expect(
-      publishSpacetimeAvatarPosition(connection, {
+      publishCloudflareAvatarPosition(connection, {
         ok: false,
         reason: "position outside region bounds",
       }),
@@ -667,7 +852,7 @@ describe("subscribeSpacetimeWorld", () => {
     expect(writes).toEqual([])
 
     expect(
-      publishSpacetimeAvatarPosition(connection, {
+      publishCloudflareAvatarPosition(connection, {
         ok: true,
         write: {
           regionRef,
@@ -707,7 +892,7 @@ describe("subscribeSpacetimeWorld", () => {
       displayName: "Local Pylon",
       runRef,
       nowMs: () => 2_000,
-      worldUrl: "https://spacetime.openagents.com",
+      worldUrl: "https://openagents-world.openagents.workers.dev",
     })
 
     client.joinRegion()
@@ -721,7 +906,7 @@ describe("subscribeSpacetimeWorld", () => {
       capturedAtMs: 2_000,
     })
 
-    expect(joins).toEqual([{ regionRef, displayName: "Local Pylon" }])
+    expect(joins).toEqual([{ regionRef, displayName: "Local Pylon", characterId: "main" }])
     expect(plan).toMatchObject({ ok: true })
     expect(writes).toEqual([{
       regionRef,
@@ -731,6 +916,7 @@ describe("subscribeSpacetimeWorld", () => {
       yaw: 0.123,
       pitch: 0,
       movementMode: "walking",
+      characterId: "main",
     }])
   })
 
@@ -747,7 +933,7 @@ describe("subscribeSpacetimeWorld", () => {
       displayName: "Local Pylon",
       runRef,
       nowMs: () => 1_000,
-      worldUrl: "https://spacetime.openagents.com",
+      worldUrl: "https://openagents-world.openagents.workers.dev",
     })
     client.joinRegion()
 
@@ -818,7 +1004,7 @@ describe("subscribeSpacetimeWorld", () => {
       displayName: "Local Pylon",
       runRef,
       nowMs: () => 1_000,
-      worldUrl: "https://spacetime.openagents.com",
+      worldUrl: "https://openagents-world.openagents.workers.dev",
     })
     client.joinRegion()
 

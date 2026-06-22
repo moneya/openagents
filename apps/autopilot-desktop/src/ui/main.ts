@@ -24,17 +24,43 @@ import {
 import { type DesktopRequests, pushInbound, setRequest } from "./bridge.js"
 import { initialRuntimeState } from "./initial-state.js"
 import {
+  ChangedComposerReply,
+  ChangedSpawnObjective,
+  ChangedVerseMode,
   ChangedShellInput,
   GotNodeLaunchStatus,
   GotNodeState,
   GotNotifications,
   GotPylonStats,
+  NavigatedTo,
+  OpenedManagedPane,
+  SelectedComposerAccount,
+  SucceededComposerTurn,
   SubmittedShell,
 } from "./message.js"
+import type { PaneId } from "./model.js"
 import { Model } from "./model.js"
 import { subscriptions } from "./subscriptions.js"
 import { update } from "./update.js"
 import { view } from "./view.js"
+
+declare global {
+  interface Window {
+    __OA_ENABLE_DESKTOP_SMOKE_HOOK?: boolean
+    __OA_DESKTOP_SMOKE__?: Readonly<{
+      enterCodeMode: () => void
+      exitCodeMode: () => void
+      navigateTo: (pane: PaneId) => void
+      openPane: (pane: PaneId) => boolean
+      setComposerSession: (sessionRef: string) => void
+      selectComposerAccount: (accountRef: string | null) => void
+      setComposerObjective: (value: string) => void
+      setComposerReply: (value: string) => void
+      pushNodeState: (node: unknown) => void
+      setNodeLaunchStatus: (status: string) => void
+    }>
+  }
+}
 
 // Dev error boundary: when a render/update crashes, Foldkit's `crash.view`
 // replaces the (otherwise blank) screen with the error + stack so failures are
@@ -137,6 +163,47 @@ new Electroview({ rpc })
 // rpc.request mirrors the DesktopRequests surface (webview → Bun verbs).
 setRequest(rpc.request as unknown as DesktopRequests)
 
+const smokePaneIds = new Set<PaneId>([
+  "agent-stream",
+  "accounts",
+  "composer",
+  "decisions",
+  "diagnostics",
+  "diff-artifacts",
+  "session-detail",
+  "sessions",
+  "swarm",
+  "terminal-log",
+])
+
+const smokeHookEnabled = (): boolean =>
+  window.__OA_ENABLE_DESKTOP_SMOKE_HOOK === true ||
+  new URLSearchParams(window.location.search).has("__oa_desktop_smoke")
+
+if (smokeHookEnabled()) {
+  window.__OA_DESKTOP_SMOKE__ = Object.freeze({
+    enterCodeMode: () => pushInbound(ChangedVerseMode({ mode: "code" })),
+    exitCodeMode: () => pushInbound(ChangedVerseMode({ mode: "explore" })),
+    navigateTo: (pane) => pushInbound(NavigatedTo({ pane })),
+    openPane: (pane) => {
+      if (!smokePaneIds.has(pane)) return false
+      pushInbound(OpenedManagedPane({ pane }))
+      return true
+    },
+    setComposerSession: (sessionRef) =>
+      pushInbound(SucceededComposerTurn({ sessionRef })),
+    selectComposerAccount: (accountRef) =>
+      pushInbound(SelectedComposerAccount({ accountRef })),
+    setComposerObjective: (value) =>
+      pushInbound(ChangedSpawnObjective({ value })),
+    setComposerReply: (value) =>
+      pushInbound(ChangedComposerReply({ value })),
+    pushNodeState: (node) => pushInbound(GotNodeState({ node })),
+    setNodeLaunchStatus: (status) =>
+      pushInbound(GotNodeLaunchStatus({ status })),
+  })
+}
+
 // External links MUST open in the system browser — never navigate this webview.
 // A raw `<a href="https://…">` click would otherwise load the external page
 // INSIDE the app, stranding the user off the local UI (e.g. on github.com) with
@@ -161,6 +228,82 @@ document.addEventListener(
   true,
 )
 
+const isEditableElement = (element: Element | null): boolean => {
+  if (!(element instanceof HTMLElement)) return false
+  if (element.isContentEditable) return true
+  const tag = element.tagName.toLowerCase()
+  return tag === "input" || tag === "textarea" || tag === "select"
+}
+
+const shouldPreserveCurrentFocus = (): boolean => {
+  const active = document.activeElement
+  return (
+    active !== null &&
+    active !== document.body &&
+    active !== document.documentElement &&
+    active.getAttribute("data-verse-focus-root") !== "true"
+  )
+}
+
+const focusElementPreventScroll = (element: HTMLElement): void => {
+  try {
+    element.focus({ preventScroll: true })
+  } catch {
+    element.focus()
+  }
+}
+
+type VerseLaunchFocusResult = "canvas" | "fallback" | "missing" | "preserved"
+
+const focusVerseSceneTarget = (): VerseLaunchFocusResult => {
+  if (isEditableElement(document.activeElement)) return "preserved"
+  if (shouldPreserveCurrentFocus()) return "preserved"
+  const root = document.querySelector("[data-verse-focus-root='true']")
+  if (!(root instanceof HTMLElement)) return "missing"
+  try {
+    window.focus()
+  } catch {
+    // Some test/browser shells expose a no-op or throwing focus implementation.
+  }
+  const host = root.querySelector(".three-effect-chat-scene")
+  const canvas = host?.shadowRoot?.querySelector("canvas")
+  if (canvas instanceof HTMLCanvasElement) {
+    canvas.tabIndex = -1
+    focusElementPreventScroll(canvas)
+    return "canvas"
+  }
+  focusElementPreventScroll(root)
+  return "fallback"
+}
+
+let verseLaunchFocusInstalled = false
+
+const scheduleVerseLaunchFocus = (): void => {
+  let attempts = 0
+  const tick = (): void => {
+    attempts += 1
+    const result = focusVerseSceneTarget()
+    if (result === "canvas" || result === "preserved") return
+    if (attempts < 30) {
+      window.setTimeout(tick, 50)
+    }
+  }
+  window.setTimeout(tick, 0)
+}
+
+const installVerseLaunchFocus = (): void => {
+  if (verseLaunchFocusInstalled) return
+  verseLaunchFocusInstalled = true
+  scheduleVerseLaunchFocus()
+  window.addEventListener("focus", scheduleVerseLaunchFocus)
+  window.addEventListener("pageshow", scheduleVerseLaunchFocus)
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      scheduleVerseLaunchFocus()
+    }
+  })
+}
+
 function start(): void {
   Runtime.run(
     Runtime.makeProgram({
@@ -176,6 +319,7 @@ function start(): void {
       },
     }),
   )
+  installVerseLaunchFocus()
 }
 
 if (document.readyState === "loading") {

@@ -1,4 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import {
+  openAgentsDefaultInputProfile,
+  type OpenAgentsInputProfile,
+} from "@openagentsinc/input-bindings"
+import {
+  canRetainTrainingRunVisualization,
+  pointerClickPickFromGesture,
+} from "@openagentsinc/three-effect/core"
 
 import {
   agentCharacterCreationFlag,
@@ -16,6 +24,7 @@ import { VERSE_TASSADAR_BULLETIN_ITEM_ID } from "../src/shared/verse-bulletin-bo
 import { initialRuntimeState } from "../src/ui/initial-state"
 import {
   ChangedVerseLocalPose,
+  ChangedInputProfile,
   GotChatWorldScene,
   GotNodeState,
   GotOnboardingStatus,
@@ -30,6 +39,7 @@ import {
 } from "../src/ui/verse-scene-diagnostics"
 import { clearLatestVerseLocalPoseForTest } from "../src/ui/verse-local-pose"
 import { verseSceneVisualization, view } from "../src/ui/view"
+import { verseInputBindingProjection } from "../src/ui/verse-input-bindings"
 
 const verseEnvKeys = [
   "VITE_DISABLE_VERSE",
@@ -95,6 +105,17 @@ const livePylonScene = (
   ...overrides,
 })
 
+const ijklInputProfile = (): OpenAgentsInputProfile => ({
+  ...openAgentsDefaultInputProfile,
+  profileId: "test-ijkl",
+  bindings: {
+    ...openAgentsDefaultInputProfile.bindings,
+    "movement.forward": [{ type: "keyboard_code", code: "KeyI" }],
+    "target.next": [{ type: "keyboard_code", code: "KeyE" }],
+    "target.previous": [{ type: "keyboard_code", code: "KeyQ" }],
+  },
+})
+
 describe("Verse packaged launch checklist (#5827)", () => {
   afterEach(() => {
     clearVerseEnv()
@@ -150,6 +171,7 @@ describe("Verse packaged launch checklist (#5827)", () => {
 
     expect(tree).toContain("app-shell-verse")
     expect(tree).toContain("data-verse-mode")
+    expect(tree).toContain("data-verse-focus-root")
     expect(tree).toContain("explore")
     expect(tree).toContain("chat-pane-world")
     expect(tree).toContain("three-effect-chat-scene")
@@ -171,7 +193,11 @@ describe("Verse packaged launch checklist (#5827)", () => {
     expect(tree).not.toContain("chat-message-list")
     expect(tree).not.toContain("verse-bottom-hud")
     expect(tree).not.toContain("chat-composer-verse")
-    expect(tree).not.toContain("hotbar-slot")
+    expect(tree).toContain("hotbar-slot")
+    expect(tree).toContain("hotbar-slot-coder")
+    expect(tree).toContain("data-hotbar-icon")
+    expect(tree).toContain("OpenaiLogoRegular")
+    expect(tree).toContain("New Coder Session")
     expect(tree).not.toContain("Command palette")
     expect(tree).not.toContain("Send message")
     expect(tree).not.toContain("Send")
@@ -191,6 +217,122 @@ describe("Verse packaged launch checklist (#5827)", () => {
     expect(tree).not.toContain("Sessions")
     expect(tree).not.toContain("Swarm")
     expect(tree).not.toContain("Deploy")
+  })
+
+  test("Verse input profiles project movement and target bindings", () => {
+    const projection = verseInputBindingProjection(
+      ijklInputProfile(),
+      "verse_explore",
+    )
+
+    expect(projection.profileId).toBe("test-ijkl")
+    expect(projection.activeContext).toBe("verse_explore")
+    expect(projection.movement.forward).toEqual(["KeyI"])
+    expect(projection.movement.backward).toEqual(["KeyS", "ArrowDown"])
+    expect(projection.keyboardTargeting.bindings?.next).toEqual([
+      {
+        altKey: false,
+        code: "KeyE",
+        ctrlKey: false,
+        metaKey: false,
+        shiftKey: false,
+      },
+    ])
+    expect(projection.lastResolvedAction).toBeNull()
+  })
+
+  test("shared pointer picking keeps mouselook drags out of click selection", () => {
+    expect(
+      pointerClickPickFromGesture({
+        buttonDown: 0,
+        buttonUp: 0,
+        downAtMs: 100,
+        upAtMs: 170,
+        downX: 320,
+        downY: 240,
+        upX: 327,
+        upY: 244,
+        pointerLocked: false,
+        releasedOnCanvas: true,
+      }),
+    ).toBe(true)
+    expect(
+      pointerClickPickFromGesture({
+        buttonDown: 0,
+        buttonUp: 0,
+        downAtMs: 100,
+        upAtMs: 170,
+        downX: 320,
+        downY: 240,
+        upX: 381,
+        upY: 246,
+        pointerLocked: false,
+        releasedOnCanvas: true,
+      }),
+    ).toBe(false)
+  })
+
+  test("input profile changes update Verse bindings without rebuilding the scene", () => {
+    clearVerseEnv()
+    const [initial] = initialRuntimeState()
+    const movedPose = {
+      regionRef: "region.run.tassadar.executor.20260615",
+      x: 7.25,
+      y: 0,
+      z: -3.5,
+      yaw: 0.75,
+      animation: "run" as const,
+      capturedAtMs: 12_345,
+    }
+    const [afterMove] = update(
+      initial,
+      ChangedVerseLocalPose({ pose: movedPose }),
+    )
+    const [withScene] = update(
+      afterMove,
+      GotChatWorldScene({ scene: livePylonScene() }),
+    )
+    const before = verseSceneVisualization(withScene)
+    const [withProfile] = update(
+      withScene,
+      ChangedInputProfile({ profile: ijklInputProfile() }),
+    )
+    const after = verseSceneVisualization(withProfile)
+
+    expect(withProfile.verseSceneRestorePose).toEqual(
+      withScene.verseSceneRestorePose,
+    )
+    expect(before.thirdPersonController?.keyboardBindings?.forward).toEqual([
+      "KeyW",
+      "ArrowUp",
+    ])
+    expect(after.thirdPersonController?.keyboardBindings?.forward).toEqual([
+      "KeyI",
+    ])
+    expect(after.thirdPersonController?.initialPosition).toEqual([
+      7.25,
+      0,
+      -3.5,
+    ])
+    expect(after.keyboardTargeting?.bindings?.next).toEqual([
+      {
+        altKey: false,
+        code: "KeyE",
+        ctrlKey: false,
+        metaKey: false,
+        shiftKey: false,
+      },
+    ])
+    expect(canRetainTrainingRunVisualization(before, after)).toBe(true)
+    expect(
+      verseSceneDiagnostics().some(
+        entry =>
+          entry.event === "input.profile" &&
+          entry.detail.profileId === "test-ijkl" &&
+          entry.detail.activeContext === "verse_explore" &&
+          entry.detail.lastResolvedAction === null,
+      ),
+    ).toBe(true)
   })
 
   test("the top-left Pylon sats HUD refreshes from live node wallet balances", () => {

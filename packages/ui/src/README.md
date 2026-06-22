@@ -11,11 +11,15 @@ Notes for future consolidation work:
   still hardcodes its output path; if regenerating, point it at
   `packages/ui/src/icon.ts` instead of the old app path
   (`apps/openagents.com/apps/web/src/icon.ts`, now a thin re-export shim).
-- The moved kit families do not reference a design-tokens module; they compose
-  Tailwind utilities directly. No `./tokens` export is needed for this package
-  yet. `@openagentsinc/autopilot-ui` keeps its own Autopilot-specific
-  `./tokens` and is unaffected. TODO: revisit token consolidation in a later
-  phase if/when a shared token source emerges.
+- Most moved kit families still compose Tailwind utilities directly during the
+  StyleX migration. The P0 StyleX slice added `stylex-foldkit.ts` for adapting
+  `stylex.attrs(...)` into Foldkit attributes. P1 moved shared Autopilot dark
+  values to `@openagentsinc/design-tokens`; `tokens.ts` re-exports that neutral
+  package for UI consumers, while `tokens.stylex.ts` defines StyleX variable
+  aliases for the existing Foldkit CSS custom properties. P2 moved the first
+  shared render helpers, form controls, and Prompt Input AI Element through the
+  StyleX adapter while keeping legacy class exports for not-yet-migrated
+  families.
 - `tenant-theme.ts` and `credits-panel.ts` remain app-local in
   `apps/openagents.com/apps/web/src/ui/` and import shared bits from
   `@openagentsinc/ui`.
